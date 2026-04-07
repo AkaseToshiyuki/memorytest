@@ -1,0 +1,8 @@
+bin/
+*.o
+*.a
+reports/*.md
+.cache
+*.log
+src/memory_benchmark
+.cache_config
