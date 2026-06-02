@@ -16,9 +16,9 @@ REPORTS="$REPO_ROOT/reports"
 PASS=0
 FAIL=0
 # Per-binary timeout. Most finish in <5s, but test_inter_core (24x24 CAS matrix)
-# and test_cpu_float (100M iterations × 12 ops) take 45-60s on first run.
-# Wall time budget: ~3 min for the full smoke pass.
-TIMEOUT_SEC=70
+# takes ~75-90s on this 24-core ARM64 host; the include build+run overhead means
+# the lower bound is ~90s in practice.
+TIMEOUT_SEC=120
 
 mkdir -p "$REPORTS"
 

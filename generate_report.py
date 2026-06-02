@@ -202,32 +202,45 @@ def run_test(test_name, verbose=False):
     print(f"Running: {test['name']}")
     print(f"{'='*60}")
 
+    # Ensure reports/ exists for stdout redirect target
+    report_path = os.path.join(REPORTS_DIR, test["report"])
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
     if _sudo_password:
         result = subprocess.run(
             ['sudo', '-S', bin_path],
             cwd=SCRIPT_DIR,
             input=_sudo_password + '\n',
             text=True,
-            capture_output=False
+            capture_output=True  # capture stdout (the markdown report) so we can persist it
         )
     else:
         result = subprocess.run(
             [bin_path],
             cwd=SCRIPT_DIR,
-            capture_output=False
+            capture_output=True,
+            text=True
         )
 
     if result.returncode != 0:
-        print(f"Test failed: {test_name}")
+        print(f"Test failed: {test_name} (rc={result.returncode})")
+        if result.stderr:
+            print(result.stderr[:500])
         return False
 
-    report_path = os.path.join(REPORTS_DIR, test["report"])
-    if os.path.exists(report_path):
-        print(f"\n[Report] Generated: {report_path}")
-        return True
-    else:
-        print(f"\n[Warning] Report file not found: {report_path}")
-        return True
+    # Persist captured stdout to the expected markdown report path.
+    # Each binary prints a full markdown report to stdout; without this redirect
+    # the report file would never exist and downstream PDF generation would
+    # see zero passes.
+    try:
+        with open(report_path, 'w', encoding='utf-8') as fh:
+            fh.write(result.stdout)
+        print(f"\n[Report] Generated: {report_path} ({len(result.stdout)} bytes)")
+    except OSError as exc:
+        print(f"\n[Error] Could not write report: {exc}")
+        return False
+
+    return True
 
 
 def list_tests():

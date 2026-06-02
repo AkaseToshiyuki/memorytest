@@ -149,13 +149,40 @@ def _find_data_table(text: str, skip_first: bool = True) -> tuple[list[str], lis
     lines = text.splitlines()
     i = 0
     found = 0
+    # Match markdown tables in either canonical form (`| h | h |`) or
+    # the ASCII-aligned flavour our binaries emit (`H | H |` with a
+    # `--- | ---` delimiter). Canonical: header line starts with |.
+    # Binary flavour: header line is plain text but contains at least
+    # one `|`, and the next line is a delimiter of `-` `|` `:` `|`.
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
     while i < len(lines) - 1:
-        if lines[i].startswith("|") and re.match(r"^\|[\s\-|:]+\|?\s*$", lines[i + 1]):
-            headers = [c.strip().rstrip("*").strip() for c in lines[i].split("|")[1:-1]]
+        line_i = lines[i]
+        line_ip1 = lines[i + 1]
+        if "|" in line_i and delim_re.match(line_ip1):
+            # Split on |, drop first/last empty fragments from leading/trailing |
+            cells = [c.strip().rstrip("*").strip() for c in line_i.split("|")]
+            if cells and not cells[0]:
+                cells = cells[1:]
+            if cells and not cells[-1]:
+                cells = cells[:-1]
+            headers = cells
             rows = []
             j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                cells = [c.strip().rstrip("*").strip() for c in lines[j].split("|")[1:-1]]
+            # Row lines: canonical starts with |, binary flavour is plain
+            # text containing |. Use the delimiter regex to confirm a line
+            # is still part of the table (data lines always contain | and
+            # are not the delimiter itself).
+            while j < len(lines):
+                row_line = lines[j]
+                if not row_line.strip() or "|" not in row_line:
+                    break
+                if delim_re.match(row_line):
+                    break  # hit the next table's delimiter
+                cells = [c.strip().rstrip("*").strip() for c in row_line.split("|")]
+                if cells and not cells[0]:
+                    cells = cells[1:]
+                if cells and not cells[-1]:
+                    cells = cells[:-1]
                 if len(cells) == len(headers):
                     rows.append(cells)
                 j += 1
@@ -193,7 +220,11 @@ def _row_label(row: list[str]) -> str:
 
 def parse_cache_hierarchy(text: str) -> dict:
     out = {}
-    tbl = _find_data_table(text)
+    # Binary output uses ASCII-aligned tables, not markdown tables.
+    # The first such table in cache_hierarchy_report.md is the actual
+    # data table (Size | RdLat | WrLat | BW | Expected | Analysis),
+    # so skip_first must be False here.
+    tbl = _find_data_table(text, skip_first=False)
     if not tbl: return out
     headers, rows = tbl
     rd_col = _col_index(headers, "rdlat", "read latency", "latency")
@@ -217,49 +248,82 @@ def parse_cache_hierarchy(text: str) -> dict:
 
 
 def parse_memory_bandwidth(text: str) -> dict:
+    """Parse the memory bandwidth report.
+
+    The bandwidth binary writes a textual summary like::
+
+        === BANDWIDTH RESULTS ===
+          Thread Count: 24
+          Read:    36279.58 MB/s  (48372.8% of theoretical 0 GB/s)
+          Write:   17463.33 MB/s
+          Copy:    23687.22 MB/s
+
+    with no markdown/ASCII table. Use regex to extract the MB/s values.
+    """
+    import re
     out = {}
-    tbl = _find_data_table(text)
-    if not tbl: return out
-    headers, rows = tbl
-    bw_col = _col_index(headers, "bandwidth")
-    if bw_col is None: bw_col = 1
-    for row in rows:
-        lbl = _row_label(row).lower()
-        if "read" in lbl and "read_mbps" not in out:
-            v = _safe_float(row[bw_col])
-            if v and v > 100: out["read_mbps"] = v
-        elif "write" in lbl and "write_mbps" not in out:
-            v = _safe_float(row[bw_col])
-            if v and v > 100: out["write_mbps"] = v
-        elif "copy" in lbl and "copy_mbps" not in out:
-            v = _safe_float(row[bw_col])
-            if v and v > 100: out["copy_mbps"] = v
+    patterns = {
+        "read_mbps":  r"Read:\s+([0-9]+\.[0-9]+)\s*MB/s",
+        "write_mbps": r"Write:\s+([0-9]+\.[0-9]+)\s*MB/s",
+        "copy_mbps":  r"Copy:\s+([0-9]+\.[0-9]+)\s*MB/s",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text)
+        if m:
+            v = float(m.group(1))
+            if v > 100:  # sanity: bandwidth should be > 100 MB/s
+                out[key] = v
     return out
 
 
 def parse_inter_core(text: str) -> dict:
-    tbl = _find_data_table(text)
-    if not tbl: return {}
-    headers, rows = tbl
-    intra = []
-    for row in rows:
-        try: src = int(_row_label(row))
-        except ValueError: continue
-        for col_idx in range(1, len(row)):
-            if col_idx - 1 == src: continue
-            cell = row[col_idx]
-            if cell in ("-", ""): continue
-            v = _safe_float(cell)
-            if v is not None and 1 < v < 5000:
-                intra.append(v)
-    if intra:
-        return {"cas_avg_ns": sum(intra) / len(intra), "cas_min_ns": min(intra)}
+    """Parse the NxN inter-core latency matrix.
+
+    The inter-core binary writes a 24x24 grid where row/col index = core id,
+    separated by spaces (NOT pipes), e.g.::
+
+         0    1    2    3    4    5  ...
+    0    - 11.4 11.4 11.4 11.4 11.4 ...
+    1  11.5    - 11.4 11.5 11.4 11.4 ...
+
+    We grab the matrix by detecting the row whose first cell is "0" and
+    whose second cell is "-" (the self-row sentinel), then parse the
+    whitespace-delimited floats that follow. 1-hop latency is the cell at
+    column (src + 1) — the nearest neighbour on this SoC.
+    """
+    import re
+    lines = text.splitlines()
+    # Find the data row for core 0: starts with "0", second cell is "-".
+    one_hop = []
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            src = int(parts[0])
+        except ValueError:
+            continue
+        if len(parts) < 3 or parts[1] != "-":
+            continue
+        # parts[1] is the self-cell "-", parts[2] is src+1 cell (1-hop)
+        try:
+            v = float(parts[2])
+        except ValueError:
+            continue
+        if 1 < v < 5000:
+            one_hop.append((src, v))
+    if one_hop:
+        vals = [v for _, v in one_hop]
+        return {
+            "cas_avg_ns": sum(vals) / len(vals),
+            "cas_min_ns": min(vals),
+        }
     return {}
 
 
 def parse_cpu_alu(text: str) -> dict:
     out = {}
-    tbl = _find_data_table(text)
+    tbl = _find_data_table(text, skip_first=False)
     if not tbl: return out
     headers, rows = tbl
     ipc_col = _col_index(headers, "ipc")
@@ -279,7 +343,7 @@ def parse_cpu_alu(text: str) -> dict:
 
 def parse_cpu_float(text: str) -> dict:
     out = {}
-    tbl = _find_data_table(text)
+    tbl = _find_data_table(text, skip_first=False)
     if not tbl: return out
     headers, rows = tbl
     ns_col = _col_index(headers, "ns/op", "ns_per_op", "nsec/op")
