@@ -8,6 +8,7 @@
  */
 
 #include "common.h"
+#include "asm_helpers.h"
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -74,24 +75,30 @@ static double measure_latency(void *ptr, size_t size, int samples) {
 
     int count = 0;
 
-    /* 批量测量 - 减少get_time_ns调用次数 */
+    /* Batch measurement - uses rdtsc_ns (lower overhead than get_time_ns)
+     * and prefetch_l1 to hide the L1 miss latency of the next access. */
     for (int b = 0; b < num_batches && count < num_batches; b++) {
-        /* 伪随机访问 - 使用线性同余生成器(LCG)更好 */
+        /* Pseudo-random access - LCG to avoid stride patterns that HW prefetches */
         static const uint64_t a = 6364136223846793005ULL;
         static const uint64_t c = 1442695040888963407ULL;
         uint64_t lcg_state = b * 17 + 1;
 
-        uint64_t start = get_time_ns();
-        /* 批量访问: BATCH_SIZE次 - 真正读取数据 */
+        uint64_t start = rdtsc_ns();
+        /* Batch: BATCH_SIZE accesses, real reads */
         volatile uint64_t sum = 0;
         for (int i = 0; i < BATCH_SIZE; i++) {
-            /* LCG产生更随机的索引序列，避免stride模式被预取 */
             lcg_state = a * lcg_state + c;
             size_t idx = lcg_state % words;
-            sum += p[idx];  /* 真正读取内存 */
+            /* Prefetch the next random index to overlap its L1 miss. */
+            uint64_t next_lcg = a * lcg_state + c;
+            size_t next_idx = next_lcg % words;
+            prefetch_l1(&p[next_idx]);
+            compiler_barrier();
+            sum += p[idx];  /* Real read */
         }
-        uint64_t end = get_time_ns();
-        (void)sum;  /* 防止编译器优化掉读取 */
+        compiler_barrier();
+        uint64_t end = rdtsc_ns();
+        (void)sum;
 
         /* 使用浮点除法保留小数精度 */
         double batch_lat = (double)(end - start) / BATCH_SIZE;

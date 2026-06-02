@@ -6,6 +6,7 @@
  * Split from monolithic common.c (2026-06-02).
  */
 #include "common.h"
+#include "asm_helpers.h"
 #include <stddef.h>
 #include <stdarg.h>
 #include <string.h>
@@ -15,6 +16,11 @@
 #include <linux/types.h>
 
 static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
+    /* asm_helpers.h: rdtsc_ns() replaces clock_gettime (~30-50ns → ~12-20ns).
+     * The pointer cast stays volatile to prevent the compiler from
+     * hoisting the load out of the timing window, but we add a
+     * compiler_barrier() before the cycle counter read to guarantee
+     * the load completes first. */
     volatile uint64_t *p = (volatile uint64_t *)ptr;
     size_t words = size / sizeof(uint64_t);
     if (words < 8) words = 8;
@@ -34,23 +40,33 @@ static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
         uint64_t idx;
 
         if (sequential) {
-            /* Sequential access: stride-1 */
-            start = get_time_ns();
+            /* Sequential access: stride-1. Prefetch next line to overlap
+             * the L1 miss latency with the next load. */
+            start = rdtsc_ns();
             for (size_t i = 0; i < 64; i++) {
                 idx = i & (words - 1);
+                prefetch_l1(&p[(i + 8) & (words - 1)]);  /* +8 lines ahead */
+                compiler_barrier();
                 volatile uint64_t val = p[idx];
                 (void)val;
             }
-            end = get_time_ns();
+            compiler_barrier();
+            end = rdtsc_ns();
         } else {
-            /* Random access: use prime stride to avoid predictability */
-            start = get_time_ns();
+            /* Random access: use prime stride to avoid predictability.
+             * Prefetch the *next* random access, which the CPU is unlikely
+             * to predict on its own. */
+            start = rdtsc_ns();
             for (size_t i = 0; i < 64; i++) {
                 idx = ((i * 17) + 1) & (words - 1);
+                size_t next_idx = (((i + 1) * 17) + 1) & (words - 1);
+                prefetch_l1(&p[next_idx]);
+                compiler_barrier();
                 volatile uint64_t val = p[idx];
                 (void)val;
             }
-            end = get_time_ns();
+            compiler_barrier();
+            end = rdtsc_ns();
         }
 
         measurements[m] = (end - start) / 64;  /* ns per access */

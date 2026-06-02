@@ -3,7 +3,14 @@
 CC ?= gcc
 # Default CFLAGS (-O2). Can be overridden via `make CFLAGS="..."` or the
 # release/opt targets below.
-CFLAGS ?= -O2 -Wall -std=c11 -pthread
+#
+# Notes on warnings:
+#  -Wno-unused-function: every test_*.c links the entire common module set,
+#   and not every helper is used by every binary. Linker errors would catch
+#   truly dead code; the warning is noise. Keep it off.
+#  -Wno-unused-result: read/fscanf/system calls in detect.c that we don't
+#   care about the return value of. Tightening these up is a future cleanup.
+CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers
 LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
