@@ -18,9 +18,10 @@
 #include <sys/syscall.h>
 #include <time.h>
 
-#define NUM_SAMPLES 300
+#define NUM_SAMPLES 50           /* Samples for latency measurement */
 #define ROUND_TRIPS_PER_SAMPLE 10000
-#define MAX_CORES 16
+#define BW_ITERATIONS 100000     /* Iterations for bandwidth measurement (per pair) */
+#define MAX_CORES 256            /* Maximum supported cores (for static arrays) */
 
 /* ========== 同步屏障 ========== */
 static pthread_barrier_t barrier;
@@ -43,15 +44,6 @@ static long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid, int
 /* ========== PMU时钟 - 使用thread-local计数器 ========== */
 static pthread_key_t pmu_fd_key;
 static pthread_once_t pmu_key_once = PTHREAD_ONCE_INIT;
-static int pmu_cycles_config = 0;
-static double cpu_freq_mhz = 2600.0;  // 默认值，会在运行时更新
-
-/* 设置CPU频率供计时使用 */
-static void set_cpu_freq(int freq_khz) {
-    if (freq_khz > 0) {
-        cpu_freq_mhz = freq_khz / 1000.0;
-    }
-}
 
 static void pmu_key_create(void) {
     pthread_key_create(&pmu_fd_key, free);
@@ -136,7 +128,7 @@ static void *bw_ping(void *arg) {
 
     pthread_barrier_wait(&barrier);
 
-    for (int i = 0; i < ROUND_TRIPS_PER_SAMPLE * NUM_SAMPLES; i++) {
+    for (int i = 0; i < BW_ITERATIONS; i++) {
         bool expected = true;
         while (!atomic_compare_exchange_weak_explicit(flag, &expected, false,
                                                       memory_order_relaxed,
@@ -158,7 +150,7 @@ static void *bw_pong(void *arg) {
 
     pthread_barrier_wait(&barrier);
 
-    for (int i = 0; i < ROUND_TRIPS_PER_SAMPLE * NUM_SAMPLES; i++) {
+    for (int i = 0; i < BW_ITERATIONS; i++) {
         bool expected = false;
         while (!atomic_compare_exchange_weak_explicit(flag, &expected, true,
                                                       memory_order_relaxed,
@@ -225,7 +217,7 @@ static void *cas_ping(void *arg) {
 
         uint64_t end = get_cycles_pmu();
         uint64_t cycles = end - start;
-        double ns = (double)cycles * 1000.0 / cpu_freq_mhz;
+        double ns = (double)cycles * 1000.0 / get_cpu_freq_mhz();
         t->results[s] = ns / ROUND_TRIPS_PER_SAMPLE / 2;
     }
 
@@ -289,7 +281,7 @@ static void run_cas_test(int core0, int core1, double *results, int *count) {
 static void get_cpu_info(char *cpu_name, size_t len, int *max_freq_khz) {
     FILE *f;
     cpu_name[0] = '\0';
-    *max_freq_khz = 0;
+    if (max_freq_khz) *max_freq_khz = 0;
 
     f = fopen("/proc/cpuinfo", "r");
     if (f) {
@@ -327,7 +319,9 @@ static void get_cpu_info(char *cpu_name, size_t len, int *max_freq_khz) {
 
     f = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
     if (f) {
-        fscanf(f, "%d", max_freq_khz);
+        if (max_freq_khz) {
+            fscanf(f, "%d", max_freq_khz);
+        }
         fclose(f);
     }
 }
@@ -344,12 +338,10 @@ void run_inter_core_latency_test(void) {
     /* PMU使用thread-local方式初始化 */
 
     char cpu_name[128];
-    int max_freq_khz;
-    get_cpu_info(cpu_name, sizeof(cpu_name), &max_freq_khz);
-    set_cpu_freq(max_freq_khz);
+    get_cpu_info(cpu_name, sizeof(cpu_name), NULL);  /* CPU name only, freq from common config */
 
     printf("Detected %ld CPU cores\n", num_cpus);
-    printf("CPU: %s @ %d MHz\n", cpu_name, max_freq_khz > 0 ? max_freq_khz / 1000 : 0);
+    printf("CPU: %s @ %d MHz\n", cpu_name, get_cpu_freq_mhz());
     printf("Clock: %s\n", get_clock_source());
     printf("Optimizations: PMU clock + LDAPR/STLR + CAS + wfe/sev\n\n");
 
@@ -359,13 +351,15 @@ void run_inter_core_latency_test(void) {
         return;
     }
 
-    int max_cores = (num_cpus > 8) ? 8 : (int)num_cpus;
+    int max_cores = (int)num_cpus;
 
     printf("=== CAS Latency (ns) ===\n\n");
+    printf("Measuring all %d x %d = %d core pairs...\n\n", max_cores, max_cores, max_cores * max_cores);
 
-    printf("%-6s", "");
+    /* Compact display: use 5-char fields to fit more cores */
+    printf("%-5s", "");
     for (int j = 0; j < max_cores; j++) {
-        printf("%-8d", j);
+        printf("%5d", j);
     }
     printf("\n");
 
@@ -373,11 +367,12 @@ void run_inter_core_latency_test(void) {
     double total_lat = 0;
     int total_count = 0;
 
+    /* Full N×N matrix measurement */
     for (int i = 0; i < max_cores; i++) {
-        printf("%-6d", i);
+        printf("%-5d", i);
         for (int j = 0; j < max_cores; j++) {
             if (i == j) {
-                printf("%-8s", "-");
+                printf("%5s", "-");
             } else {
                 int count = 0;
                 run_cas_test(i, j, results, &count);
@@ -385,17 +380,18 @@ void run_inter_core_latency_test(void) {
                 if (count > 0) {
                     qsort(results, count, sizeof(double), compare_uint64);
                     double median = results[count / 2];
-                    printf("%-8.1f", median);
+                    printf("%5.1f", median);
                     if (median < min_lat) min_lat = median;
                     if (median > max_lat) max_lat = median;
                     total_lat += median;
                     total_count++;
                 } else {
-                    printf("%-8s", "N/A");
+                    printf("%5s", "N/A");
                 }
             }
         }
         printf("\n");
+        fflush(stdout);  /* Flush after each row for real-time feedback */
     }
 
     printf("\n");
@@ -408,9 +404,9 @@ void run_inter_core_latency_test(void) {
     /* ========== 核间带宽测试 ========== */
     printf("=== CAS Throughput (Mops/s) ===\n\n");
 
-    printf("%-6s", "");
+    printf("%-5s", "");
     for (int j = 0; j < max_cores; j++) {
-        printf("%-8d", j);
+        printf("%5d", j);
     }
     printf("\n");
 
@@ -418,13 +414,13 @@ void run_inter_core_latency_test(void) {
     int bw_count = 0;
 
     for (int i = 0; i < max_cores; i++) {
-        printf("%-6d", i);
+        printf("%-5d", i);
         for (int j = 0; j < max_cores; j++) {
             if (i == j) {
-                printf("%-8s", "-");
+                printf("%5s", "-");
             } else {
                 double bw = run_bandwidth_test(i, j);
-                printf("%-8.1f", bw);
+                printf("%5.1f", bw);
                 if (bw < min_bw) min_bw = bw;
                 if (bw > max_bw) max_bw = bw;
                 total_bw += bw;
@@ -432,6 +428,7 @@ void run_inter_core_latency_test(void) {
             }
         }
         printf("\n");
+        fflush(stdout);
     }
 
     printf("\n");
@@ -447,9 +444,19 @@ void run_inter_core_latency_test(void) {
         fprintf(json_fp, "{\n");
         fprintf(json_fp, "  \"cpu_name\": \"%s\",\n", cpu_name);
         fprintf(json_fp, "  \"num_cores\": %ld,\n", num_cpus);
-        fprintf(json_fp, "  \"max_freq_mhz\": %d,\n", max_freq_khz > 0 ? max_freq_khz / 1000 : 0);
+        fprintf(json_fp, "  \"max_freq_mhz\": %d,\n", get_cpu_freq_mhz());
         fprintf(json_fp, "  \"arch\": \"%s\",\n", arch_names[current_arch]);
-        fprintf(json_fp, "  \"cas_matrix\": [\n");
+        fprintf(json_fp, "  \"latency_stats\": {\n");
+        fprintf(json_fp, "    \"min_ns\": %.1f,\n", min_lat);
+        fprintf(json_fp, "    \"max_ns\": %.1f,\n", max_lat);
+        fprintf(json_fp, "    \"avg_ns\": %.1f\n", total_count > 0 ? total_lat / total_count : 0);
+        fprintf(json_fp, "  },\n");
+        fprintf(json_fp, "  \"throughput_stats\": {\n");
+        fprintf(json_fp, "    \"min_mops\": %.1f,\n", min_bw);
+        fprintf(json_fp, "    \"max_mops\": %.1f,\n", max_bw);
+        fprintf(json_fp, "    \"avg_mops\": %.1f\n", bw_count > 0 ? total_bw / bw_count : 0);
+        fprintf(json_fp, "  },\n");
+        fprintf(json_fp, "  \"cas_latency_matrix\": [\n");
         for (int i = 0; i < max_cores; i++) {
             fprintf(json_fp, "    [");
             for (int j = 0; j < max_cores; j++) {
@@ -546,7 +553,10 @@ void run_inter_core_latency_test(void) {
 }
 
 int main(int argc, char *argv[]) {
+    request_sudo_password();
     initialize_cache_config();
+    initialize_system_config();
+    pmu_init_cache_counters();
     print_system_info();
     run_inter_core_latency_test();
     return 0;

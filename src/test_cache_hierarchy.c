@@ -25,35 +25,204 @@ typedef struct {
 
 static __thread double thread_sum;
 
-/* ========== 单线程延迟测量 ========== */
+/* ========== 序列化CPU以确保准确的内存访问时间 ========== */
+static inline void cpu_relax(void) {
+#if defined(__x86_64__)
+    __asm__ volatile("" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("isb" ::: "memory");
+#endif
+}
+
+/* ========== 防止编译器优化 ========== */
+static inline void clobber(volatile void *p) {
+    __asm__ volatile("" : "+m"(*(volatile char *)p));
+}
+
+/* Double comparison for qsort */
+static int compare_double(const void *a, const void *b) {
+    double va = *(const double *)a;
+    double vb = *(const double *)b;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+}
+
+/* ========== 单线程延迟测量 - 批量方式减少开销 ========== */
 static double measure_latency(void *ptr, size_t size, int samples) {
     volatile uint64_t *p = (volatile uint64_t *)ptr;
     size_t words = size / sizeof(uint64_t);
 
-    uint64_t total = 0;
-    int count = 0;
+    /* 批量测量: 每批次访问数 */
+    const int BATCH_SIZE = 1024;
+    int num_batches = samples / BATCH_SIZE;
+    if (num_batches < 1) num_batches = 1;
 
-    /* 预热 */
-    for (size_t i = 0; i < words && i < 1000; i += 16) {
+    double *latencies = malloc(num_batches * sizeof(double));
+    if (!latencies) return 0;
+
+    /* 深度预热 - 确保所有数据在缓存中 */
+    for (size_t i = 0; i < words; i += 64) {
+        volatile uint64_t val = p[i];
+        (void)val;
+    }
+    /* 再预热一次 */
+    for (size_t i = 0; i < words; i += 64) {
         volatile uint64_t val = p[i];
         (void)val;
     }
 
-    /* 测量 */
-    for (int i = 0; i < samples; i++) {
-        size_t idx = (i * 17) % words;
+    int count = 0;
+
+    /* 批量测量 - 减少get_time_ns调用次数 */
+    for (int b = 0; b < num_batches && count < num_batches; b++) {
+        /* 伪随机访问 - 使用线性同余生成器(LCG)更好 */
+        static const uint64_t a = 6364136223846793005ULL;
+        static const uint64_t c = 1442695040888963407ULL;
+        uint64_t lcg_state = b * 17 + 1;
+
         uint64_t start = get_time_ns();
-        volatile uint64_t val = p[idx];
-        uint64_t end = get_time_ns();
-        uint64_t lat = end - start;
-        if (lat > 0 && lat < 10000) {
-            total += lat;
-            count++;
+        /* 批量访问: BATCH_SIZE次 - 真正读取数据 */
+        volatile uint64_t sum = 0;
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            /* LCG产生更随机的索引序列，避免stride模式被预取 */
+            lcg_state = a * lcg_state + c;
+            size_t idx = lcg_state % words;
+            sum += p[idx];  /* 真正读取内存 */
         }
+        uint64_t end = get_time_ns();
+        (void)sum;  /* 防止编译器优化掉读取 */
+
+        /* 使用浮点除法保留小数精度 */
+        double batch_lat = (double)(end - start) / BATCH_SIZE;
+        /* 过滤明显异常值 */
+        if (batch_lat > 0.1 && batch_lat < 10000.0) {
+            latencies[count++] = batch_lat;
+        }
+    }
+
+    double result = 0;
+    if (count > 0) {
+        /* 使用中位数 */
+        qsort(latencies, count, sizeof(double), compare_double);
+        int mid = count / 2;
+        if (count % 2 == 0) {
+            result = (latencies[mid - 1] + latencies[mid]) / 2.0;
+        } else {
+            result = latencies[mid];
+        }
+    }
+
+    free(latencies);
+    return result;
+}
+
+/* ========== 指针追逐延迟测量 - 真正随机的内存访问 ========== */
+static double measure_pointer_chase_latency(void *ptr, size_t size, int iterations) {
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+    size_t words = size / sizeof(uint64_t);
+
+    if (words < 16) return 0;
+
+    /* 构建链表: 每个元素指向另一个随机位置 */
+    size_t *indices = malloc(words * sizeof(size_t));
+    if (!indices) return 0;
+
+    /* 用确定性的方式构建链表，避免随机数生成开销 */
+    for (size_t i = 0; i < words; i++) {
+        /* 质数stride确保遍历覆盖整个数组 */
+        indices[i] = (i * 17 + 1) % words;
+    }
+
+    /* 预热: 沿着链表走一遍，确保所有数据从内存加载到缓存 */
+    size_t idx = 0;
+    for (size_t i = 0; i < words; i++) {
+        idx = indices[idx];
+        volatile uint64_t val = p[idx];  /* 真正读取 */
         (void)val;
     }
 
-    return (count > 0) ? (double)total / count : 0;
+    /* 测量: 多次指针追逐 */
+    const int INNER_LOOP = 64;
+    double total_lat = 0;
+    int valid_samples = 0;
+
+    for (int iter = 0; iter < iterations; iter++) {
+        idx = iter % words;  /* 从不同起点开始 */
+
+        uint64_t start = get_time_ns();
+        for (int i = 0; i < INNER_LOOP; i++) {
+            idx = indices[idx];
+            volatile uint64_t val = p[idx];  /* 真正读取 */
+            (void)val;
+        }
+        uint64_t end = get_time_ns();
+
+        double lat = (double)(end - start) / INNER_LOOP;
+        if (lat > 0.1 && lat < 10000.0) {
+            total_lat += lat;
+            valid_samples++;
+        }
+    }
+
+    free(indices);
+    return valid_samples > 0 ? total_lat / valid_samples : 0;
+}
+
+/* ========== 单线程写延迟测量 - 批量方式 ========== */
+static double measure_write_latency(void *ptr, size_t size, int samples) {
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+    size_t words = size / sizeof(uint64_t);
+
+    /* 批量测量 */
+    const int BATCH_SIZE = 1024;
+    int num_batches = samples / BATCH_SIZE;
+    if (num_batches < 1) num_batches = 1;
+
+    double *latencies = malloc(num_batches * sizeof(double));
+    if (!latencies) return 0;
+
+    /* 预热 */
+    for (size_t i = 0; i < words && i < 4096; i += 64) {
+        p[i] = i;
+    }
+
+    int count = 0;
+
+    /* 批量测量 - 使用LCG产生更随机的访问模式 */
+    static const uint64_t a = 6364136223846793005ULL;
+    static const uint64_t c = 1442695040888963407ULL;
+
+    for (int b = 0; b < num_batches && count < num_batches; b++) {
+        uint64_t lcg_state = b * 17 + 1;
+
+        uint64_t start = get_time_ns();
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            lcg_state = a * lcg_state + c;
+            size_t idx = lcg_state % words;
+            p[idx] = (uint64_t)(lcg_state);
+        }
+        uint64_t end = get_time_ns();
+
+        double batch_lat = (double)(end - start) / BATCH_SIZE;
+        if (batch_lat > 0.1 && batch_lat < 10000.0) {
+            latencies[count++] = batch_lat;
+        }
+    }
+
+    double result = 0;
+    if (count > 0) {
+        qsort(latencies, count, sizeof(double), compare_double);
+        int mid = count / 2;
+        if (count % 2 == 0) {
+            result = (latencies[mid - 1] + latencies[mid]) / 2.0;
+        } else {
+            result = latencies[mid];
+        }
+    }
+
+    free(latencies);
+    return result;
 }
 
 /* ========== 单线程顺序读带宽 ========== */
@@ -241,109 +410,215 @@ static double multi_bandwidth(void *ptr, size_t size, int threads, int iteration
     return total;
 }
 
-void run_cache_hierarchy_test(void) {
-    print_header("CACHE HIERARCHY TEST");
+/* Maximum number of cache test sizes */
+#define MAX_CACHE_TEST_SIZES 16
 
-    int threads = 8;
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (threads > num_cpus) threads = num_cpus;
+/* Result structure for cache hierarchy tests */
+typedef struct {
+    size_t size;
+    char name[16];
+    char expected[8];
+    double rd_lat;
+    double wr_lat;
+    double bw;
+    char analysis[16];
+} CacheTestResult;
 
-    printf("Test Configuration:\n");
-    printf("  Threads: %d\n", threads);
-    printf("  Memory: 4-channel LPDDR5 6000MT/s (理论: 192 GB/s)\n\n");
+/* Run cache hierarchy scan and return results */
+static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
+                                     size_t l1_size, size_t l2_size, size_t l3_size,
+                                     int threads) {
+    int num_results = 0;
 
-    /* ========== 缓存层级扫描 ========== */
-    printf("=== 缓存层级扫描 ===\n\n");
+    /* Helper to add result */
+    #define ADD_RESULT(sz, nm, level, rd, wr, bw_val, anal) do { \
+        if (num_results < max_results) { \
+            results[num_results].size = (sz); \
+            strncpy(results[num_results].name, (nm), sizeof(results[num_results].name) - 1); \
+            results[num_results].name[sizeof(results[num_results].name) - 1] = 0; \
+            strncpy(results[num_results].expected, (level), sizeof(results[num_results].expected) - 1); \
+            results[num_results].expected[sizeof(results[num_results].expected) - 1] = 0; \
+            results[num_results].rd_lat = (rd); \
+            results[num_results].wr_lat = (wr); \
+            results[num_results].bw = (bw_val); \
+            strncpy(results[num_results].analysis, (anal), sizeof(results[num_results].analysis) - 1); \
+            results[num_results].analysis[sizeof(results[num_results].analysis) - 1] = 0; \
+            num_results++; \
+        } \
+    } while(0)
 
-    struct {
-        size_t size;
-        const char *name;
-        const char *expected;
-    } tests[] = {
-        { 4 * KB,     "4KB",      "L1" },
-        { 16 * KB,    "16KB",     "L1" },
-        { 64 * KB,   "64KB",     "L1" },
-        { 256 * KB,  "256KB",    "L2" },
-        { 1 * MB,    "1MB",      "L2/L3" },
-        { 4 * MB,    "4MB",      "L3" },
-        { 16 * MB,   "16MB",     "RAM" },
-        { 64 * MB,   "64MB",     "RAM" },
-        { 128 * MB,  "128MB",    "RAM" },
-    };
+    /* L1 test sizes: 0.25x, 0.5x, 1x L1 */
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 4 / 1024);
+    ADD_RESULT(l1_size / 4, buf, "L1", 0, 0, 0, "");
+    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 2 / 1024);
+    ADD_RESULT(l1_size / 2, buf, "L1", 0, 0, 0, "");
+    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 1024);
+    ADD_RESULT(l1_size, buf, "L1", 0, 0, 0, "baseline");
 
-    int num_tests = sizeof(tests) / sizeof(tests[0]);
+    /* L2 test sizes */
+    if (l2_size > l1_size) {
+        snprintf(buf, sizeof(buf), "%.0fKB", (double)l2_size / 2 / 1024);
+        ADD_RESULT(l2_size / 2, buf, "L2", 0, 0, 0, "");
+        snprintf(buf, sizeof(buf), "%.0fKB", (double)l2_size / 1024);
+        ADD_RESULT(l2_size, buf, "L2", 0, 0, 0, "");
+    }
 
-    printf("%-12s | %-10s | %-12s | %-15s | %s\n",
-           "Size", "Lat(ns)", "BW(MB/s)", "Expected", "Analysis");
-    printf("%-12s | %-10s | %-12s | %-15s | %s\n",
-           "------------", "----------", "------------", "---------------", "------");
+    /* L3 test sizes */
+    if (l3_size > l2_size) {
+        snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size / 2 / MB);
+        ADD_RESULT(l3_size / 2, buf, "L3", 0, 0, 0, "");
+        snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size / MB);
+        ADD_RESULT(l3_size, buf, "L3", 0, 0, 0, "");
+        /* 2x L3 to show L3->RAM transition */
+        if (l3_size * 2 <= 128 * MB) {
+            snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size * 2 / MB);
+            ADD_RESULT(l3_size * 2, buf, "RAM", 0, 0, 0, "");
+        }
+    }
 
-    srand(42);
+    /* RAM test sizes - must be significantly > L3 */
+    if (l3_size < 64 * MB) {
+        ADD_RESULT(64 * MB, "64MB", "RAM", 0, 0, 0, "");
+    }
+    if (l3_size < 256 * MB) {
+        ADD_RESULT(256 * MB, "256MB", "RAM", 0, 0, 0, "");
+    }
+    ADD_RESULT(1024 * MB, "1GB", "RAM", 0, 0, 0, "");
+
+    #undef ADD_RESULT
+
+    /* Run actual measurements */
     double prev_lat = 0;
-
-    for (int t = 0; t < num_tests; t++) {
-        size_t size = tests[t].size;
-        const char *name = tests[t].name;
+    for (int i = 0; i < num_results; i++) {
+        size_t size = results[i].size;
 
         void *ptr = malloc(size);
         if (!ptr) continue;
         memset(ptr, 0, size);
 
-        /* 单线程延迟 - 强制缓存未命中 */
+        /* Random access latency */
         int lat_iter = (size < 1 * MB) ? 5000 : (size < 16 * MB) ? 2000 : 500;
         double lat = measure_latency(ptr, size, lat_iter);
+        double wr_lat = measure_write_latency(ptr, size, lat_iter);
 
-        /* 单线程带宽 - 缓存测试用单线程,内存测试用多线程 */
+        /* Bandwidth measurement - use multi-threaded for ALL sizes for consistency */
         int bw_iter = (size < 1 * MB) ? 1000 : (size < 16 * MB) ? 500 : 100;
-        double bw;
-        if (size <= 4 * MB) {
-            /* 缓存层级: 单线程 */
-            bw = single_bandwidth(ptr, size, bw_iter);
-        } else {
-            /* 内存层级: 多线程 */
-            bw = multi_bandwidth(ptr, size, threads, bw_iter, multi_seq_read);
-        }
+        /* Limit threads based on size to avoid over-parallelization */
+        int bw_threads = threads;
+        if (size < 1 * MB) bw_threads = 1;
+        else if (size < 4 * MB) bw_threads = (threads > 4) ? 4 : threads;
+        else if (size < 16 * MB) bw_threads = (threads > 8) ? 8 : threads;
+        double bw = multi_bandwidth(ptr, size, bw_threads, bw_iter, multi_seq_read);
 
-        const char *analysis;
-        if (t == 0) {
-            analysis = "baseline";
-            prev_lat = lat;
-        } else {
-            double ratio = lat / prev_lat;
-            if (ratio > 2.0) analysis = "LEVEL UP";
-            else if (ratio > 1.3) analysis = "transition";
-            else analysis = "stable";
-            prev_lat = lat;
-        }
+        results[i].rd_lat = lat;
+        results[i].wr_lat = wr_lat;
+        results[i].bw = bw;
 
-        printf("%-12s | %-10.2f | %-12.2f | %-15s | %s\n",
-               name, lat, bw, tests[t].expected, analysis);
-        fflush(stdout);
+        /* Analysis based on bandwidth ratio - cache misses cause bandwidth drop */
+        if (i == 0) {
+            strcpy(results[i].analysis, "baseline");
+        } else {
+            /* Use bandwidth ratio to detect cache boundary */
+            double prev_bw = results[i-1].bw;
+            double bw_ratio = prev_bw / bw;  /* >1 means bandwidth dropped */
+
+            /* Latency ratio for additional confirmation */
+            double lat_ratio = lat / prev_lat;
+
+            /* Detect cache boundary: significant BW drop + latency increase */
+            if (bw_ratio > 1.5 && lat_ratio > 1.1) {
+                strcpy(results[i].analysis, "LEVEL UP");
+            } else if (bw_ratio > 1.2 || lat_ratio > 1.15) {
+                strcpy(results[i].analysis, "transition");
+            } else {
+                strcpy(results[i].analysis, "stable");
+            }
+        }
+        prev_lat = lat;
 
         free(ptr);
     }
 
-    printf("\n");
+    return num_results;
+}
+
+
+void run_cache_hierarchy_test(void) {
+    print_header("CACHE HIERARCHY TEST");
+
+    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    int threads = (int)num_cpus;
+    int channels = get_memory_channels();
+
+    /* Get detected cache sizes */
+    size_t l1_size = global_cache_config.l1d_size;
+    size_t l2_size = global_cache_config.l2_size;
+    size_t l3_size = global_cache_config.l3_size;
+
+    printf("Test Configuration:\n");
+    printf("  CPU Cores: %ld\n", num_cpus);
+    printf("  Threads: %d (auto-scaled to CPU count)\n", threads);
+    printf("  Memory: %d-channel memory\n", channels);
+    printf("  Detected Cache: L1=%zuKB, L2=%zuKB, L3=%zuKB\n\n",
+           l1_size / KB, l2_size / KB, l3_size / KB);
+
+    /* Run cache hierarchy scan */
+    CacheTestResult results[MAX_CACHE_TEST_SIZES];
+    int num_results = run_cache_hierarchy_scan(results, MAX_CACHE_TEST_SIZES,
+                                                l1_size, l2_size, l3_size, threads);
+
+    /* ========== 缓存层级扫描 ========== */
+    printf("=== 缓存层级扫描 ===\n\n");
+
+    printf("%-12s | %-10s | %-12s | %-12s | %-10s | %s\n",
+           "Size", "RdLat(ns)", "WrLat(ns)", "BW(MB/s)", "Expected", "Analysis");
+    printf("%-12s | %-10s | %-12s | %-12s | %-10s | %s\n",
+           "------------", "----------", "------------", "------------", "----------", "------");
+
+    for (int i = 0; i < num_results; i++) {
+        printf("%-12s | %-10.2f | %-12.2f | %-12.2f | %-10s | %s\n",
+               results[i].name, results[i].rd_lat, results[i].wr_lat,
+               results[i].bw, results[i].expected, results[i].analysis);
+    }
+    fflush(stdout);
+
+    printf("\nCache Latency Reference:\n");
+    printf("  L1: < 5 ns\n");
+    printf("  L2: 5-15 ns\n");
+    printf("  L3: 15-50 ns\n");
+    printf("  RAM: > 50 ns\n\n");
 
     /* ========== 访问模式对比 ========== */
     printf("=== 访问模式对比 (顺序 vs 随机) ===\n\n");
 
-    size_t pattern_sizes[] = {8 * KB, 64 * KB, 256 * KB};
-    const char *pattern_names[] = {"8KB", "64KB", "256KB"};
-    int num_patterns = sizeof(pattern_sizes) / sizeof(pattern_sizes[0]);
+    size_t pattern_sizes[3];
+    const char *pattern_names[3];
+    pattern_sizes[0] = l1_size;
+    pattern_names[0] = "L1";
+    pattern_sizes[1] = l2_size;
+    pattern_names[1] = "L2";
+    if (l3_size > 0) {
+        pattern_sizes[2] = l3_size;
+    } else {
+        /* Cannot detect L3, prompt user */
+        printf("[Warning] L3 size not detected, cannot run pattern comparison\n");
+        return;
+    }
+    pattern_names[2] = "L3";
 
     printf("%-10s | %-12s | %-12s | %s\n",
            "Size", "Seq Lat(ns)", "Rnd Lat(ns)", "Ratio");
     printf("%-10s | %-12s | %-12s | %s\n",
            "--------", "------------", "------------", "------");
 
-    for (int i = 0; i < num_patterns; i++) {
+    for (int i = 0; i < 3; i++) {
         size_t size = pattern_sizes[i];
         void *ptr = malloc(size);
         if (!ptr) continue;
         memset(ptr, 0, size);
 
-        /* 顺序延迟: 顺序读整个buffer */
+        /* Sequential latency */
         uint64_t start = get_time_ns();
         volatile uint64_t sum = 0;
         size_t words = size / sizeof(uint64_t);
@@ -353,7 +628,7 @@ void run_cache_hierarchy_test(void) {
         uint64_t end = get_time_ns();
         double seq_lat = (double)(end - start) / words;
 
-        /* 随机延迟 */
+        /* Random latency */
         double rnd_lat = measure_latency(ptr, size, 5000);
 
         double ratio = (seq_lat > 0) ? rnd_lat / seq_lat : 0;
@@ -368,16 +643,47 @@ void run_cache_hierarchy_test(void) {
     printf("\n说明: Ratio = 随机延迟 / 顺序延迟\n\n");
 
     /* ========== 多通道内存带宽 ========== */
-    printf("=== 4通道内存带宽 (多线程) ===\n\n");
+    printf("=== 多通道内存带宽 (多线程) ===\n\n");
 
-    size_t bw_sizes[] = {16 * MB, 64 * MB, 256 * MB};
-    const char *bw_names[] = {"16MB", "64MB", "256MB"};
-    int num_bw = sizeof(bw_sizes) / sizeof(bw_sizes[0]);
+    /* Use detected cache sizes + RAM sizes */
+    size_t bw_sizes[5];
+    char bw_names[5][16];
+    int num_bw = 0;
 
-    printf("%-10s | %-14s | %-14s | %-14s\n",
+    /* L1/L2/L3 sizes */
+    bw_sizes[num_bw] = l1_size;
+    snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "L1(%.0fKB)", (double)l1_size/KB);
+    num_bw++;
+
+    if (l2_size > l1_size) {
+        bw_sizes[num_bw] = l2_size;
+        snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "L2(%.0fKB)", (double)l2_size/KB);
+        num_bw++;
+    }
+
+    if (l3_size > l2_size) {
+        bw_sizes[num_bw] = l3_size;
+        snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "L3(%.0fMB)", (double)l3_size/MB);
+        num_bw++;
+    }
+
+    /* RAM sizes - must be significantly larger than L3 */
+    size_t ram_size = (l3_size > 0) ? (l3_size * 4) : (64 * MB);
+    if (ram_size < 64 * MB) ram_size = 64 * MB;
+    bw_sizes[num_bw] = ram_size;
+    snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "RAM(%.0fMB)", (double)ram_size/MB);
+    num_bw++;
+
+    if (l3_size < 256 * MB) {
+        bw_sizes[num_bw] = 256 * MB;
+        snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "RAM(256MB)");
+        num_bw++;
+    }
+
+    printf("%-14s | %-14s | %-14s | %-14s\n",
            "Size", "Read(MB/s)", "Write(MB/s)", "Copy(MB/s)");
-    printf("%-10s | %-14s | %-14s | %-14s\n",
-           "--------", "--------------", "--------------", "--------------");
+    printf("%-14s | %-14s | %-14s | %-14s\n",
+           "--------------", "--------------", "--------------", "--------------");
 
     for (int i = 0; i < num_bw; i++) {
         size_t size = bw_sizes[i];
@@ -395,7 +701,7 @@ void run_cache_hierarchy_test(void) {
         double write_bw = multi_bandwidth(ptr, size, threads, 100, multi_seq_write);
         double copy_bw = multi_copy_bandwidth(ptr, ptr2, size, threads, 100);
 
-        printf("%-10s | %-14.2f | %-14.2f | %-14.2f\n",
+        printf("%-14s | %-14.2f | %-14.2f | %-14.2f\n",
                bw_names[i], read_bw, write_bw, copy_bw);
         fflush(stdout);
 
@@ -403,7 +709,7 @@ void run_cache_hierarchy_test(void) {
         free(ptr2);
     }
 
-    printf("\n理论峰值: 192 GB/s (4通道 x 6000MT/s x 8bytes)\n\n");
+    printf("\n理论峰值: %d GB/s (假设单通道 4800 MT/s, 实际取决于内存规格)\n\n", channels * 38);
 
     /* ========== 生成报告 ========== */
     ReportContext *report = report_init("cache_hierarchy", REPORT_FORMAT_MARKDOWN);
@@ -411,43 +717,13 @@ void run_cache_hierarchy_test(void) {
         report_write_system_info(report);
 
         report_section(report, "Cache Hierarchy Scan");
-        report_write(report, "| Size | Lat(ns) | BW(MB/s) | Expected | Analysis |\n");
-        report_write(report, "|------|----------|-----------|----------|----------|\n");
+        report_write(report, "| Size | RdLat(ns) | WrLat(ns) | BW(MB/s) | Expected | Analysis |\n");
+        report_write(report, "|------|-----------|------------|-----------|----------|----------|\n");
 
-        srand(42);
-        prev_lat = 0;
-        for (int t = 0; t < num_tests; t++) {
-            size_t size = tests[t].size;
-            const char *name = tests[t].name;
-            void *ptr = malloc(size);
-            if (!ptr) continue;
-            memset(ptr, 0, size);
-
-            int lat_iter = (size < 1 * MB) ? 5000 : (size < 16 * MB) ? 2000 : 500;
-            double lat = measure_latency(ptr, size, lat_iter);
-
-            int bw_iter = (size < 1 * MB) ? 1000 : (size < 16 * MB) ? 500 : 100;
-            double bw;
-            if (size <= 4 * MB) {
-                bw = single_bandwidth(ptr, size, bw_iter);
-            } else {
-                bw = multi_bandwidth(ptr, size, threads, bw_iter, multi_seq_read);
-            }
-
-            const char *analysis = "";
-            if (t == 0) {
-                analysis = "baseline";
-            } else {
-                double ratio = lat / prev_lat;
-                if (ratio > 2.0) analysis = "LEVEL UP";
-                else if (ratio > 1.3) analysis = "transition";
-                else analysis = "stable";
-            }
-            prev_lat = lat;
-
-            report_write(report, "| %s | %.2f | %.2f | %s | %s |\n",
-                        name, lat, bw, tests[t].expected, analysis);
-            free(ptr);
+        for (int i = 0; i < num_results; i++) {
+            report_write(report, "| %s | %.2f | %.2f | %.2f | %s | %s |\n",
+                        results[i].name, results[i].rd_lat, results[i].wr_lat,
+                        results[i].bw, results[i].expected, results[i].analysis);
         }
 
         report_section(report, "Multi-channel Memory Bandwidth");
@@ -477,9 +753,12 @@ void run_cache_hierarchy_test(void) {
         }
 
         report_section(report, "Notes");
+        report_write(report, "- Cache sizes: L1=%zuKB, L2=%zuKB, L3=%zuKB\n", l1_size/KB, l2_size/KB, l3_size/KB);
         report_write(report, "- Cache bandwidth: single-threaded\n");
         report_write(report, "- Memory bandwidth: multi-threaded (%d threads)\n", threads);
-        report_write(report, "- Theoretical peak: 192 GB/s\n\n");
+        int report_channels = get_memory_channels();
+        report_write(report, "- Memory channels: %d\n", report_channels);
+        report_write(report, "- Theoretical peak: ~%d GB/s\n\n", report_channels * 38);
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);
@@ -488,7 +767,10 @@ void run_cache_hierarchy_test(void) {
 }
 
 int main(int argc, char *argv[]) {
+    request_sudo_password();
     initialize_cache_config();
+    initialize_system_config();
+    pmu_init_cache_counters();
     print_system_info();
     run_cache_hierarchy_test();
     return 0;

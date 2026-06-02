@@ -1,0 +1,1022 @@
+/* SPDX-License-Identifier: MIT
+ * detect.c - Hardware detection: cache / arch / memory channels / CPU freq / CPU model / NUMA
+ *
+ * Split from monolithic common.c (2026-06-02).
+ */
+#include "common.h"
+#include <stddef.h>
+#include <stdarg.h>
+#include <string.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <sys/wait.h>
+#include <dirent.h>
+#include <libgen.h>
+
+/* ========== ARM Cache Detection ========== */
+#ifdef __aarch64__
+static sigjmp_buf sigill_jmp;
+static volatile sig_atomic_t sigill_occurred;
+
+static void sigill_handler(int sig) {
+    sigill_occurred = 1;
+    siglongjmp(sigill_jmp, 1);
+}
+
+static int try_read_ctr_el0(uint64_t *val) {
+    signal(SIGILL, sigill_handler);
+    sigill_occurred = 0;
+    if (sigsetjmp(sigill_jmp, 1) == 0) {
+        __asm__ volatile("mrs %0, ctr_el0" : "=r"(*val));
+        signal(SIGILL, SIG_DFL);
+        return 0;
+    }
+    signal(SIGILL, SIG_DFL);
+    return -1;
+}
+
+static int try_read_clidr_el1(uint64_t *val) {
+    signal(SIGILL, sigill_handler);
+    sigill_occurred = 0;
+    if (sigsetjmp(sigill_jmp, 1) == 0) {
+        __asm__ volatile("mrs %0, clidr_el1" : "=r"(*val));
+        signal(SIGILL, SIG_DFL);
+        return 0;
+    }
+    signal(SIGILL, SIG_DFL);
+    return -1;
+}
+
+static size_t get_arm_cache_line_size(void) {
+    uint64_t ctr;
+    if (try_read_ctr_el0(&ctr) != 0) return 64;
+    uint32_t cwg = (ctr >> 0) & 0xF;
+    uint32_t min_line = (ctr >> 16) & 0xF;
+    if (min_line > 0) {
+        return 4 << min_line;
+    }
+    return 4 << cwg;
+}
+
+static int get_arm_cache_levels(void) {
+    uint64_t clidr;
+    if (try_read_clidr_el1(&clidr) != 0) return 0;
+    int loc = (clidr >> 24) & 0x7;
+    int louis = (clidr >> 27) & 0x7;
+    return (loc > louis) ? loc : louis;
+}
+
+/* Probe actual cache size by detecting when latency increases (cache miss) */
+static size_t probe_cache_size_by_latency(size_t start_size, size_t max_size) {
+    if (max_size < start_size) max_size = start_size;
+
+    void *ptr = malloc(max_size * 2);
+    if (!ptr) return 0;
+
+    memset(ptr, 0, max_size * 2);
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+
+    /* Measure baseline sequential latency with small access */
+    uint64_t baseline = 0;
+    for (size_t trial = 0; trial < 3; trial++) {
+        uint64_t start = get_time_ns();
+        for (size_t i = 0; i < 1000; i++) {
+            baseline += p[i];
+        }
+        uint64_t end = get_time_ns();
+        baseline = (end - start) / 1000;
+        if (baseline > 0) break;
+    }
+
+    /* Binary search for cache boundary */
+    size_t low = start_size / 4;
+    size_t high = max_size;
+    size_t cache_size = 0;
+
+    while (low <= high && cache_size == 0) {
+        size_t mid = (low + high) / 2;
+        if (mid < start_size) mid = start_size;
+
+        /* Clear and measure random access latency for this size */
+        memset((void*)ptr, 0, mid);
+        uint64_t sum = 0;
+        uint64_t start = get_time_ns();
+        for (size_t i = 0; i < 1000; i++) {
+            size_t idx = (i * 17) % (mid / sizeof(uint64_t));
+            sum += p[idx];
+        }
+        uint64_t end = get_time_ns();
+        uint64_t lat = (end - start) / 1000;
+
+        /* If latency is >2x baseline, we're hitting cache */
+        if (lat > baseline * 2) {
+            cache_size = mid;
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    free(ptr);
+    return cache_size > 0 ? cache_size : 0;
+}
+
+static int detect_arm_cache_registers(void) {
+    int levels = get_arm_cache_levels();
+    int line_size = get_arm_cache_line_size();
+
+    if (levels == 0) {
+        printf("[ARM] Cannot read cache registers\n");
+        return -1;
+    }
+
+    printf("[ARM] Detected %d cache levels, line size: %d bytes\n",
+           levels, line_size);
+
+    size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
+
+    switch (levels) {
+        case 3:
+            /* Probe L3: start at 4MB, max 64MB */
+            l3 = probe_cache_size_by_latency(4 * MB, 64 * MB);
+            if (l3 == 0) {
+                printf("[ARM] L3 detection failed, will prompt user\n");
+            }
+        case 2:
+            /* Probe L2: start at 256KB, max 2MB */
+            l2 = probe_cache_size_by_latency(256 * KB, 2 * MB);
+            if (l2 == 0) {
+                printf("[ARM] L2 detection failed, will prompt user\n");
+            }
+        case 1:
+            /* Probe L1: start at 16KB, max 128KB */
+            l1d = probe_cache_size_by_latency(16 * KB, 128 * KB);
+            l1i = l1d;
+            if (l1d == 0) {
+                printf("[ARM] L1 detection failed, will prompt user\n");
+            }
+            break;
+        default:
+            return -1;
+    }
+
+    if (l1d == 0) {
+        /* L1 is essential, if we can't detect it, fail */
+        printf("[ARM] Cannot detect L1 cache\n");
+        return -1;
+    }
+
+    global_cache_config.l1d_size = l1d;
+    global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
+    global_cache_config.l2_size = l2;  /* 0 if not detected, user will be prompted */
+    global_cache_config.l3_size = l3;  /* 0 if not detected, user will be prompted */
+    global_cache_config.detected = 1;
+
+    return 0;
+}
+#endif
+
+/* ========== x86 Cache Detection ========== */
+#ifdef __x86_64__
+static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
+    __asm__ volatile("cpuid"
+        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+        : "a"(leaf), "c"(subleaf));
+}
+
+static int detect_x86_cache_cpuid(void) {
+    uint32_t eax, ebx, ecx, edx;
+    size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
+
+    for (int i = 0; i < 10; i++) {
+        cpuid(4, i, &eax, &ebx, &ecx, &edx);
+
+        int cache_type = eax & 0x1F;
+        if (cache_type == 0) break;
+
+        int level = (eax >> 5) & 0x7;
+        int ways = ((ebx >> 22) & 0x3FF) + 1;
+        int partitions = ((ebx >> 12) & 0x3FF) + 1;
+        int line_size = (ebx & 0xFFF) + 1;
+        int sets = ecx + 1;
+
+        uint64_t cache_size = (uint64_t)ways * partitions * line_size * sets;
+
+        if (level == 1 && (eax & 0x20)) l1d = cache_size;
+        else if (level == 1 && (eax & 0x10)) l1i = cache_size;
+        else if (level == 2) l2 = cache_size;
+        else if (level == 3) l3 = cache_size;
+    }
+
+    if (l1d > 0) {
+        global_cache_config.l1d_size = l1d;
+        global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
+        global_cache_config.l2_size = l2;
+        global_cache_config.l3_size = l3;
+        global_cache_config.detected = 1;
+        return 0;
+    }
+
+    return -1;
+}
+#endif
+
+/* ========== sysfs Cache Detection ========== */
+static size_t read_sysfs_cache_size(int index) {
+    char path[256];
+    char line[64];
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/size", index);
+
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) {
+            char *end;
+            unsigned long val = strtoul(line, &end, 10);
+            if (end && (*end == 'K' || *end == 'k')) {
+                fclose(f);
+                return val * 1024;
+            } else if (end && (*end == 'M' || *end == 'm')) {
+                fclose(f);
+                return val * 1024 * 1024;
+            }
+        }
+        fclose(f);
+    }
+
+    return 0;
+}
+
+static int read_sysfs_cache_level(int index) {
+    char path[256];
+    char line[16];
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/level", index);
+
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) {
+            int level = atoi(line);
+            fclose(f);
+            return level;
+        }
+        fclose(f);
+    }
+
+    return 0;
+}
+
+static const char* read_sysfs_cache_type(int index) {
+    static char type[32];
+    char path[256];
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/type", index);
+
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(type, sizeof(type), f)) {
+            type[strcspn(type, "\n")] = 0;
+            fclose(f);
+            return type;
+        }
+        fclose(f);
+    }
+
+    return "";
+}
+
+static int detect_cache_via_sysfs(void) {
+    size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
+
+    for (int i = 0; i < 10; i++) {
+        size_t size = read_sysfs_cache_size(i);
+        if (size == 0) break;
+
+        int level = read_sysfs_cache_level(i);
+        const char *type = read_sysfs_cache_type(i);
+
+        if (level == 1) {
+            if (strcmp(type, "Data") == 0) l1d = size;
+            else if (strcmp(type, "Instruction") == 0) l1i = size;
+            else if (strcmp(type, "Unified") == 0) {
+                if (l1d == 0) l1d = size;
+                l1i = size;
+            }
+        } else if (level == 2) {
+            l2 = size;
+        } else if (level == 3) {
+            l3 = size;
+        }
+    }
+
+    if (l1d > 0) {
+        global_cache_config.l1d_size = l1d;
+        global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
+        global_cache_config.l2_size = l2;  /* 0 if not detected */
+        global_cache_config.l3_size = l3;  /* 0 if not detected */
+        global_cache_config.detected = 1;
+        printf("[sysfs] L1D: %zu KB, L1I: %zu KB, L2: %zu KB, L3: %zu KB\n",
+               l1d / 1024, global_cache_config.l1i_size / 1024,
+               l2 / 1024, l3 / 1024);
+        if (l2 == 0) printf("[sysfs] L2 not detected, will prompt user\n");
+        if (l3 == 0) printf("[sysfs] L3 not detected, will prompt user\n");
+        return 0;
+    }
+
+    return -1;
+}
+
+/* ========== Cache Configuration ========== */
+int detect_cache_sizes(void) {
+    /* Priority: sysfs -> ARM registers -> x86 CPUID -> fail */
+
+    if (detect_cache_via_sysfs() == 0) {
+        return 1;
+    }
+
+#ifdef __aarch64__
+    if (detect_arm_cache_registers() == 0) {
+        return 1;
+    }
+#endif
+
+#ifdef __x86_64__
+    if (detect_x86_cache_cpuid() == 0) {
+        return 1;
+    }
+#endif
+
+    return 0;
+}
+
+static void prompt_cache_config_from_user(void) {
+    char input[256];
+
+    printf("\n");
+    printf("========================================\n");
+    printf("  Cache detection failed - Manual input required\n");
+    printf("========================================\n");
+    printf("Please enter your CPU cache configuration:\n");
+    printf("(Check /proc/cpuinfo or CPU specs if unsure)\n\n");
+
+    printf("L1 Data cache size (e.g., 32K, 64K): ");
+    fflush(stdout);
+    if (scanf("%255s", input) == 1) {
+        global_cache_config.l1d_size = parse_size(input);
+    } else {
+        printf("Invalid input, using default 32K\n");
+        global_cache_config.l1d_size = 32 * KB;
+    }
+
+    printf("L2 cache size (e.g., 256K, 512K, 1M): ");
+    fflush(stdout);
+    if (scanf("%255s", input) == 1) {
+        global_cache_config.l2_size = parse_size(input);
+    } else {
+        printf("Invalid input, using default 512K\n");
+        global_cache_config.l2_size = 512 * KB;
+    }
+
+    printf("L3 cache size (e.g., 1M, 4M, 8M, 0 for none): ");
+    fflush(stdout);
+    if (scanf("%255s", input) == 1) {
+        global_cache_config.l3_size = parse_size(input);
+    } else {
+        printf("Invalid input, using default 4M\n");
+        global_cache_config.l3_size = 4 * MB;
+    }
+
+    global_cache_config.l1i_size = global_cache_config.l1d_size;
+    global_cache_config.detected = 1;
+
+    printf("\nConfiguration will be used for this run\n\n");
+}
+
+void initialize_cache_config(void) {
+    /* Always detect - no caching */
+    if (detect_cache_sizes()) {
+        printf("[Config] Auto-detected: L1D=%zuKB, L1I=%zuKB, L2=%zuKB, L3=%zuKB\n",
+               global_cache_config.l1d_size / KB,
+               global_cache_config.l1i_size / KB,
+               global_cache_config.l2_size / KB,
+               global_cache_config.l3_size / KB);
+
+        /* Check if any cache level was not detected */
+        if (global_cache_config.l2_size == 0 || global_cache_config.l3_size == 0) {
+            printf("[Warning] Some cache sizes could not be detected\n");
+            prompt_cache_config_from_user();
+        }
+        return;
+    }
+
+    printf("[Warning] Cannot auto-detect cache configuration\n");
+    prompt_cache_config_from_user();
+}
+
+void print_system_info(void) {
+    if (!global_system_config.detected) {
+        initialize_system_config();
+    }
+
+    print_header("SYSTEM INFORMATION");
+
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    printf("Physical Memory: %.2f GB\n", (double)pages * page_size / (1024.0 * MB));
+    printf("Available Memory: %.2f GB\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
+    printf("CPU Model: %s\n", global_system_config.cpu_model);
+    printf("CPU Cores: %ld\n", sysconf(_SC_NPROCESSORS_ONLN));
+    printf("CPU Frequency: %d MHz\n", global_system_config.cpu_freq_mhz);
+    printf("Memory Channels: %d\n", global_system_config.memory_channels);
+    printf("Page Size: %ld bytes\n\n", page_size);
+
+    printf("Cache Configuration:\n");
+    printf("  L1D: %zu KB\n", global_cache_config.l1d_size / KB);
+    printf("  L1I: %zu KB\n", global_cache_config.l1i_size / KB);
+    printf("  L2:  %zu KB\n", global_cache_config.l2_size / KB);
+    printf("  L3:  %zu KB\n\n", global_cache_config.l3_size / KB);
+
+    /* NUMA Topology */
+    int numa_nodes[8];
+    int num_nodes = 0;
+
+    for (int i = 0; i < 8; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d", i);
+        if (access(path, F_OK) == 0) {
+            numa_nodes[num_nodes++] = i;
+        }
+    }
+
+    if (num_nodes == 0) {
+        printf("NUMA Topology: Single node (UMA)\n\n");
+    } else {
+        printf("NUMA Topology: %d node(s)\n", num_nodes);
+        for (int i = 0; i < num_nodes; i++) {
+            char path[256];
+            char line[256];
+
+            snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/meminfo", numa_nodes[i]);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                while (fgets(line, sizeof(line), f)) {
+                    if (strstr(line, "MemTotal")) {
+                        printf("  Node %d: %s", numa_nodes[i], line);
+                        break;
+                    }
+                }
+                fclose(f);
+            }
+
+            snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", numa_nodes[i]);
+            f = fopen(path, "r");
+            if (f) {
+                if (fgets(line, sizeof(line), f)) {
+                    printf("  Node %d CPU: %s", numa_nodes[i], line);
+                }
+                fclose(f);
+            }
+        }
+        printf("\n");
+    }
+}
+
+/* ========== CPU Affinity Helper ========== */
+int set_cpu_affinity(int cpu) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu, &cpuset);
+    return pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+}
+
+/* ========== NUMA Topology Helper ========== */
+void print_numa_info(void) {
+    printf("\nNUMA Topology:\n");
+
+    int numa_nodes[8];
+    int num_nodes = 0;
+
+    for (int i = 0; i < 8; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d", i);
+        if (access(path, F_OK) == 0) {
+            numa_nodes[num_nodes++] = i;
+        }
+    }
+
+    if (num_nodes == 0) {
+        printf("  Single NUMA node system (UMA)\n");
+        return;
+    }
+
+    printf("  Detected %d NUMA node(s)\n", num_nodes);
+    for (int i = 0; i < num_nodes; i++) {
+        char path[256];
+        char line[256];
+
+        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/meminfo", numa_nodes[i]);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                if (strstr(line, "MemTotal")) {
+                    printf("  Node %d: %s", numa_nodes[i], line);
+                    break;
+                }
+            }
+            fclose(f);
+        }
+
+        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", numa_nodes[i]);
+        f = fopen(path, "r");
+        if (f) {
+            if (fgets(line, sizeof(line), f)) {
+                printf("  Node %d CPU: %s", numa_nodes[i], line);
+            }
+            fclose(f);
+        }
+    }
+    printf("\n");
+}
+
+/* ========== Architecture Detection ========== */
+Architecture current_arch = ARCH_UNKNOWN;
+
+const char *arch_names[] = {
+    "X86_64", "ARM64", "RISC-V", "PowerPC64", "Unknown"
+};
+
+static void detect_architecture(void) {
+#if defined(__x86_64__)
+    current_arch = ARCH_X86_64;
+#elif defined(__aarch64__)
+    current_arch = ARCH_ARM64;
+#elif defined(__riscv)
+    current_arch = ARCH_RISCV64;
+#elif defined(__powerpc64__)
+    current_arch = ARCH_POWERPC64;
+#else
+    current_arch = ARCH_UNKNOWN;
+#endif
+}
+
+__attribute__((constructor))
+static void init_arch(void) {
+    detect_architecture();
+}
+
+/* ========== Memory Channel Detection ========== */
+static int detect_memory_channels_dmidecode(void) {
+    /* Try dmidecode if available (may require root) */
+    FILE *fp = popen("dmidecode -t memory 2>/dev/null | grep -c 'Channel'", "r");
+    if (!fp) return -1;
+
+    int count = 0;
+    if (fscanf(fp, "%d", &count) != 1) {
+        pclose(fp);
+        return -1;
+    }
+    pclose(fp);
+    return (count > 0) ? count : -1;
+}
+
+static int detect_memory_channels_numa(void) {
+    /* NUMA nodes often correspond to memory channels on modern systems */
+    int numa_nodes = 0;
+    for (int i = 0; i < 8; i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d", i);
+        if (access(path, F_OK) == 0) {
+            numa_nodes++;
+        }
+    }
+    /* On single-NUMA systems, assume at least 2 channels (dual-channel) */
+    if (numa_nodes == 1) {
+        return 2;
+    }
+    /* Multi-NUMA is more complex, return as detected */
+    return numa_nodes;
+}
+
+int detect_memory_channels(void) {
+    /* Try each method in order of reliability */
+
+    /* 1. dmidecode - most reliable but may need root */
+    int channels = detect_memory_channels_dmidecode();
+    if (channels > 0) {
+        printf("[Memory] Detected %d channels via dmidecode\n", channels);
+        return channels;
+    }
+
+    /* 2. NUMA node count as indicator */
+    channels = detect_memory_channels_numa();
+    if (channels > 0) {
+        printf("[Memory] Based on %d NUMA node(s), assuming %d memory channels\n", channels, channels);
+        return channels;
+    }
+
+    /* Cannot detect, return 0 to trigger user prompt */
+    return 0;
+}
+
+/* ========== CPU Model Name Detection ========== */
+static void detect_cpu_model(char *model, size_t len) {
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) {
+        snprintf(model, len, "Unknown");
+        return;
+    }
+
+    char line[256];
+    int found_model = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        /* Try "model name" first (most common) */
+        if (strncmp(line, "model name", 10) == 0) {
+            char *colon = strchr(line, ':');
+            if (colon) {
+                /* Skip leading space after colon */
+                char *name = colon + 1;
+                while (*name == ' ') name++;
+                /* Remove trailing newline */
+                name[strcspn(name, "\n")] = 0;
+                strncpy(model, name, len - 1);
+                model[len - 1] = 0;
+                found_model = 1;
+                break;
+            }
+        }
+    }
+
+    /* If model name not found, try Hardware (ARM) */
+    if (!found_model) {
+        rewind(f);
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "Hardware", 8) == 0) {
+                char *colon = strchr(line, ':');
+                if (colon) {
+                    char *name = colon + 1;
+                    while (*name == ' ') name++;
+                    name[strcspn(name, "\n")] = 0;
+                    snprintf(model, len, "ARM %s", name);
+                    found_model = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* If still not found, try Processor (some ARM) */
+    if (!found_model) {
+        rewind(f);
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "processor", 8) == 0) {
+                /* Some systems just say "processor" - use architecture instead */
+                snprintf(model, len, "%s Processor", arch_names[current_arch]);
+                found_model = 1;
+                break;
+            }
+        }
+    }
+
+    /* Fallback */
+    if (!found_model) {
+        snprintf(model, len, "%s", arch_names[current_arch]);
+    }
+
+    fclose(f);
+}
+
+
+/* ========== CPU Frequency Detection (Multiple Methods) ========== */
+static int detect_cpu_freq_sysfs(void) {
+    /* Method 1: cpufreq sysfs */
+    FILE *f = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
+    if (f) {
+        int freq_khz = 0;
+        if (fscanf(f, "%d", &freq_khz) == 1 && freq_khz > 0) {
+            fclose(f);
+            int freq_mhz = freq_khz / 1000;
+            printf("[CPU] Detected frequency: %d MHz via cpufreq\n", freq_mhz);
+            return freq_mhz;
+        }
+        fclose(f);
+    }
+    return 0;
+}
+
+static int detect_cpu_freq_cpuinfo(void) {
+    /* Method 2: /proc/cpuinfo */
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) return 0;
+
+    char line[256];
+    int max_freq = 0;
+    while (fgets(line, sizeof(line), f)) {
+        /* Look for "cpu MHz" or "CPU frequency" */
+        if (strstr(line, "cpu MHz") || strstr(line, "CPU frequency")) {
+            char *p = line;
+            while (*p) {
+                /* Extract numeric MHz value */
+                if (isdigit(*p) && (p == line || !isdigit(*(p-1)))) {
+                    char *end;
+                    double val = strtod(p, &end);
+                    if (end > p && val > max_freq) {
+                        max_freq = (int)val;
+                    }
+                }
+                p++;
+            }
+        }
+    }
+    fclose(f);
+
+    if (max_freq > 0) {
+        printf("[CPU] Detected frequency: %d MHz via /proc/cpuinfo\n", max_freq);
+    }
+    return max_freq;
+}
+
+static int detect_cpu_freq_sysctl(void) {
+    /* Method 3: sysctl (BSD/macOS style) */
+    FILE *f = popen("sysctl -n hw.cpufrequency 2>/dev/null", "r");
+    if (f) {
+        int freq = 0;
+        if (fscanf(f, "%d", &freq) == 1 && freq > 0) {
+            pclose(f);
+            int freq_mhz = freq / 1000000;
+            printf("[CPU] Detected frequency: %d MHz via sysctl\n", freq_mhz);
+            return freq_mhz;
+        }
+        pclose(f);
+    }
+    return 0;
+}
+
+static int detect_cpu_freq_lscpu(void) {
+    /* Method 4: lscpu command */
+    FILE *f = popen("lscpu 2>/dev/null | grep 'CPU MHz' | awk '{print $3}'", "r");
+    if (f) {
+        int freq = 0;
+        if (fscanf(f, "%d", &freq) == 1 && freq > 0) {
+            pclose(f);
+            printf("[CPU] Detected frequency: %d MHz via lscpu\n", freq);
+            return freq;
+        }
+        pclose(f);
+    }
+    return 0;
+}
+
+static int prompt_cpu_freq_from_user(void) {
+    char input[64];
+
+    printf("\n");
+    printf("========================================\n");
+    printf("  CPU frequency detection failed\n");
+    printf("========================================\n");
+    printf("Please enter your CPU max frequency (in MHz):\n");
+    printf("(Check CPU specs or task manager)\n\n");
+    printf("CPU Frequency (MHz) [default: 3000]: ");
+    fflush(stdout);
+
+    if (fgets(input, sizeof(input), stdin) != NULL) {
+        /* Remove newline */
+        input[strcspn(input, "\n")] = 0;
+
+        /* If empty, use default 3000 */
+        if (strlen(input) == 0) {
+            return 3000;
+        }
+
+        int freq = atoi(input);
+        if (freq > 0 && freq <= 10000) {
+            return freq;
+        }
+    }
+    return 3000;  /* Default if invalid input */
+}
+
+static int detect_cpu_freq_pmu(void) {
+    /* ARM PMU-based frequency detection using perf_event_open syscall */
+    /* Measures actual CPU frequency by counting cycles over a time interval */
+    static int fd = -1;
+
+    if (fd < 0) {
+        /* perf_event_open syscall number: 241 on ARM64 */
+        struct perf_event_attr {
+            uint32_t type;
+            uint32_t size;
+            uint64_t config;
+            uint64_t disabled;
+            uint64_t exclude_kernel;
+            uint64_t exclude_hv;
+        } attr = {
+            .type = 0,  /* PERF_TYPE_HARDWARE */
+            .size = sizeof(struct perf_event_attr),
+            .config = 0,  /* PERF_COUNT_HW_CPU_CYCLES */
+            .disabled = 0,
+            .exclude_kernel = 0,
+            .exclude_hv = 1
+        };
+
+        fd = syscall(241, &attr, 0, -1, -1, 0);  /* __NR_perf_event_open */
+        if (fd < 0) {
+            return 0;
+        }
+    }
+
+    /* Reset and enable counter */
+    ioctl(fd, 0, 0);  /* PERF_EVENT_IOC_RESET */
+    ioctl(fd, 1, 0);  /* PERF_EVENT_IOC_ENABLE */
+
+    /* Measure cycles over time interval */
+    struct timespec ts_start, ts_end;
+    uint64_t cycles_start, cycles_end;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    read(fd, &cycles_start, sizeof(cycles_start));
+
+    usleep(100000);  /* 100ms */
+
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    read(fd, &cycles_end, sizeof(cycles_end));
+
+    /* Calculate frequency */
+    uint64_t elapsed_ns = (ts_end.tv_sec - ts_start.tv_sec) * 1000000000ULL +
+                          (ts_end.tv_nsec - ts_start.tv_nsec);
+    uint64_t cycles = cycles_end - cycles_start;
+
+    if (elapsed_ns > 0 && cycles > 0) {
+        uint64_t freq_mhz = (cycles * 1000ULL) / elapsed_ns;
+        if (freq_mhz > 100 && freq_mhz < 10000) {
+            printf("[CPU] Detected frequency: %llu MHz via ARM PMU\n", (unsigned long long)freq_mhz);
+            return (int)freq_mhz;
+        }
+    }
+
+    return 0;
+}
+
+static int detect_cpu_freq_sudo(void) {
+    /* Sudo-based frequency detection for privileged access */
+    FILE *f;
+    int freq = 0;
+    char buf[128];
+
+    if (!is_sudo_available()) return 0;
+
+    /* Try: sudo cpupower frequency-info */
+    f = sudo_popen("cpupower frequency-info 2>/dev/null | grep 'current CPU' | awk '{print $4}'");
+    if (f) {
+        if (fgets(buf, sizeof(buf), f) && sscanf(buf, "%d", &freq) == 1 && freq > 0) {
+            pclose(f);
+            printf("[CPU] Detected frequency: %d MHz via sudo cpupower\n", freq);
+            return freq;
+        }
+        pclose(f);
+    }
+
+    /* Try: sudo dmidecode -t processor | grep "Current Speed" */
+    f = sudo_popen("dmidecode -t processor 2>/dev/null | grep 'Current Speed' | head -1");
+    if (f) {
+        while (fgets(buf, sizeof(buf), f)) {
+            if (strstr(buf, "Current Speed")) {
+                /* Extract MHz value */
+                char *p = buf;
+                while (*p && !isdigit(*p)) p++;
+                if (sscanf(p, "%d", &freq) == 1 && freq > 0) {
+                    pclose(f);
+                    printf("[CPU] Detected frequency: %d MHz via sudo dmidecode\n", freq);
+                    return freq;
+                }
+            }
+        }
+        pclose(f);
+    }
+
+    /* Try sudo sysfs cpufreq */
+    f = sudo_popen("cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | sort -rn | head -1");
+    if (f) {
+        long long freq_khz = 0;
+        if (fscanf(f, "%lld", &freq_khz) == 1 && freq_khz > 0) {
+            pclose(f);
+            freq = freq_khz / 1000;
+            printf("[CPU] Detected frequency: %d MHz via sudo sysfs\n", freq);
+            return freq;
+        }
+        pclose(f);
+    }
+
+    /* Try: sudo cat /proc/cpuinfo | grep MHz */
+    f = sudo_popen("cat /proc/cpuinfo 2>/dev/null | grep MHz | head -1");
+    if (f) {
+        while (fgets(buf, sizeof(buf), f)) {
+            if (strstr(buf, "MHz")) {
+                char *p = buf;
+                while (*p && !isdigit(*p)) p++;
+                if (sscanf(p, "%d", &freq) == 1 && freq > 0) {
+                    pclose(f);
+                    printf("[CPU] Detected frequency: %d MHz via sudo /proc/cpuinfo\n", freq);
+                    return freq;
+                }
+            }
+        }
+        pclose(f);
+    }
+
+    return 0;
+}
+
+int detect_cpu_freq(void) {
+    int freq;
+
+    /* Try multiple detection methods in order of reliability */
+    freq = detect_cpu_freq_sysfs();
+    if (freq > 0) return freq;
+
+    freq = detect_cpu_freq_cpuinfo();
+    if (freq > 0) return freq;
+
+    freq = detect_cpu_freq_sysctl();
+    if (freq > 0) return freq;
+
+    freq = detect_cpu_freq_lscpu();
+    if (freq > 0) return freq;
+
+    /* Try ARM PMU-based detection (works without sudo) */
+    freq = detect_cpu_freq_pmu();
+    if (freq > 0) return freq;
+
+    /* Try sudo-enabled methods for privileged access */
+    freq = detect_cpu_freq_sudo();
+    if (freq > 0) return freq;
+
+    return 0;  /* All methods failed */
+}
+
+/* ========== System Configuration ========== */
+void initialize_system_config(void) {
+    /* Always detect CPU model (fast, no file I/O) */
+    detect_cpu_model(global_system_config.cpu_model, sizeof(global_system_config.cpu_model));
+
+    /* Always detect memory channels - no caching */
+    int channels = detect_memory_channels();
+    if (channels > 0) {
+        global_system_config.memory_channels = channels;
+    } else {
+        /* Cannot detect, prompt user for memory channels */
+        char input[64];
+        printf("\n");
+        printf("========================================\n");
+        printf("  Memory channel detection failed\n");
+        printf("========================================\n");
+        printf("Please enter your memory channel count:\n");
+        printf("(Check mainboard specs, typically 1, 2, 4, or 6)\n");
+        printf("(Most desktops: 2, Servers: 4-8)\n\n");
+        printf("Memory Channels [default: 2]: ");
+        fflush(stdout);
+
+        if (fgets(input, sizeof(input), stdin) != NULL) {
+            input[strcspn(input, "\n")] = 0;
+            if (strlen(input) == 0) {
+                global_system_config.memory_channels = 2;
+            } else {
+                int ch = atoi(input);
+                global_system_config.memory_channels = (ch > 0 && ch <= 16) ? ch : 2;
+            }
+        } else {
+            global_system_config.memory_channels = 2;
+        }
+        printf("[Memory] Using %d channels\n", global_system_config.memory_channels);
+    }
+
+    /* Try multiple methods to detect CPU frequency */
+    int freq = detect_cpu_freq();
+    if (freq > 0) {
+        global_system_config.cpu_freq_mhz = freq;
+    } else {
+        /* All detection methods failed, ask user */
+        printf("[CPU] All automatic detection methods failed.\n");
+        global_system_config.cpu_freq_mhz = prompt_cpu_freq_from_user();
+        printf("[CPU] Using frequency: %d MHz\n", global_system_config.cpu_freq_mhz);
+    }
+
+    global_system_config.detected = 1;
+}
+
+int get_memory_channels(void) {
+    if (!global_system_config.detected) {
+        initialize_system_config();
+    }
+    return global_system_config.memory_channels;
+}
+
+int get_cpu_freq_mhz(void) {
+    if (!global_system_config.detected) {
+        initialize_system_config();
+    }
+    return global_system_config.cpu_freq_mhz;
+}

@@ -1,8 +1,34 @@
+# Build artifacts
 bin/
 *.o
 *.a
+
+# Reports and logs
 reports/*.md
-.cache
+reports/*.json
+reports/*.pdf
+reports/*.png
+logs/
 *.log
-src/memory_benchmark
+
+# Release packages
+release/
+*.tar.gz
+*.zip
+
+# Cache config (should never be committed)
 .cache_config
+.system_config
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

@@ -4,64 +4,106 @@ CC ?= gcc
 CFLAGS = -O2 -Wall -std=c11 -pthread
 SRC_DIR = src
 BUILD_DIR = bin
+VERSION = 1.0.0
 
-# Active test binaries
-TEST_BINS = test_cache_hierarchy test_memory_bandwidth test_inter_core \
-            test_core_affinity test_cpu_alu test_cpu_float test_cpu_branch \
-            test_cpu_single test_cpu_multi
+# Test categories
+MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
+CPU_TESTS = test_cpu_alu test_cpu_float test_cpu_branch test_cpu_multi
+ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 
-.PHONY: all clean tests help
+# Common source modules (split from monolithic common.c)
+COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
+              src/simd.c src/pmu.c src/latency.c
 
+.PHONY: all clean tests memory cpu help release
+
+# Default: build all
 all: tests
 
-tests: $(addprefix $(BUILD_DIR)/, $(TEST_BINS))
+# Build all test binaries
+tests: $(addprefix $(BUILD_DIR)/, $(ALL_TESTS))
+
+# Build memory/cache subsystem tests
+memory: $(addprefix $(BUILD_DIR)/, $(MEMORY_TESTS))
+
+# Build CPU performance tests
+cpu: $(addprefix $(BUILD_DIR)/, $(CPU_TESTS))
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/test_cache_hierarchy: $(SRC_DIR)/test_cache_hierarchy.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+# All test binaries now depend on the full set of common modules.
+# This ensures linker sees all symbols (perf_counters, pmu_cache_counters, etc.)
+$(BUILD_DIR)/test_cache_hierarchy: $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS)
 
-$(BUILD_DIR)/test_memory_bandwidth: $(SRC_DIR)/test_memory_bandwidth.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(BUILD_DIR)/test_memory_bandwidth: $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS)
 
-$(BUILD_DIR)/test_inter_core: $(SRC_DIR)/test_inter_core.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(BUILD_DIR)/test_inter_core: $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS)
 
-$(BUILD_DIR)/test_core_affinity: $(SRC_DIR)/test_core_affinity.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(BUILD_DIR)/test_cpu_alu: $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS)
 
-$(BUILD_DIR)/test_cpu_alu: $(SRC_DIR)/test_cpu_alu.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) -lm
 
-$(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+$(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS)
 
-$(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) -lm
 
-$(BUILD_DIR)/test_cpu_single: $(SRC_DIR)/test_cpu_single.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
-
-$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(SRC_DIR)/common.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
-
+# Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)
 
+# Clean reports
+clean-reports:
+	rm -rf reports/*.md reports/*.json
+
+# Clean everything
+distclean: clean clean-reports
+
+# Build release package
+release: distclean tests
+	@mkdir -p release
+	@cp -r bin Makefile run_tests.py generate_report.py README.md src/common.h .
+	@mv bin/* release/ 2>/dev/null || true
+	@rm -rf bin
+	@tar -czvf memorytest-$(VERSION).tar.gz release/
+	@zip -r memorytest-$(VERSION).zip release/
+	@echo "Release packages created:"
+	@ls -la memorytest-$(VERSION).tar.gz memorytest-$(VERSION).zip
+	@rm -rf release/
+
 help:
-	@echo "Memory Benchmark Makefile"
+	@echo "Memory Benchmark Suite v$(VERSION)"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all     - Build all test binaries (default)"
-	@echo "  tests   - Build test binaries only"
-	@echo "  clean   - Remove all built binaries"
+	@echo "  all         - Build all test binaries (default)"
+	@echo "  tests       - Build all test binaries"
+	@echo "  memory      - Build memory/cache subsystem tests only"
+	@echo "  cpu         - Build CPU performance tests only"
+	@echo "  clean       - Remove built binaries"
+	@echo "  clean-reports - Remove generated reports"
+	@echo "  distclean   - Remove all generated files"
+	@echo "  release     - Create release package"
+	@echo "  help        - Show this help"
+	@echo ""
+	@echo "Test categories:"
+	@echo "  Memory/Cache:  cache_hierarchy, memory_bandwidth, inter_core"
+	@echo "  CPU:            cpu_alu, cpu_float, cpu_branch, cpu_multi"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make              # Build everything"
-	@echo "  make tests        # Build test modules"
+	@echo "  make memory       # Build memory tests only"
+	@echo "  make cpu          # Build CPU tests only"
 	@echo "  make clean        # Clean build directory"
 	@echo ""
 	@echo "Or use the Python runner for more control:"
 	@echo "  python3 run_tests.py --list"
-	@echo "  python3 run_tests.py cache_hierarchy memory_bandwidth"
+	@echo "  python3 run_tests.py --memory"
+	@echo "  python3 run_tests.py --cpu"
+	@echo "  python3 run_tests.py --all"

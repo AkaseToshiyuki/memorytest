@@ -2,8 +2,9 @@
  * CPU Branch Prediction Test
  *
  * 测试CPU分支预测性能:
- * - 稳定跳转 (taken/not taken)
- * - 随机跳转 (分支预测失效)
+ * - 各种分支模式
+ * - 分支预测错误率 (使用PMU)
+ * - BTB效率分析
  *
  * 跨平台支持: X86_64, ARM64, RISC-V, PowerPC
  */
@@ -16,60 +17,82 @@
 #define WARMUP_ITERATIONS 1000000
 #define ARRAY_SIZE 16384
 
+/* ========== 全局数据 ========== */
+static volatile uint64_t g_result = 0;
+static uint64_t random_array[ARRAY_SIZE];
+
 /* ========== 分支预测测试 ========== */
 
 /* 测试1: 总是taken的分枝 (高预测率) */
-static uint64_t test_branch_always_taken(uint64_t iterations) {
+static void test_always_taken(void *arg) {
+    (void)arg;
     uint64_t result = 0;
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i < iterations) {  /* 总是true */
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        if (i < ITERATIONS) {  /* 总是true */
             result += i;
         }
     }
-    return result;
+    g_result = result;
 }
 
 /* 测试2: 从不taken的分枝 (高预测率) */
-static uint64_t test_branch_never_taken(uint64_t iterations) {
+static void test_never_taken(void *arg) {
+    (void)arg;
     uint64_t result = 0;
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i > iterations) {  /* 永远false */
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        if (i > ITERATIONS) {  /* 永远false */
             result += i;
         }
     }
-    return result;
+    g_result = result;
 }
 
-/* 测试3: 50%概率taken (随机) - 使用全局数组 */
-static uint64_t test_branch_50_percent(uint64_t iterations) {
+/* 测试3: 50%概率taken (随机) */
+static void test_random(void *arg) {
+    (void)arg;
     uint64_t result = 0;
-    extern uint64_t random_array[16384];
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (random_array[i & (ARRAY_SIZE - 1)]) {  /* 基于随机数组 */
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        if (random_array[i & (ARRAY_SIZE - 1)]) {
             result += i;
         }
     }
-    return result;
+    g_result = result;
 }
 
 /* 测试4: 模式切换 - 每1024次切换一次 */
-static uint64_t test_branch_pattern_switch(uint64_t iterations) {
+static void test_pattern_1k(void *arg) {
+    (void)arg;
     uint64_t result = 0;
     int toggle = 0;
-    for (uint64_t i = 0; i < iterations; i++) {
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
         if ((i & 1023) == 0) toggle = !toggle;
         if (toggle) {
             result += i;
         }
     }
-    return result;
+    g_result = result;
 }
 
-/* 测试5: 2-bit饱和计数器的效果 */
-static uint64_t test_branch_2bit_counter(uint64_t iterations) {
+/* 测试5: 模式切换 - 每256次切换一次 */
+static void test_pattern_256(void *arg) {
+    (void)arg;
     uint64_t result = 0;
-    int state = 0;  /* 0-3: strongly not taken 到 strongly taken */
-    for (uint64_t i = 0; i < iterations; i++) {
+    int toggle = 0;
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        if ((i & 255) == 0) toggle = !toggle;
+        if (toggle) {
+            result += i;
+        }
+    }
+    g_result = result;
+}
+
+/* 测试6: 2-bit饱和计数器 */
+static void test_2bit_counter(void *arg) {
+    (void)arg;
+    uint64_t result = 0;
+    int state = 0;
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
         int taken = (state >= 2);
         if (taken) {
             result += i;
@@ -77,112 +100,190 @@ static uint64_t test_branch_2bit_counter(uint64_t iterations) {
         } else {
             state = (state > 0) ? state - 1 : state;
         }
-        /* 模拟50%概率切换方向 */
         if ((i & 1023) == 0) {
-            state = (state <= 1) ? 3 : 0;  /* 强制切换 */
+            state = (state <= 1) ? 3 : 0;
         }
     }
-    return result;
+    g_result = result;
+}
+
+/* 测试7: 递增分支 (最坏情况) */
+static void test_increasing(void *arg) {
+    (void)arg;
+    uint64_t result = 0;
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        if (i < i + 1) {  /* 总是true，但地址不可预测 */
+            result += i;
+        }
+    }
+    g_result = result;
+}
+
+/* 测试8: 函数调用返回 (间接分支) */
+static void test_indirect(void *arg) {
+    (void)arg;
+    static void *targets[] = {&&l1, &&l2, &&l3, &&l4, &&l1, &&l2, &&l3, &&l4};
+    uint64_t result = 0;
+    int idx = 0;
+
+    goto l1;
+l1: result += 1; idx = (idx + 1) & 3; goto *targets[idx];
+l2: result += 2; idx = (idx + 1) & 3; goto *targets[idx];
+l3: result += 3; idx = (idx + 1) & 3; goto *targets[idx];
+l4: result += 4; idx = (idx + 1) & 3; goto *targets[idx];
+
+    g_result = result;
+    (void)arg;
 }
 
 /* 初始化随机数组 */
-static void init_random_array(uint64_t *array, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        array[i] = (rand() & 1);  /* 随机0或1 */
+static void init_random_array(void) {
+    for (int i = 0; i < ARRAY_SIZE; i++) {
+        random_array[i] = (rand() & 1);
     }
 }
 
 typedef struct {
     const char *name;
-    uint64_t (*func)(uint64_t);
-    uint64_t result;
+    const char *category;
+    void (*func)(void*);
+    int use_pmu;
 } BranchTest;
 
-uint64_t random_array[ARRAY_SIZE];  /* 全局，供test_branch_50_percent使用 */
-
 static BranchTest tests[] = {
-    {"Always Taken", test_branch_always_taken, 0},
-    {"Never Taken", test_branch_never_taken, 0},
-    {"50% Random", test_branch_50_percent, 0},
-    {"Pattern 1K", test_branch_pattern_switch, 0},
-    {"2-bit Counter", test_branch_2bit_counter, 0},
+    {"Always Taken",   "Predictable", test_always_taken,    0},
+    {"Never Taken",    "Predictable", test_never_taken,    0},
+    {"Random 50%",     "Unpredictable", test_random,       0},
+    {"Pattern 1K",     "Pattern",      test_pattern_1k,       0},
+    {"Pattern 256",    "Pattern",     test_pattern_256,     0},
+    {"2-bit Counter",  "Adaptive",    test_2bit_counter,    0},
+    {"Increasing",     "Edge Case",   test_increasing,       0},
 };
 
 void run_cpu_branch_test(void) {
     print_header("CPU BRANCH PREDICTION TEST");
 
+    /* Initialize random array */
+    srand(42);
+    init_random_array();
+
+    int freq = get_cpu_freq_mhz();
     printf("Iterations: %d\n", ITERATIONS);
+    printf("CPU Frequency: %d MHz\n", freq);
     printf("Warmup: %d\n\n", WARMUP_ITERATIONS);
 
-    /* 初始化随机数组 */
-    srand(42);
-    init_random_array(random_array, ARRAY_SIZE);
-
     int num_tests = sizeof(tests) / sizeof(tests[0]);
+    int pmu_available = (perf_init_counters() == 0);
+
+    printf("PMU Performance Counters: %s\n\n", pmu_available ? "Available" : "Not available");
 
     /* 预热 */
     printf("Warming up...\n");
     for (int i = 0; i < num_tests; i++) {
-        volatile uint64_t dummy = tests[i].func(WARMUP_ITERATIONS);
-        (void)dummy;
+        tests[i].func(NULL);
     }
 
     /* 测试 */
-    printf("\n=== Branch Prediction ===\n\n");
+    printf("\n=== Branch Prediction Performance ===\n\n");
 
-    printf("%-16s | %-12s | %-12s | %-10s\n",
-           "Pattern", "Time(ms)", "Branches/sec", "ns/branch");
-    printf("%-16s | %-12s | %-12s | %-10s\n",
-           "---------------", "------------", "------------", "----------");
+    printf("%-16s | %-12s | %-12s | %-10s | %-12s | %-14s\n",
+           "Pattern", "Category", "Time(ms)", "ns/branch", "Mispred Rate", "PMU Data");
+    printf("%-16s | %-12s | %-12s | %-10s | %-12s | %-14s\n",
+           "---------------", "----------", "------------", "----------", "------------", "--------------");
+
+    PerfResult pr;
 
     for (int i = 0; i < num_tests; i++) {
         /* 再次预热 */
-        volatile uint64_t dummy = tests[i].func(WARMUP_ITERATIONS / 10);
-        (void)dummy;
+        tests[i].func(NULL);
+
+        /* Try PMU measurement */
+        int use_pmu = 0;
+        memset(&pr, 0, sizeof(pr));
+        if (pmu_available) {
+            if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                use_pmu = 1;
+                tests[i].use_pmu = 1;
+            }
+        }
 
         uint64_t start = get_time_ns();
-        tests[i].result = tests[i].func(ITERATIONS);
+        tests[i].func(NULL);
         uint64_t end = get_time_ns();
 
         uint64_t elapsed = end - start;
         double time_ms = (double)elapsed / 1000000.0;
-        double branches_per_sec = (double)ITERATIONS / ((double)elapsed / 1000000000.0);
         double ns_per_branch = (double)elapsed / ITERATIONS;
 
-        printf("%-16s | %-12.2f | %-12.0f | %-10.2f\n",
-               tests[i].name, time_ms, branches_per_sec, ns_per_branch);
+        const char *mispred_str;
+        if (use_pmu && pr.branch_mispred_rate >= 0) {
+            static char buf[32];
+            snprintf(buf, sizeof(buf), "%.3f%%", pr.branch_mispred_rate);
+            mispred_str = buf;
+        } else {
+            mispred_str = "N/A (no PMU)";
+        }
+
+        printf("%-16s | %-12s | %-12.2f | %-10.2f | %-12s | %s\n",
+               tests[i].name, tests[i].category, time_ms, ns_per_branch,
+               mispred_str, use_pmu ? "cycles/inst" : "estimated");
     }
 
-    printf("\nNote: Lower ns/branch = Better branch prediction\n");
-    printf("      'Always Taken' and 'Never Taken' should be fastest\n");
+    printf("\nNote: Lower ns/branch = Better branch prediction");
+    printf("\n      'Always Taken' and 'Never Taken' should be fastest\n");
+    printf("      High misprediction rate indicates branch prediction difficulty\n");
 
-    /* 生成报告 */
+    /* Generate report */
     ReportContext *report = report_init("cpu_branch", REPORT_FORMAT_MARKDOWN);
     if (report) {
         report_write_system_info(report);
         report_section(report, "Branch Prediction Test Results");
 
-        report_write(report, "| Pattern | Time(ms) | Branches/sec | ns/branch |\n");
-        report_write(report, "|----------|----------|---------------|----------|\n");
+        report_write(report, "PMU Available: %s\n\n", pmu_available ? "Yes" : "No");
+
+        report_write(report, "| Pattern | Category | Time(ms) | ns/branch | Mispred Rate | Data Source |\n");
+        report_write(report, "|----------|----------|----------|-----------|--------------|-------------|\n");
 
         for (int i = 0; i < num_tests; i++) {
+            PerfResult pr = {0};
+            int use_pmu = 0;
+            if (pmu_available) {
+                if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                    use_pmu = 1;
+                }
+            }
+
             uint64_t start = get_time_ns();
-            tests[i].result = tests[i].func(ITERATIONS);
+            tests[i].func(NULL);
             uint64_t end = get_time_ns();
 
             uint64_t elapsed = end - start;
             double time_ms = (double)elapsed / 1000000.0;
-            double branches_per_sec = (double)ITERATIONS / ((double)elapsed / 1000000000.0);
             double ns_per_branch = (double)elapsed / ITERATIONS;
 
-            report_write(report, "| %s | %.2f | %.0f | %.2f |\n",
-                       tests[i].name, time_ms, branches_per_sec, ns_per_branch);
+            const char *mispred_str;
+            if (use_pmu && pr.branch_mispred_rate >= 0) {
+                mispred_str = "Measured";
+            } else {
+                mispred_str = "N/A";
+            }
+
+            report_write(report, "| %s | %s | %.2f | %.2f | %s | %s |\n",
+                        tests[i].name, tests[i].category, time_ms, ns_per_branch,
+                        mispred_str, use_pmu ? "PMU" : "Estimated");
         }
+
+        report_section(report, "Branch Prediction Analysis");
+        report_write(report, "- Predictable patterns (Always/Never Taken): Should have ~0%% misprediction\n");
+        report_write(report, "- Random patterns: ~50%% misprediction rate expected\n");
+        report_write(report, "- Pattern-based: Misprediction on pattern switches\n");
+        report_write(report, "- 2-bit counter: Good for repetitive patterns\n\n");
 
         report_section(report, "Notes");
         report_write(report, "- Iterations: %d\n", ITERATIONS);
-        report_write(report, "- Lower ns/branch indicates better branch prediction\n");
-        report_write(report, "- Always Taken / Never Taken patterns are easiest to predict\n\n");
+        report_write(report, "- CPU Frequency: %d MHz\n", freq);
+        report_write(report, "- ns/branch = total time / number of branches\n");
+        report_write(report, "- Misprediction rate = branch mispredictions / total branches\n\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);
@@ -191,7 +292,10 @@ void run_cpu_branch_test(void) {
 }
 
 int main(int argc, char *argv[]) {
+    request_sudo_password();
     initialize_cache_config();
+    initialize_system_config();
+    pmu_init_cache_counters();
     print_system_info();
     run_cpu_branch_test();
     return 0;

@@ -1,10 +1,10 @@
 /**
  * Memory Bandwidth Test - Multi-threaded Version
  *
- * 四通道内存带宽测试
+ * 多通道内存带宽测试
  * 使用多线程并行访问内存,充分调动所有通道
  *
- * 理论带宽: LPDDR5 6000MT/s x 4 通道 x 8 bytes = 192 GB/s
+ * 理论带宽取决于检测到的内存通道数和内存速度
  */
 
 #include "common.h"
@@ -259,28 +259,29 @@ void run_memory_bandwidth_test(size_t size, int threads) {
     print_header("MEMORY BANDWIDTH TEST (Multi-threaded)");
     printf("Memory Size: %.2f MB, Threads: %d\n\n", size / (double)MB, threads);
 
-    /* 获取CPU核心数 */
+    /* 获取CPU核心数和内存通道数 */
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    int channels = get_memory_channels();
     printf("CPU Cores: %ld\n", num_cpus);
-    printf("Memory Channels: 4 (theoretical: 192 GB/s)\n\n");
+    printf("Memory Channels: %d\n\n", channels);
 
     /* 使用 mmap 分配大内存,确保物理对齐 */
     size_t total_size = size * 2;  /* 复制需要两倍空间 */
     void *ptr = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-    if (ptr == MAP_FAILED) {
+    int using_mmap = (ptr != MAP_FAILED);
+    if (!using_mmap) {
         /* fallback to malloc */
         ptr = malloc(total_size);
+        if (!ptr) {
+            printf("Allocation failed\n");
+            return;
+        }
         memset(ptr, 0, total_size);
     }
 
     void *src = ptr;
     void *dst = (char *)ptr + size;
-
-    if (!ptr) {
-        printf("Allocation failed\n");
-        return;
-    }
 
     /* 初始化内存 */
     memset(src, 0xAB, size);
@@ -307,8 +308,10 @@ void run_memory_bandwidth_test(size_t size, int threads) {
 
     printf("=== BANDWIDTH RESULTS ===\n");
     printf("  Thread Count: %d\n", threads);
-    printf("  Read:    %8.2f MB/s  (%.1f%% of theoretical 192 GB/s)\n",
-           read_bw, read_bw / 192000 * 100);
+    int bw_channels = get_memory_channels();
+    double theoretical_bw = bw_channels * 4800.0 * 8 / 1024;  /* channels * MT/s * bytes / 1024 = MB/s */
+    printf("  Read:    %8.2f MB/s  (%.1f%% of theoretical %.0f GB/s)\n",
+           read_bw, read_bw / theoretical_bw * 100, theoretical_bw / 1000);
     printf("  Write:   %8.2f MB/s\n", write_bw);
     printf("  Copy:    %8.2f MB/s\n\n", copy_bw);
 
@@ -329,12 +332,15 @@ void run_memory_bandwidth_test(size_t size, int threads) {
         report_write(report, "**Test Parameters**\n");
         report_write(report, "- Memory Size: %.2f MB\n", size / (double)MB);
         report_write(report, "- Thread Count: %d\n", threads);
-        report_write(report, "- Theoretical Bandwidth: 192 GB/s (4-channel LPDDR5 6000MT/s)\n\n");
+        int rep_channels = get_memory_channels();
+        double rep_theoretical = rep_channels * 4800.0 * 8 / 1024;  /* MB/s */
+        report_write(report, "- Memory Channels: %d\n", rep_channels);
+        report_write(report, "- Theoretical Bandwidth: ~%.0f GB/s\n\n", rep_theoretical / 1000);
 
         report_write(report, "## Bandwidth Results\n\n");
         report_write(report, "| Operation | Bandwidth (MB/s) | Efficiency |\n");
         report_write(report, "|-----------|--------------------|------------|\n");
-        report_write(report, "| Read      | %.2f           | %.1f%%     |\n", read_bw, read_bw / 192000 * 100);
+        report_write(report, "| Read      | %.2f           | %.1f%%     |\n", read_bw, read_bw / rep_theoretical * 100);
         report_write(report, "| Write     | %.2f           | -         |\n", write_bw);
         report_write(report, "| Copy      | %.2f           | -         |\n\n", copy_bw);
 
@@ -347,8 +353,10 @@ void run_memory_bandwidth_test(size_t size, int threads) {
         report_write(report, "- Copy/Read ratio: %.2f\n\n", copy_bw / (read_bw > 0 ? read_bw : 1));
 
         report_write(report, "## Notes\n");
-        report_write(report, "- Multi-threaded test uses %d threads to saturate 4-channel memory\n", threads);
-        report_write(report, "- Theoretical peak: 192 GB/s\n");
+        int note_channels = get_memory_channels();
+        report_write(report, "- Multi-threaded test uses %d threads to saturate %d-channel memory\n", threads, note_channels);
+        double note_theoretical = note_channels * 4800.0 * 8 / 1024;
+        report_write(report, "- Theoretical peak: ~%.0f GB/s\n", note_theoretical / 1000);
         report_write(report, "- Actual bandwidth depends on memory controller efficiency and core count\n\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
@@ -357,7 +365,7 @@ void run_memory_bandwidth_test(size_t size, int threads) {
     }
 
     /* 清理 */
-    if (ptr != MAP_FAILED) {
+    if (using_mmap) {
         munmap(ptr, total_size);
     } else {
         free(ptr);
@@ -368,19 +376,17 @@ static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
     printf("  -s, --size SIZE       Memory size (e.g., 1M, 100M, 1G) [default: 256M]\n");
-    printf("  -t, --threads N        Number of threads [default: 8]\n");
+    printf("  -t, --threads N        Number of threads [auto-detected if not specified]\n");
     printf("  -h, --help            Show this help\n");
 }
 
 int main(int argc, char *argv[]) {
+    request_sudo_password();
     size_t size = 256 * MB;
-    int threads = 8;
-
-    /* 自动检测线程数 */
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (threads > num_cpus) {
-        threads = num_cpus;
-    }
+    int threads = (int)num_cpus;  /* Default: use all available cores */
+
+    /* 用户可以通过 -t 参数覆盖 */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -394,6 +400,8 @@ int main(int argc, char *argv[]) {
     }
 
     initialize_cache_config();
+    initialize_system_config();
+    pmu_init_cache_counters();
     print_system_info();
     run_memory_bandwidth_test(size, threads);
     return 0;
