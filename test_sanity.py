@@ -49,14 +49,13 @@ RANGES = {
     "inter_core": {
         "intra_socket_lat_ns": (5.0,  300.0, "Same-socket CAS latency"),
     },
-    # cpu_alu: integer operations. Note: test_add/test_sub in cpu_alu.c use
-    # a mod-1000000007 trick to prevent -O2 from optimizing the loop away,
-    # but mod itself is a 64-bit div (~20 cycles on ARM64), so Add/Sub IPC
-    # appear artificially low (~0.05) compared to a true "add" workload.
-    # Mul uses the same mod trick. The numbers are consistent, just mod-bound.
+    # cpu_alu: integer operations. test_add/test_sub use a chained volatile
+    # dependency (sum = sum + i) for anti-optimization — no mod noise, so
+    # the IPC is the real add/sub cost. The range [0.01, 1.0] is conservative
+    # enough to cover both scalar and partially-pipelined architectures.
     "cpu_alu": {
-        "Add_ipc":       (0.01, 1.0,  "Integer add IPC (mod-bound in test_add; see cpu_alu.c:25)"),
-        "Mul_ipc":       (0.01, 1.0,  "Integer mul IPC (mod-bound in test_mul)"),
+        "Add_ipc": (0.01, 1.0, "Integer add IPC (chained volatile sink, no mod)"),
+        "Mul_ipc": (0.01, 1.0, "Integer mul IPC (chained volatile sink, no mod)"),
     },
     # cpu_float: float / double operations
     "cpu_float": {
