@@ -1,7 +1,10 @@
 # Memory Benchmark Makefile
 
 CC ?= gcc
-CFLAGS = -O2 -Wall -std=c11 -pthread
+# Default CFLAGS (-O2). Can be overridden via `make CFLAGS="..."` or the
+# release/opt targets below.
+CFLAGS ?= -O2 -Wall -std=c11 -pthread
+LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
 VERSION = 1.0.0
@@ -15,7 +18,7 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release
+.PHONY: all clean tests memory cpu help release opt opt3 ofast size perf-asan
 
 # Default: build all
 all: tests
@@ -35,25 +38,25 @@ $(BUILD_DIR):
 # All test binaries now depend on the full set of common modules.
 # This ensures linker sees all symbols (perf_counters, pmu_cache_counters, etc.)
 $(BUILD_DIR)/test_cache_hierarchy: $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_memory_bandwidth: $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_inter_core: $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_cpu_alu: $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) -lm
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) -lm $(LDFLAGS)
 
 $(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) -lm
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) -lm $(LDFLAGS)
 
 # Clean build artifacts
 clean:
@@ -66,10 +69,38 @@ clean-reports:
 # Clean everything
 distclean: clean clean-reports
 
+# Build with aggressive optimisation (mirrors `make CFLAGS="..."` but keeps -O2 default).
+# These targets compare well against the default -O2 build for the PERF_NOTES.md study.
+opt:     CFLAGS += -O3 -march=native -DNDEBUG -fomit-frame-pointer
+opt:     tests
+
+opt3:    CFLAGS += -O3 -march=native -DNDEBUG -fomit-frame-pointer
+opt3:    tests
+
+ofast:   CFLAGS += -Ofast -march=native -DNDEBUG -fomit-frame-pointer -ffast-math
+ofast:   tests
+
+# Link-time-optimisation build
+lto:     CFLAGS += -O3 -march=native -DNDEBUG -flto -fomit-frame-pointer
+lto:     LDFLAGS += -flto
+lto:     tests
+
+# ASan build for memory-safety checks (not used in perf analysis but useful)
+perf-asan: CFLAGS += -O1 -g -fsanitize=address -fno-omit-frame-pointer
+perf-asan: LDFLAGS += -fsanitize=address
+perf-asan: tests
+
+# Show text/data/bss per binary via the `size` utility
+size: tests
+	@echo "=== size $(BUILD_DIR)/* ==="
+	@$(SIZE) $(addprefix $(BUILD_DIR)/, $(ALL_TESTS)) || true
+
+SIZE ?= size
+
 # Build release package
-release: distclean tests
+release: opt
 	@mkdir -p release
-	@cp -r bin Makefile run_tests.py generate_report.py README.md src/common.h .
+	@cp -r bin Makefile generate_report.py README.md tests.json src/common.h .
 	@mv bin/* release/ 2>/dev/null || true
 	@rm -rf bin
 	@tar -czvf memorytest-$(VERSION).tar.gz release/
@@ -89,7 +120,13 @@ help:
 	@echo "  clean       - Remove built binaries"
 	@echo "  clean-reports - Remove generated reports"
 	@echo "  distclean   - Remove all generated files"
-	@echo "  release     - Create release package"
+	@echo "  release     - Create release package (uses opt flags)"
+	@echo "  opt         - Build with -O3 -march=native -DNDEBUG -fomit-frame-pointer"
+	@echo "  opt3        - Alias of opt"
+	@echo "  ofast       - Build with -Ofast -march=native -ffast-math"
+	@echo "  lto         - Build with -O3 -march=native -DNDEBUG -flto"
+	@echo "  size        - Show text/data/bss per binary"
+	@echo "  perf-asan   - Build with -O1 -g -fsanitize=address"
 	@echo "  help        - Show this help"
 	@echo ""
 	@echo "Test categories:"
@@ -102,8 +139,8 @@ help:
 	@echo "  make cpu          # Build CPU tests only"
 	@echo "  make clean        # Clean build directory"
 	@echo ""
-	@echo "Or use the Python runner for more control:"
-	@echo "  python3 run_tests.py --list"
-	@echo "  python3 run_tests.py --memory"
-	@echo "  python3 run_tests.py --cpu"
-	@echo "  python3 run_tests.py --all"
+	@echo "Or use the Python report generator for more control:"
+	@echo "  python3 generate_report.py --list"
+	@echo "  python3 generate_report.py --memory"
+	@echo "  python3 generate_report.py --cpu"
+	@echo "  python3 generate_report.py --all"

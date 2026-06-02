@@ -15,6 +15,8 @@ import sys
 import subprocess
 import argparse
 import getpass
+import json
+import time
 from datetime import datetime
 
 try:
@@ -47,57 +49,47 @@ os.makedirs(CHARTS_DIR, exist_ok=True)
 # Global sudo password cache
 _sudo_password = None
 
-TESTS = {
-    "cache_hierarchy": {
-        "name": "Cache Hierarchy Test",
-        "description": "L1/L2/L3 cache and RAM latency/bandwidth",
-        "bin": "test_cache_hierarchy",
-        "report": "cache_hierarchy_report.md",
-        "section": "Cache & Memory Hierarchy"
-    },
-    "memory_bandwidth": {
-        "name": "Memory Bandwidth Test",
-        "description": "Multi-channel memory read/write/copy bandwidth",
-        "bin": "test_memory_bandwidth",
-        "report": "memory_bandwidth_report.md",
-        "section": "Memory Bandwidth"
-    },
-    "inter_core": {
-        "name": "Inter-Core Latency Test",
-        "description": "Full NxN inter-core latency matrix + CAS throughput",
-        "bin": "test_inter_core",
-        "report": "inter_core_latency_report.md",
-        "section": "Inter-Core Communication"
-    },
-    "cpu_alu": {
-        "name": "CPU ALU Test",
-        "description": "Single-core integer operations (add/mul/div/mod)",
-        "bin": "test_cpu_alu",
-        "report": "cpu_alu_report.md",
-        "section": "CPU Integer (ALU)"
-    },
-    "cpu_float": {
-        "name": "CPU Float Test",
-        "description": "Single-core floating-point operations (float/double/sqrt)",
-        "bin": "test_cpu_float",
-        "report": "cpu_float_report.md",
-        "section": "CPU Floating-Point"
-    },
-    "cpu_branch": {
-        "name": "CPU Branch Test",
-        "description": "Branch prediction performance (various patterns)",
-        "bin": "test_cpu_branch",
-        "report": "cpu_branch_report.md",
-        "section": "CPU Branch Prediction"
-    },
-    "cpu_multi": {
-        "name": "CPU Multi-Core Test",
-        "description": "Multi-core speedup and efficiency",
-        "bin": "test_cpu_multi",
-        "report": "cpu_multi_core_report.md",
-        "section": "CPU Multi-Core Scaling"
-    }
-}
+TESTS_CONFIG_PATH = os.path.join(SCRIPT_DIR, "tests.json")
+
+
+def load_tests_config(path=TESTS_CONFIG_PATH):
+    """Load the unified test registry from tests.json.
+
+    Returns a (tests, categories) tuple where:
+      - tests: dict keyed by test name with all merged fields
+      - categories: dict mapping category -> list of test names
+    Raises FileNotFoundError or ValueError on schema problems.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    if "tests" not in config or not isinstance(config["tests"], dict):
+        raise ValueError(f"Invalid tests.json: missing 'tests' object in {path}")
+
+    tests = config["tests"]
+    # Derive categories from tests if not explicitly provided.
+    if "categories" in config and isinstance(config["categories"], dict):
+        categories = config["categories"]
+    else:
+        categories = {}
+        for name, info in tests.items():
+            cat = info.get("category", "uncategorized")
+            categories.setdefault(cat, []).append(name)
+
+    # Sanity check: every test listed in a category must exist in tests.
+    for cat, names in categories.items():
+        missing = [n for n in names if n not in tests]
+        if missing:
+            raise ValueError(
+                f"Invalid tests.json: category '{cat}' references unknown tests {missing}"
+            )
+
+    return tests, categories
+
+
+TESTS, CATEGORIES = load_tests_config()
+MEMORY_TESTS = CATEGORIES.get("memory", [])
+CPU_TESTS = CATEGORIES.get("cpu", [])
 
 
 def get_sudo_password():
@@ -133,6 +125,39 @@ def ensure_dirs():
     os.makedirs(BUILD_DIR, exist_ok=True)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     os.makedirs(CHARTS_DIR, exist_ok=True)
+
+
+def drop_caches():
+    """Try to clear OS page cache. Requires root; falls back to plain sync().
+
+    Returns True if a cleanup attempt succeeded (even non-root sync).
+    Ported from legacy run_tests.py.
+    """
+    try:
+        subprocess.run(["sync"], capture_output=True)
+        with open("/proc/sys/vm/drop_caches", "w") as f:
+            f.write("3")
+        print("[cache] drop_caches=3 (root)")
+        return True
+    except (PermissionError, IOError):
+        try:
+            subprocess.run(["sync"], capture_output=True)
+            print("[cache] sync only (no root)")
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def cleanup_before_next_test():
+    """Drop page caches between tests to reduce measurement noise."""
+    print("-" * 40)
+    print("[cache] clearing between tests...")
+    drop_caches()
+    time.sleep(1)
+    print("-" * 40)
+    print()
 
 
 def build_test(test_name):
@@ -1009,10 +1034,25 @@ def generate_pdf_report():
     return True
 
 
-def run_all_tests(verbose=False):
-    """Run all tests sequentially"""
+def run_all_tests(verbose=False, test_names=None, clean_cache=True):
+    """Run a sequence of tests (defaults to all) and (optionally) clean caches between them.
+
+    Args:
+        verbose: pass-through to run_test()
+        test_names: iterable of test ids; defaults to all tests in TESTS
+        clean_cache: if True (default), call cleanup_before_next_test() between runs
+    """
+    if test_names is None:
+        test_names = list(TESTS.keys())
+    # Validate
+    unknown = [t for t in test_names if t not in TESTS]
+    if unknown:
+        print(f"Error: unknown test(s): {unknown}")
+        print("Use --list to see available tests.")
+        return False
+
     print("\n" + "="*70)
-    print("RUNNING ALL BENCHMARK TESTS")
+    print(f"RUNNING {len(test_names)} BENCHMARK TEST(S)")
     print("="*70)
 
     ensure_dirs()
@@ -1024,9 +1064,13 @@ def run_all_tests(verbose=False):
         print("[Info] Running without sudo")
 
     results = {}
-    for test_name in TESTS:
+    for i, test_name in enumerate(test_names, 1):
+        print(f"\n[{i}/{len(test_names)}] ", end="")
         success = run_test(test_name, verbose)
         results[test_name] = success
+
+        if clean_cache and i < len(test_names):
+            cleanup_before_next_test()
 
     print("\n" + "="*70)
     print("TEST SUMMARY")
@@ -1060,6 +1104,15 @@ def main():
                         help="Run all tests and generate PDF report")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List all available tests")
+    # Additive flags (ported from legacy run_tests.py)
+    parser.add_argument("--memory", "-m", action="store_true",
+                        help="Run only memory/cache subsystem tests")
+    parser.add_argument("--cpu", "-c", action="store_true",
+                        help="Run only CPU performance tests")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Verbose output")
+    parser.add_argument("--no-cache-cleanup", action="store_true",
+                        help="Skip drop_caches between tests (faster, noisier)")
 
     args = parser.parse_args()
 
@@ -1067,16 +1120,26 @@ def main():
 
     if args.list:
         list_tests()
+        return
+
+    clean_cache = not args.no_cache_cleanup
+
+    if args.test:
+        run_test(args.test, verbose=args.verbose)
+    elif args.memory:
+        run_all_tests(verbose=args.verbose, test_names=MEMORY_TESTS, clean_cache=clean_cache)
+    elif args.cpu:
+        run_all_tests(verbose=args.verbose, test_names=CPU_TESTS, clean_cache=clean_cache)
     elif args.all:
-        run_all_tests()
-    elif args.test:
-        run_test(args.test)
+        run_all_tests(verbose=args.verbose, clean_cache=clean_cache)
     else:
         parser.print_help()
         print("\nExamples:")
         print("  python3 generate_report.py --list")
         print("  python3 generate_report.py --all")
         print("  python3 generate_report.py --test cache_hierarchy")
+        print("  python3 generate_report.py --memory")
+        print("  python3 generate_report.py --cpu")
 
 
 if __name__ == "__main__":

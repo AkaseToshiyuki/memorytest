@@ -107,6 +107,10 @@ python3 generate_report.py --list            # Show available tests
 
 **Note**: The script caches sudo credentials after first password entry for subsequent tests.
 
+The test registry is loaded from `tests.json` at the repo root. Edit that file
+to add or rename a test, then `python3 generate_report.py --list` will reflect
+the change.
+
 ## Visualizations Generated
 
 | Chart | Type | Description |
@@ -153,8 +157,8 @@ When PMU is unavailable (perf_event_paranoid > 0), timing-based estimation is us
 memorytest/
 ├── README.md                 # This file
 ├── Makefile                 # Build system
-├── generate_report.py       # PDF report generator with charts
-├── run_tests.py            # Legacy test runner
+├── generate_report.py       # PDF report generator with charts (single Python entry point)
+├── tests.json               # Unified test registry (name, description, bin, report, source, deps, category, section)
 ├── src/
 │   ├── common.h             # Header with types and declarations
 │   ├── common.c             # Shared utilities, detection, PMU

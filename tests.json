@@ -1,0 +1,89 @@
+{
+  "_comment": "Unified test registry. Merged from legacy run_tests.py (source/name/description/category/deps) and modern generate_report.py (name/description/bin/report/section). Edits here propagate to both entry points.",
+  "_schema_version": 1,
+  "categories": {
+    "memory": ["cache_hierarchy", "memory_bandwidth", "inter_core"],
+    "cpu": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi"]
+  },
+  "tests": {
+    "cache_hierarchy": {
+      "name": "Cache Hierarchy Test",
+      "description": "L1/L2/L3 cache and RAM latency/bandwidth",
+      "description_zh": "测量L1/L2/L3缓存和主存的访问延迟和带宽",
+      "category": "memory",
+      "section": "Cache & Memory Hierarchy",
+      "source": "src/test_cache_hierarchy.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cache_hierarchy",
+      "report": "cache_hierarchy_report.md"
+    },
+    "memory_bandwidth": {
+      "name": "Memory Bandwidth Test",
+      "description": "Multi-channel memory read/write/copy bandwidth",
+      "description_zh": "测量大块内存的读写和复制带宽",
+      "category": "memory",
+      "section": "Memory Bandwidth",
+      "source": "src/test_memory_bandwidth.c",
+      "deps": ["src/common.c"],
+      "bin": "test_memory_bandwidth",
+      "report": "memory_bandwidth_report.md"
+    },
+    "inter_core": {
+      "name": "Inter-Core Latency Test",
+      "description": "Full NxN inter-core latency matrix + CAS throughput",
+      "description_zh": "测量不同CPU核心间访问内存的延迟和带宽",
+      "category": "memory",
+      "section": "Inter-Core Communication",
+      "source": "src/test_inter_core.c",
+      "deps": ["src/common.c"],
+      "bin": "test_inter_core",
+      "report": "inter_core_latency_report.md"
+    },
+    "cpu_alu": {
+      "name": "CPU ALU Test",
+      "description": "Single-core integer operations (add/mul/div/mod)",
+      "description_zh": "CPU整数运算性能测试 (add/mul/div/mod)",
+      "category": "cpu",
+      "section": "CPU Integer (ALU)",
+      "source": "src/test_cpu_alu.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cpu_alu",
+      "report": "cpu_alu_report.md"
+    },
+    "cpu_float": {
+      "name": "CPU Float Test",
+      "description": "Single-core floating-point operations (float/double/sqrt)",
+      "description_zh": "CPU浮点运算性能测试 (add/mul/div/sqrt)",
+      "category": "cpu",
+      "section": "CPU Floating-Point",
+      "source": "src/test_cpu_float.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cpu_float",
+      "report": "cpu_float_report.md",
+      "linker_flags": ["-lm"]
+    },
+    "cpu_branch": {
+      "name": "CPU Branch Test",
+      "description": "Branch prediction performance (various patterns)",
+      "description_zh": "CPU分支预测性能测试",
+      "category": "cpu",
+      "section": "CPU Branch Prediction",
+      "source": "src/test_cpu_branch.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cpu_branch",
+      "report": "cpu_branch_report.md"
+    },
+    "cpu_multi": {
+      "name": "CPU Multi-Core Test",
+      "description": "Multi-core speedup and efficiency",
+      "description_zh": "多核并行性能和扩展性测试",
+      "category": "cpu",
+      "section": "CPU Multi-Core Scaling",
+      "source": "src/test_cpu_multi.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cpu_multi",
+      "report": "cpu_multi_core_report.md",
+      "linker_flags": ["-lm"]
+    }
+  }
+}
