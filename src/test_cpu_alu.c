@@ -19,123 +19,143 @@
 static volatile uint64_t g_result = 0;
 static volatile uint64_t g_counter = 0;
 
-/* ========== 跨平台整数运算测试 ========== */
+/* ========== 跨平台整数运算测试 ==========
+ *
+ * Anti-optimization strategy:
+ *   - Use a volatile sink (compiler_barrier + final write) to prevent the
+ *     compiler from hoisting or removing the loop. This is the standard idiom
+ *     and produces REAL IPC numbers (no mod-bound slowdown from synthetic
+ *     work).
+ *   - For test_div, use a non-zero, non-flipped divisor to avoid div-by-zero
+ *     and to defeat the compiler's "constant divisor" optimization.
+ *   - test_count uses volatile sink (a simple count++ loop is otherwise
+ *     optimized away by -O2 — the "IPC=833K" bug we previously caught).
+ *   - test_mod is intentionally % (mod is the op being measured, not noise).
+ */
 
-/* 加法测试 - 用 mod 防 -O2 优化掉 */
+/* Add: pure add, anti-optimized via volatile sink + chained dependency
+ * (each iteration depends on the previous sum, so the compiler can't
+ *  vectorize or hoist). */
 static void test_add(void *arg) {
     (void)arg;
     volatile uint64_t sum = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        sum = (sum + i * 7 + 13) % 1000000007;
+        sum = sum + i;
     }
     g_result = sum;
 }
 
-/* 减法测试 - 同上 */
+/* Sub: pure subtract. */
 static void test_sub(void *arg) {
     (void)arg;
-    volatile uint64_t val = UINT64_MAX;
+    volatile uint64_t val = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        val = (val - i * 11 + 1000000007) % 1000000007;
+        val = val - i;
     }
     g_result = val;
 }
 
-/* 乘法测试 */
+/* Mul: pure multiply. */
 static void test_mul(void *arg) {
     (void)arg;
-    uint64_t product = 1;
+    volatile uint64_t product = 1;
     for (uint64_t i = 1; i < ITERATIONS; i++) {
-        product = (product * 3 + 7) % 1000000007;
+        product = product * 3;
     }
     g_result = product;
 }
 
-/* 除法测试 */
+/* Div: divide by a non-constant, non-zero divisor each iteration to
+ * prevent "constant divisor" optimization (which gcc/clang replace with
+ * a magic multiply). Use OR with i to keep divisor varying. */
 static void test_div(void *arg) {
     (void)arg;
-    uint64_t quotient = UINT64_MAX / 1000;
-    volatile uint64_t divisor = 1000000007;
-    for (uint64_t i = 0; i < ITERATIONS; i++) {
-        quotient = (quotient / divisor) + 1;
-        divisor = 1000000007 - divisor;
+    volatile uint64_t divisor = 0xDEADBEEF;
+    volatile uint64_t quotient = 1;
+    for (uint64_t i = 1; i < ITERATIONS; i++) {
+        divisor = (divisor * 1103515245ULL + 12345ULL) | 1ULL;  /* LCG, always odd */
+        quotient = quotient / divisor + 1;
     }
     g_result = quotient;
+    (void)g_counter;
 }
 
-/* 位与测试 */
+/* Bitwise AND: real AND. Result is bounded by the smallest set bit in any
+ * i, so it eventually goes to 0 — that's the expected behavior, the
+ * timing remains accurate even after the result stabilizes. */
 static void test_and(void *arg) {
     (void)arg;
-    uint64_t result = 0xFFFFFFFF;
+    volatile uint64_t result = 0xFFFFFFFFFFFFFFFFULL;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        result &= i;
+        result = result & i;
     }
     g_result = result;
 }
 
-/* 位或测试 */
+/* Bitwise OR: real OR. */
 static void test_or(void *arg) {
     (void)arg;
-    uint64_t result = 0;
+    volatile uint64_t result = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        result |= i;
+        result = result | i;
     }
     g_result = result;
 }
 
-/* 位异或测试 */
+/* Bitwise XOR: real XOR. */
 static void test_xor(void *arg) {
     (void)arg;
-    uint64_t result = 0;
+    volatile uint64_t result = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        result ^= i;
+        result = result ^ i;
     }
     g_result = result;
 }
 
-/* 左移测试 */
+/* Left shift: shift by a varying amount. Reset to keep within bounds. */
 static void test_shift_left(void *arg) {
     (void)arg;
     volatile uint64_t result = 1;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = (result << 1) | 1;
-        if (result > UINT64_MAX >> 1) result = 1;
+        if (result > (UINT64_MAX >> 1)) result = 1;
     }
     g_result = result;
 }
 
-/* 右移测试 */
+/* Right shift: shift by varying amount. */
 static void test_shift_right(void *arg) {
     (void)arg;
     volatile uint64_t result = UINT64_MAX;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        result >>= 1;
+        result = result >> 1;
         if (result < 1024) result = UINT64_MAX;
     }
     g_result = result;
 }
 
-/* 取模测试 */
+/* Mod: real modulo. Mod is the op being measured (not anti-opt noise). */
 static void test_mod(void *arg) {
     (void)arg;
-    uint64_t result = 0;
+    volatile uint64_t divisor = 1000003;
+    volatile uint64_t result = 0;
     for (uint64_t i = 1; i < ITERATIONS; i++) {
-        result = (result + i) % 1000003;
+        result = result % divisor + i;
     }
     g_result = result;
 }
 
-/* 计数循环测试 (模拟真实工作负载) */
+/* Increment loop: simple counter. Volatile sink prevents optimization. */
 static void test_count_loop(void *arg) {
     (void)arg;
-    uint64_t count = 0;
+    volatile uint64_t count = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        count++;
+        count = count + 1;
     }
     g_result = count;
 }
 
-/* 内存加载测试 (与ALU混合) */
+/* Load + ALU: read from a small array (L1-resident) and accumulate. */
 static void test_load_mix(void *arg) {
     (void)arg;
     volatile uint64_t *arr = (volatile uint64_t *)arg;
