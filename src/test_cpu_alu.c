@@ -21,22 +21,22 @@ static volatile uint64_t g_counter = 0;
 
 /* ========== 跨平台整数运算测试 ========== */
 
-/* 加法测试 */
+/* 加法测试 - 用 mod 防 -O2 优化掉 */
 static void test_add(void *arg) {
     (void)arg;
-    uint64_t sum = 0;
+    volatile uint64_t sum = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        sum += i;
+        sum = (sum + i * 7 + 13) % 1000000007;
     }
     g_result = sum;
 }
 
-/* 减法测试 */
+/* 减法测试 - 同上 */
 static void test_sub(void *arg) {
     (void)arg;
-    uint64_t val = UINT64_MAX;
+    volatile uint64_t val = UINT64_MAX;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        val -= i;
+        val = (val - i * 11 + 1000000007) % 1000000007;
     }
     g_result = val;
 }

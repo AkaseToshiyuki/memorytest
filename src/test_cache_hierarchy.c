@@ -75,8 +75,18 @@ static double measure_latency(void *ptr, size_t size, int samples) {
 
     int count = 0;
 
-    /* Batch measurement - uses rdtsc_ns (lower overhead than get_time_ns)
-     * and prefetch_l1 to hide the L1 miss latency of the next access. */
+    /* Batch measurement - uses rdtsc_ns (lower overhead than get_time_ns).
+     *
+     * Prefetch logic: only prefetch when the working set exceeds L1, otherwise
+     * HW prefetch will pull the entire working set into L1 and we'd measure
+     * L1 hits even for "RAM-sized" buffers (observed 0.1 ns instead of 50-100 ns).
+     * For L1-sized tests (<= 32KB on most CPUs), skip prefetch and let the
+     * natural L1 hit latency show. */
+    int working_set_kb = (int)(size / 1024);
+    int use_prefetch = (working_set_kb > 64);  /* > L1D = 64KB on this host */
+    int prefetch_distance = 8;  /* lines ahead, balanced for HW prefetcher */
+    if (working_set_kb > 4096) prefetch_distance = 16;  /* RAM: prefetch further */
+
     for (int b = 0; b < num_batches && count < num_batches; b++) {
         /* Pseudo-random access - LCG to avoid stride patterns that HW prefetches */
         static const uint64_t a = 6364136223846793005ULL;
@@ -89,10 +99,12 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         for (int i = 0; i < BATCH_SIZE; i++) {
             lcg_state = a * lcg_state + c;
             size_t idx = lcg_state % words;
-            /* Prefetch the next random index to overlap its L1 miss. */
-            uint64_t next_lcg = a * lcg_state + c;
-            size_t next_idx = next_lcg % words;
-            prefetch_l1(&p[next_idx]);
+            if (use_prefetch) {
+                uint64_t next_lcg = a * lcg_state + c;
+                size_t next_idx = next_lcg % words;
+                /* prefetch_l2 for L2+ (avoids L1 pollution for small buffers) */
+                prefetch_l2(&p[next_idx]);
+            }
             compiler_barrier();
             sum += p[idx];  /* Real read */
         }

@@ -25,7 +25,7 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release opt opt3 ofast size perf-asan
+.PHONY: all clean tests memory cpu help release test smoke sanity
 
 # Default: build all
 all: tests
@@ -38,6 +38,17 @@ memory: $(addprefix $(BUILD_DIR)/, $(MEMORY_TESTS))
 
 # Build CPU performance tests
 cpu: $(addprefix $(BUILD_DIR)/, $(CPU_TESTS))
+
+# Layer 1 smoke test: run all 7 binaries, verify reports are produced
+smoke: tests
+	@bash test_smoke.sh
+
+# Layer 2 sanity test: assert each metric falls within plausible physical range
+sanity:
+	@python3 test_sanity.py
+
+# `make test` runs Layer 1 + Layer 2 (both should pass in <5 min total)
+test: tests smoke sanity
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

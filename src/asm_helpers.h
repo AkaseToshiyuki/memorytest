@@ -53,14 +53,26 @@ static inline uint64_t rdtsc_cycles(void) {
 }
 
 /* Calibrated: convert cycles to nanoseconds. Lazily initialized.
- * Uses CPU freq from global_system_config. */
+ *
+ * IMPORTANT: on ARM64, cntvct_el0 ticks at the *counter frequency* (cntfrq_el0),
+ * NOT the CPU core frequency. On this dev host (Kunpeng 920) cntfrq_el0=100MHz
+ * even though the CPU runs at 3GHz. Using get_cpu_freq_mhz() here would
+ * underestimate time by 30x. We read cntfrq_el0 directly for ARM64.
+ * On x86 with invariant TSC, rdtsc ticks at the CPU frequency. */
 static inline uint64_t rdtsc_ns(void) {
     static double cycles_per_ns = 0.0;
     if (__builtin_expect(cycles_per_ns == 0.0, 0)) {
-        /* First call: derive from global_system_config.cpu_freq_mhz */
+#if defined(__aarch64__)
+        uint64_t cntfrq;
+        __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+        cycles_per_ns = (double)cntfrq / 1e9;  /* Hz -> cycles/ns */
+#elif defined(__x86_64__) || defined(__i386__)
         int freq_mhz = get_cpu_freq_mhz();
-        if (freq_mhz <= 0) freq_mhz = 3000;  /* reasonable default */
+        if (freq_mhz <= 0) freq_mhz = 3000;
         cycles_per_ns = (double)freq_mhz / 1000.0;
+#else
+        cycles_per_ns = 1.0;  /* fallback path already returns ns */
+#endif
     }
     return (uint64_t)((double)rdtsc_cycles() / cycles_per_ns);
 }
