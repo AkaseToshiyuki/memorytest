@@ -89,13 +89,72 @@ static void detect_simd_capabilities(void) {
     }
 
 #elif defined(__riscv)
-    /* RISC-V: Check for vector extension */
-    /* V extension is detected via hwprobe or checking ELF flags */
-    strcpy(simd_info.simd_flags, "RVV (if compiled with -march=rv64gcv)");
-    simd_info.vector_width = 0; /* Variable length */
+    /* RISC-V: detect V extension via misa CSR (bit 12, 'V').
+     * misa is at CSR 0x301, single 64-bit register on RV64. */
+    {
+        uint64_t misa = 0;
+#if (__riscv_xlen == 64)
+        __asm__ volatile("csrr %0, misa" : "=r"(misa));
+        /* misa bit V = bit 12 ('V' = 0x2 'V' - 0x41 'A' = ...). Actually
+         * misa bit 12 is 'V'. We test the whole field. */
+        simd_info.has_rvv = (misa >> 12) & 1;
+#else
+        /* RV32: misa is split across two 32-bit CSRs (misa + miah) or read
+         * via two csrrs. For simplicity, mark has_rvv as 0 here. */
+        simd_info.has_rvv = 0;
+#endif
+        if (simd_info.has_rvv) {
+            strcpy(simd_info.simd_flags, "RVV (Vector)");
+            /* RVV VLEN is variable; report 128 as a conservative default.
+             * Real VLEN can be probed via CSR 0xC22 (vlenb) * 8. */
+            uint64_t vlenb = 0;
+            __asm__ volatile("csrr %0, 0xC22" : "=r"(vlenb));
+            simd_info.vector_width = (int)(vlenb * 8);
+        } else {
+            strcpy(simd_info.simd_flags, "RISC-V (no V ext)");
+            simd_info.vector_width = 64;
+        }
+    }
+
+#elif defined(__powerpc__) || defined(__powerpc64__)
+    /* PowerPC: detect AltiVec (VMX) and VSX via CPU features.
+     * AltiVec is mandatory on PowerPC since Power6 (2007).
+     * On modern PPC, use the cpu_has_feature() sysctl (Linux) or the
+     * HWCAP bits from getauxval(). */
+    {
+#if defined(__linux__)
+        /* Use __builtin_cpu_supports() if available (gcc 4.8+/clang). */
+        if (__builtin_cpu_supports("altivec")) {
+            simd_info.has_altivec = 1;
+            strcpy(simd_info.simd_flags, "AltiVec");
+            simd_info.vector_width = 128;
+        }
+        if (__builtin_cpu_supports("vsx")) {
+            simd_info.has_vsx = 1;
+            /* Append " VSX" to flags */
+            char *p = simd_info.simd_flags;
+            while (*p) p++;
+            strcpy(p, " VSX");
+            /* VSX is 128-bit register pair = 256 effective bits, but
+             * vector_width is conventionally reported as 128. */
+            simd_info.vector_width = 128;
+        }
+        if (!simd_info.has_altivec && !simd_info.has_vsx) {
+            strcpy(simd_info.simd_flags, "PowerPC (no SIMD)");
+            simd_info.vector_width = 64;
+        }
+#else
+        /* On non-Linux (e.g. AIX), assume AltiVec present on Power6+ */
+        simd_info.has_altivec = 1;
+        simd_info.has_vsx = 1;
+        strcpy(simd_info.simd_flags, "AltiVec VSX (assumed)");
+        simd_info.vector_width = 128;
+#endif
+    }
 
 #else
     strcpy(simd_info.simd_flags, "Unknown");
+    simd_info.vector_width = 64;  /* Baseline 64-bit */
 #endif
 }
 

@@ -142,8 +142,11 @@ typedef struct {
     char simd_flags[256];
     int has_sse, has_sse2, has_sse3, has_ssse3, has_sse4_1, has_sse4_2;
     int has_avx, has_avx2, has_avx512;
-    int has_neon, has_sve;
-    int vector_width;
+    int has_neon, has_sve, has_sve2;
+    int has_rvv;            /* RISC-V Vector extension (RVV) */
+    int has_altivec;        /* PowerPC AltiVec / VMX */
+    int has_vsx;            /* PowerPC Vector-Scalar Extension (VSX) */
+    int vector_width;       /* Max vector width in bits (128 for NEON, 256 for AVX2, ...) */
 } SIMDInfo;
 const SIMDInfo* get_simd_info(void);
 
