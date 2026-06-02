@@ -25,7 +25,7 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release test smoke sanity
+.PHONY: all clean tests memory cpu help release test smoke sanity regression lint
 
 # Default: build all
 all: tests
@@ -49,6 +49,25 @@ sanity:
 
 # `make test` runs Layer 1 + Layer 2 (both should pass in <5 min total)
 test: tests smoke sanity
+
+# Layer 3 regression: record current metrics, compare to median of last 3 runs
+# Exits 1 if any metric deviates >50% from baseline.
+regression:
+	@python3 test_regression.py
+
+# Just record current metrics to history.jsonl without comparing
+regression-record:
+	@python3 test_regression.py --record-only
+
+# lint: static sanity checks — CFLAGS warning hardening + Python compile + shellcheck
+lint:
+	@echo "--- C: recompile with -Werror on key warnings ---"
+	$(MAKE) clean tests CFLAGS="-O2 -Wall -std=c11 -pthread -Werror -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers"
+	@echo "--- Python: py_compile all .py ---"
+	@python3 -m py_compile generate_report.py test_sanity.py test_regression.py
+	@echo "--- bash: -n syntax check ---"
+	@bash -n test_smoke.sh
+	@echo "lint: all passed"
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

@@ -84,8 +84,6 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * natural L1 hit latency show. */
     int working_set_kb = (int)(size / 1024);
     int use_prefetch = (working_set_kb > 64);  /* > L1D = 64KB on this host */
-    int prefetch_distance = 8;  /* lines ahead, balanced for HW prefetcher */
-    if (working_set_kb > 4096) prefetch_distance = 16;  /* RAM: prefetch further */
 
     for (int b = 0; b < num_batches && count < num_batches; b++) {
         /* Pseudo-random access - LCG to avoid stride patterns that HW prefetches */
