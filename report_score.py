@@ -283,17 +283,17 @@ def parse_inter_core(text: str) -> dict:
     separated by spaces (NOT pipes), e.g.::
 
          0    1    2    3    4    5  ...
-    0    - 11.4 11.4 11.4 11.4 11.4 ...
-    1  11.5    - 11.4 11.5 11.4 11.4 ...
+    0    - 11.2 11.2 11.2 12.8 12.7 ...
+    1  11.3    - 11.2 11.1 12.7 12.8 ...
 
-    We grab the matrix by detecting the row whose first cell is "0" and
-    whose second cell is "-" (the self-row sentinel), then parse the
-    whitespace-delimited floats that follow. 1-hop latency is the cell at
-    column (src + 1) — the nearest neighbour on this SoC.
+    Note that the self-sentinel `-` is at parts[1] for row 0 (and any
+    other left-aligned row) but at parts[2] for row 1+ where there's a
+    left-side 1-hop cell first. We detect the sentinel position
+    dynamically. 1-hop latency is the cell adjacent to the sentinel
+    (parts[sentinel_idx-1] OR parts[sentinel_idx+1] whichever is non-zero).
     """
     import re
     lines = text.splitlines()
-    # Find the data row for core 0: starts with "0", second cell is "-".
     one_hop = []
     for line in lines:
         parts = line.split()
@@ -303,15 +303,34 @@ def parse_inter_core(text: str) -> dict:
             src = int(parts[0])
         except ValueError:
             continue
-        if len(parts) < 3 or parts[1] != "-":
+        if len(parts) < 3:
             continue
-        # parts[1] is the self-cell "-", parts[2] is src+1 cell (1-hop)
-        try:
-            v = float(parts[2])
-        except ValueError:
+        # Find the self-sentinel: it sits at column (src) of the matrix
+        # row, which can be at parts[1] (src=0) up to parts[src+1].
+        # We scan up to position 5.
+        sentinel_idx = None
+        for idx in range(1, min(6, len(parts))):
+            if parts[idx] == "-":
+                sentinel_idx = idx
+                break
+        if sentinel_idx is None:
             continue
-        if 1 < v < 5000:
-            one_hop.append((src, v))
+        # 1-hop = the cell adjacent to the sentinel, but only if src > 0
+        # (i.e. there's a left neighbour). For src=0, 1-hop is to the
+        # right. We collect both directions.
+        candidates = []
+        for k in (sentinel_idx - 1, sentinel_idx + 1):
+            if 0 < k < len(parts):
+                try:
+                    v = float(parts[k])
+                    if 1 < v < 5000:
+                        candidates.append(v)
+                except ValueError:
+                    pass
+        # Take the minimum of the candidates (the closer neighbour, which
+        # is the actual 1-hop)
+        if candidates:
+            one_hop.append((src, min(candidates)))
     if one_hop:
         vals = [v for _, v in one_hop]
         return {

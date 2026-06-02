@@ -49,17 +49,54 @@ except ImportError as e:
 # Markdown table parser (same as test_regression.py but standalone)
 # ============================================================================
 
-def _find_data_table(text: str, skip_first: bool = True):
+def _find_data_table(text: str, skip_first: bool = False):
+    """Find the first markdown/ASCII data table.
+
+    The binaries emit two flavours:
+      1. Canonical markdown: `| H | H |` headers followed by `| --- | --- |`
+      2. ASCII-aligned: `H | H |` headers followed by `--- | --- |`
+
+    Both are recognised. `skip_first` is preserved for callers that
+    explicitly want to bypass the first table. Sub-section headers like
+    `-- ALU --` and blank lines are skipped within the body.
+    """
+    import re
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+    section_re = re.compile(r"^--\s+.+\s+--$")
     lines = text.splitlines()
     i = 0
     found = 0
     while i < len(lines) - 1:
-        if lines[i].startswith("|") and re.match(r"^\|[\s\-|:]+\|?\s*$", lines[i + 1]):
-            headers = [c.strip().rstrip("*").strip() for c in lines[i].split("|")[1:-1]]
+        line_i = lines[i]
+        line_ip1 = lines[i + 1]
+        if "|" in line_i and delim_re.match(line_ip1):
+            cells = [c.strip().rstrip("*").strip() for c in line_i.split("|")]
+            if cells and not cells[0]:
+                cells = cells[1:]
+            if cells and not cells[-1]:
+                cells = cells[:-1]
+            headers = cells
             rows = []
             j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                cells = [c.strip().rstrip("*").strip() for c in lines[j].split("|")[1:-1]]
+            # Row lines: skip blank sub-section separators AND section
+            # headers, then stop at the first non-pipe, non-delimiter line.
+            while j < len(lines):
+                row_line = lines[j]
+                if not row_line.strip():
+                    j += 1
+                    continue
+                if section_re.match(row_line):
+                    j += 1
+                    continue
+                if "|" not in row_line:
+                    break
+                if delim_re.match(row_line):
+                    break
+                cells = [c.strip().rstrip("*").strip() for c in row_line.split("|")]
+                if cells and not cells[0]:
+                    cells = cells[1:]
+                if cells and not cells[-1]:
+                    cells = cells[:-1]
                 if len(cells) == len(headers):
                     rows.append(cells)
                 j += 1
@@ -73,21 +110,51 @@ def _find_data_table(text: str, skip_first: bool = True):
 
 
 def _parse_all_tables(text: str) -> list:
-    """Parse ALL data tables (not just the first) — used for cache_hierarchy which has multiple."""
+    """Parse ALL data tables (not just the first) — used for cache_hierarchy which has multiple.
+
+    Recognises both canonical markdown (`| H | H |`) and ASCII-aligned
+    (`H | H |`) header lines, skips empty sub-section separator lines
+    AND sub-section headers like `-- ALU --`.
+    """
+    import re
     out = []
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+    section_re = re.compile(r"^--\s+.+\s+--$")
     lines = text.splitlines()
     i = 0
     while i < len(lines) - 1:
-        if lines[i].startswith("|") and re.match(r"^\|[\s\-|:]+\|?\s*$", lines[i + 1]):
-            headers = [c.strip().rstrip("*").strip() for c in lines[i].split("|")[1:-1]]
+        line_i = lines[i]
+        line_ip1 = lines[i + 1]
+        if "|" in line_i and delim_re.match(line_ip1):
+            cells = [c.strip().rstrip("*").strip() for c in line_i.split("|")]
+            if cells and not cells[0]:
+                cells = cells[1:]
+            if cells and not cells[-1]:
+                cells = cells[:-1]
+            headers = cells
             rows = []
             j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                cells = [c.strip().rstrip("*").strip() for c in lines[j].split("|")[1:-1]]
+            while j < len(lines):
+                row_line = lines[j]
+                if not row_line.strip():
+                    j += 1
+                    continue
+                if section_re.match(row_line):
+                    j += 1
+                    continue
+                if "|" not in row_line:
+                    break
+                if delim_re.match(row_line):
+                    break
+                cells = [c.strip().rstrip("*").strip() for c in row_line.split("|")]
+                if cells and not cells[0]:
+                    cells = cells[1:]
+                if cells and not cells[-1]:
+                    cells = cells[:-1]
                 if len(cells) == len(headers):
                     rows.append(cells)
                 j += 1
-            if rows:  # only include tables with data rows
+            if rows:
                 out.append((headers, rows))
             i = j
         else:

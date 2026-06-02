@@ -259,72 +259,189 @@ def list_tests():
     print("  python3 generate_report.py --test <name>   # Run single test")
 
 
+def _parse_table_row(line: str) -> list:
+    """Parse a single table row, supporting both markdown (`| a | b |`)
+    and ASCII-aligned (`a | b`) flavours our binaries emit."""
+    if '|' not in line:
+        return [c.strip() for c in line.split()]
+    cells = [c.strip() for c in line.split('|')]
+    # Drop the leading/trailing empty fragments that come from leading/trailing `|`
+    if cells and not cells[0]:
+        cells = cells[1:]
+    if cells and not cells[-1]:
+        cells = cells[:-1]
+    return cells
+
+
+def _find_table_after(text: str, header_keyword: str, max_skip: int = 0):
+    """Find a markdown/ASCII table whose header line contains header_keyword.
+
+    The first table whose header line is followed by a delimiter line of
+    `-` `|` `:` characters is returned as (headers, rows). Empty separator
+    lines AND sub-section headers like "-- ALU --" are skipped within the
+    table body.
+
+    Args:
+        text: full report text
+        header_keyword: substring that must appear in the header line
+        max_skip: number of leading matching tables to skip (use 0 for the
+            first table; useful when the file has a "system info" table
+            first)
+    """
+    import re
+    delim_re = re.compile(r'^[\s\-:|]+\|?$')
+    section_re = re.compile(r"^--\s+.+\s+--$")
+    lines = text.splitlines()
+    skipped = 0
+    i = 0
+    while i < len(lines) - 1:
+        line_i = lines[i]
+        line_ip1 = lines[i + 1]
+        if header_keyword.lower() in line_i.lower() and delim_re.match(line_ip1):
+            if skipped < max_skip:
+                # Advance past this table so we look for the next one.
+                j = i + 2
+                while j < len(lines):
+                    rl = lines[j]
+                    if not rl.strip():
+                        j += 1
+                        continue
+                    if section_re.match(rl):
+                        j += 1
+                        continue
+                    if "|" not in rl:
+                        break
+                    if delim_re.match(rl):
+                        break
+                    j += 1
+                i = j
+                skipped += 1
+                continue
+            headers = _parse_table_row(line_i)
+            rows = []
+            j = i + 2
+            while j < len(lines):
+                rl = lines[j]
+                if not rl.strip():
+                    j += 1
+                    continue
+                if section_re.match(rl):
+                    j += 1
+                    continue
+                if "|" not in rl:
+                    break
+                if delim_re.match(rl):
+                    break
+                cells = _parse_table_row(rl)
+                if len(cells) == len(headers):
+                    rows.append(cells)
+                j += 1
+            return headers, rows
+        i += 1
+    return None
+
+
 def parse_cache_report(report_path):
-    """Parse cache hierarchy report data"""
+    """Parse cache hierarchy report data.
+
+    The cache binary writes either a markdown-style table
+    (`| Size | RdLat(ns) | ...`) or an ASCII-aligned variant
+    (`Size | RdLat(ns) | ...`). The new `_find_table_after` helper
+    handles both, plus the multi-channel bandwidth tables that
+    follow. We pick the FIRST table whose header mentions "Size"
+    AND "RdLat" (or "Latency") — that's the latency table.
+    """
     data = {'sizes': [], 'rd_lat': [], 'wr_lat': [], 'bw': [], 'expected': []}
     try:
-        with open(report_path, 'r') as f:
-            content = f.read()
-            in_table = False
-            for line in content.split('\n'):
-                if 'RdLat(ns)' in line or 'Rd Lat' in line:
-                    in_table = True
-                    continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    # parts[0]=empty, parts[1]=Size, parts[2]=RdLat, parts[3]=WrLat, parts[4]=BW, parts[5]=Expected
-                    if len(parts) >= 6:
-                        try:
-                            size = parts[1]
-                            rd_lat = float(parts[2])
-                            wr_lat = float(parts[3])
-                            bw = float(parts[4])
-                            expected = parts[5]
-                            # Filter out separator lines
-                            if size.replace('.', '').replace('KB', '').replace('MB', '').replace('GB', '').isdigit() or size[-2:] in ['KB', 'MB', 'GB']:
-                                data['sizes'].append(size)
-                                data['rd_lat'].append(rd_lat)
-                                data['wr_lat'].append(wr_lat)
-                                data['bw'].append(bw)
-                                data['expected'].append(expected)
-                        except (ValueError, IndexError):
-                            pass
-                elif in_table and line.strip() == '':
-                    break
+        text = open(report_path).read()
+        # The first such table is the latency table
+        tbl = _find_table_after(text, "RdLat", max_skip=0)
+        if tbl is None:
+            tbl = _find_table_after(text, "Latency", max_skip=0)
+        if tbl is None:
+            return data
+        headers, rows = tbl
+        # Locate columns by header name (case-insensitive, fuzzy)
+        def col_idx(*candidates):
+            for i, h in enumerate(headers):
+                hl = h.lower()
+                for c in candidates:
+                    if c in hl:
+                        return i
+            return None
+        size_col = col_idx("size")
+        rd_col = col_idx("rdlat", "read")
+        wr_col = col_idx("wrlat", "write")
+        bw_col = col_idx("bw", "bandwidth")
+        exp_col = col_idx("expected")
+        if size_col is None: return data
+        # Default to columns 0,1,2,3,4 if header names didn't match
+        if rd_col is None: rd_col = 1
+        if wr_col is None: wr_col = 2
+        if bw_col is None: bw_col = 3
+        if exp_col is None: exp_col = 4
+        for row in rows:
+            try:
+                size = row[size_col]
+                rd_lat = float(row[rd_col])
+                wr_lat = float(row[wr_col])
+                bw = float(row[bw_col])
+                expected = row[exp_col] if exp_col < len(row) else ""
+                data['sizes'].append(size)
+                data['rd_lat'].append(rd_lat)
+                data['wr_lat'].append(wr_lat)
+                data['bw'].append(bw)
+                data['expected'].append(expected)
+            except (ValueError, IndexError):
+                pass
     except Exception as e:
         print(f"Error parsing cache report: {e}")
     return data
 
 
 def parse_multi_core_report(report_path):
-    """Parse multi-core report data for scaling charts"""
+    """Parse multi-core report data for scaling charts.
+
+    The multi-core binary writes a markdown/ASCII table with columns like:
+    `Operation | Category | Threads | Ops/sec | ns/op | Speedup | Efficiency`.
+    We look for any table whose header contains both "Operation" AND
+    ("Speedup" OR "Efficiency") so we tolerate header renames between
+    binary versions.
+    """
     data = {'operations': {}, 'thread_counts': [1, 2, 4, 8, 16, 24]}
     try:
-        with open(report_path, 'r') as f:
-            content = f.read()
-            in_table = False
-
-            for line in content.split('\n'):
-                if 'Operation | Category' in line or '|-----------|' in line:
-                    in_table = True
-                    continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 7:
-                        try:
-                            op = parts[1]
-                            speedup_str = parts[5].replace('x', '').strip()
-                            eff_str = parts[6].replace('%', '').strip()
-                            speedup = float(speedup_str)
-                            eff = float(eff_str)
-                            if op not in data['operations']:
-                                data['operations'][op] = {'speedup': [], 'efficiency': []}
-                            data['operations'][op]['speedup'].append(speedup)
-                            data['operations'][op]['efficiency'].append(eff)
-                        except:
-                            pass
-                if in_table and line.strip() == '' and len(data['operations']) > 0:
-                    break
+        text = open(report_path).read()
+        tbl = _find_table_after(text, "Speedup", max_skip=0)
+        if tbl is None:
+            tbl = _find_table_after(text, "Efficiency", max_skip=0)
+        if tbl is None:
+            tbl = _find_table_after(text, "Operation", max_skip=0)
+        if tbl is None:
+            return data
+        headers, rows = tbl
+        def col_idx(*candidates):
+            for i, h in enumerate(headers):
+                hl = h.lower()
+                for c in candidates:
+                    if c in hl:
+                        return i
+            return None
+        op_col = col_idx("operation")
+        sp_col = col_idx("speedup")
+        eff_col = col_idx("efficiency")
+        if op_col is None or sp_col is None or eff_col is None:
+            return data
+        for row in rows:
+            try:
+                op = row[op_col]
+                speedup = float(row[sp_col].replace('x', '').strip())
+                eff = float(row[eff_col].replace('%', '').strip())
+                if op not in data['operations']:
+                    data['operations'][op] = {'speedup': [], 'efficiency': []}
+                data['operations'][op]['speedup'].append(speedup)
+                data['operations'][op]['efficiency'].append(eff)
+            except (ValueError, IndexError):
+                pass
     except Exception as e:
         print(f"Error parsing multi-core report: {e}")
     return data
@@ -416,41 +533,61 @@ def create_multi_core_scaling_chart(data, output_path):
 
 
 def create_bandwidth_chart(report_path, output_path):
-    """Create memory bandwidth chart"""
+    """Create memory bandwidth chart.
+
+    The bandwidth binary writes a textual summary like::
+
+        === BANDWIDTH RESULTS ===
+          Read:    36279.58 MB/s
+          Write:   17463.33 MB/s
+          Copy:    23687.22 MB/s
+
+    (no markdown/ASCII table). We extract values via regex; falls back
+    to a multi-channel bandwidth table (`Size | Read | Write | Copy`)
+    if the textual summary is absent.
+    """
     if not HAS_MATPLOTLIB:
         return None
 
     try:
-        with open(report_path, 'r') as f:
-            content = f.read()
-            read_bw, write_bw, copy_bw = None, None, None
-            in_table = False
-            seen_data = False
+        import re
+        text = open(report_path).read()
+        read_bw = write_bw = copy_bw = None
+        patterns = {
+            "Read":  r"Read:\s+([0-9]+\.[0-9]+)\s*MB/s",
+            "Write": r"Write:\s+([0-9]+\.[0-9]+)\s*MB/s",
+            "Copy":  r"Copy:\s+([0-9]+\.[0-9]+)\s*MB/s",
+        }
+        for op, pat in patterns.items():
+            m = re.search(pat, text)
+            if m:
+                v = float(m.group(1))
+                if op == "Read":  read_bw  = v
+                elif op == "Write": write_bw = v
+                else:               copy_bw  = v
 
-            for line in content.split('\n'):
-                if 'Bandwidth Results' in line:
-                    in_table = True
-                    continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 3:
-                        op = parts[1]
-                        bw_str = parts[2].replace(',', '')
-                        try:
-                            bw = float(bw_str)
-                            if op == 'Read':
-                                read_bw = bw
-                                seen_data = True
-                            elif op == 'Write':
-                                write_bw = bw
-                                seen_data = True
-                            elif op == 'Copy':
-                                copy_bw = bw
-                                seen_data = True
-                        except ValueError:
-                            pass
-                if in_table and seen_data and line.strip() == '':
-                    break
+        # Fallback: try the multi-channel bandwidth table (Size | Read | Write | Copy)
+        if read_bw is None:
+            tbl = _find_table_after(text, "Read", max_skip=0)
+            if tbl:
+                headers, rows = tbl
+                # Average across all rows for a stable single-value summary
+                def col_idx(*cands):
+                    for i, h in enumerate(headers):
+                        hl = h.lower()
+                        for c in cands:
+                            if c in hl:
+                                return i
+                    return None
+                r_col = col_idx("read")
+                w_col = col_idx("write")
+                c_col = col_idx("copy")
+                r_vals = [float(row[r_col]) for row in rows if r_col is not None and r_col < len(row)]
+                w_vals = [float(row[w_col]) for row in rows if w_col is not None and w_col < len(row)]
+                c_vals = [float(row[c_col]) for row in rows if c_col is not None and c_col < len(row)]
+                if r_vals: read_bw = max(r_vals)  # use peak across buffer sizes
+                if w_vals: write_bw = max(w_vals)
+                if c_vals: copy_bw = max(c_vals)
 
         if read_bw is None and write_bw is None and copy_bw is None:
             return None
@@ -466,6 +603,7 @@ def create_bandwidth_chart(report_path, output_path):
         ax.grid(True, alpha=0.3, axis='y')
 
         for bar, val in zip(bars, values):
+            if val is None: continue
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 500,
                    f'{val:.0f}', ha='center', va='bottom')
 
@@ -530,42 +668,71 @@ def create_cpu_chart(report_path, output_path, chart_type='alu'):
 
 
 def create_inter_core_heatmap(report_path, output_path):
-    """Create inter-core latency heatmap"""
+    """Create inter-core latency heatmap.
+
+    The inter-core binary writes a 24x24 matrix using SPACE-delimited
+    floats (NOT `|`). The matrix starts after `=== CAS Latency (ns) ===`
+    and continues until `=== CAS Throughput` (or end of file).
+    Each row begins with the source core id; the second cell is `-`
+    (self-pair sentinel); the rest of the cells are the cross-core
+    latencies in nanoseconds.
+    """
     if not HAS_MATPLOTLIB:
         return None
 
     try:
+        text = open(report_path).read()
         matrix = []
-        in_latency_matrix = False
-
-        with open(report_path, 'r') as f:
-            for line in f:
-                if 'CAS Throughput' in line:
+        in_matrix = False
+        for line in text.splitlines():
+            if "CAS Latency" in line and "ns" in line:
+                in_matrix = True
+                continue
+            if "CAS Throughput" in line:
+                break
+            if not in_matrix:
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            try:
+                src = int(parts[0])
+            except ValueError:
+                continue
+            # Find the self-pair sentinel. The matrix is space-delimited
+            # and the sentinel is the "-" sitting at column (src) of
+            # the matrix row. We scan up to position 5 because the
+            # leftmost columns may be present (so sentinel_idx can
+            # range from 1 to 5 for src=0..4).
+            sentinel_idx = None
+            for idx in range(1, min(6, len(parts))):
+                if parts[idx] == "-":
+                    sentinel_idx = idx
                     break
-                if 'CAS Latency' in line and 'ns' in line:
-                    in_latency_matrix = True
-                    continue
-                if in_latency_matrix and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    # Skip header and separator lines
-                    if len(parts) > 1 and '**Core**' in parts[1]:
-                        continue
-                    if all('---' in p or p == '' for p in parts):
-                        continue
-                    # Skip first (row label) and last (trailing empty from split)
-                    vals = [p for p in parts[1:] if p]
-                    row_vals = []
-                    for p in vals[1:]:  # Skip row number at vals[0]
-                        try:
-                            row_vals.append(float(p))
-                        except:
-                            if p == '-':
-                                row_vals.append(0)
-                    if len(row_vals) >= 4:
-                        matrix.append(row_vals)
+            if sentinel_idx is None:
+                continue
+            # Latencies to ALL cores. The full NxN matrix should be
+            # exactly N cells long (excluding src and the sentinel).
+            # Pad/truncate as needed to keep rows rectangular.
+            row_vals = []
+            for k, p in enumerate(parts[1:], start=1):
+                if k == sentinel_idx:
+                    continue  # skip the self-sentinel
+                try:
+                    row_vals.append(float(p))
+                except ValueError:
+                    row_vals.append(0.0)
+            if len(row_vals) >= 4:
+                matrix.append(row_vals)
 
         if not matrix or len(matrix) < 4:
             return None
+
+        # Pad rows to consistent width (some rows may be shorter on 1st pass)
+        ncols = max(len(r) for r in matrix)
+        for r in matrix:
+            while len(r) < ncols:
+                r.append(0.0)
 
         fig, ax = plt.subplots(figsize=(12, 10))
         im = ax.imshow(matrix, cmap='YlOrRd', aspect='auto')
@@ -579,7 +746,6 @@ def create_inter_core_heatmap(report_path, output_path):
         ax.set_xticklabels(range(n))
         ax.set_yticklabels(range(n))
 
-        # Add text annotations in each cell
         for i in range(n):
             for j in range(len(matrix[i])):
                 val = matrix[i][j]
@@ -602,108 +768,245 @@ def create_inter_core_heatmap(report_path, output_path):
 
 
 def extract_bandwidth_data(report_path):
-    """Extract bandwidth data from report"""
+    """Extract bandwidth data from report.
+
+    The bandwidth binary writes a textual summary like::
+
+        === BANDWIDTH RESULTS ===
+          Read:    36279.58 MB/s
+          Write:   17463.33 MB/s
+          Copy:    23687.22 MB/s
+
+    (no markdown table), so we use regex. Falls back to a markdown table
+    parser if the textual summary is absent.
+    """
+    import re
     data = []
-    in_table = False
     try:
-        with open(report_path, 'r') as f:
-            for line in f:
-                if 'Bandwidth Results' in line:
-                    in_table = True
-                    continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 3 and parts[1] in ['Read', 'Write', 'Copy']:
-                        try:
-                            bw = float(parts[2].replace(',', ''))
-                            eff = parts[3].strip() if len(parts) > 3 else '-'
-                            data.append((parts[1], bw, eff))
-                        except:
-                            pass
-                if in_table and line.strip() == '' and len(data) > 0:
-                    break
-    except:
+        text = open(report_path).read()
+        # Primary: regex against the textual summary
+        for op in ("Read", "Write", "Copy"):
+            m = re.search(rf"{op}:\s+([0-9]+\.[0-9]+)\s*MB/s", text)
+            if m:
+                bw = float(m.group(1))
+                # Theoretical peak is roughly 76 GB/s for 2-channel DDR4-4800
+                # per the binary's "理论峰值" line. Compute efficiency
+                # against it as a sanity-check number.
+                peak_m = re.search(r"理论峰值[^\d]*([0-9]+\.?[0-9]*)\s*GB/s", text)
+                if peak_m:
+                    peak = float(peak_m.group(1)) * 1000  # GB/s → MB/s
+                    eff = f"{(bw / peak * 100):.1f}%"
+                else:
+                    eff = "-"
+                data.append((op, bw, eff))
+        if data:
+            return data
+        # Fallback: try a markdown/ASCII table (multi-channel bandwidth)
+        tbl = _find_table_after(text, "Read", max_skip=0)
+        if tbl:
+            headers, rows = tbl
+            def col_idx(*cands):
+                for i, h in enumerate(headers):
+                    hl = h.lower()
+                    for c in cands:
+                        if c in hl:
+                            return i
+                return None
+            r_col = col_idx("read")
+            w_col = col_idx("write")
+            c_col = col_idx("copy")
+            for row in rows:
+                if r_col is not None and r_col < len(row):
+                    try: data.append(("Read", float(row[r_col]), "-"))
+                    except ValueError: pass
+                if w_col is not None and w_col < len(row):
+                    try: data.append(("Write", float(row[w_col]), "-"))
+                    except ValueError: pass
+                if c_col is not None and c_col < len(row):
+                    try: data.append(("Copy", float(row[c_col]), "-"))
+                    except ValueError: pass
+    except Exception:
         pass
     return data
 
 def extract_cpu_alu_data(report_path):
-    """Extract CPU ALU data from report"""
+    """Extract CPU ALU data from report.
+
+    Recognises both canonical markdown (`| Op | ...`) and ASCII-aligned
+    (`Op | ...`) header lines, and skips sub-section headers like
+    `-- ALU --` and blank lines.
+    """
+    import re
     data = []
     in_table = False
+    delim_re = re.compile(r'^[\s\-:|]+\|?$')
+    section_re = re.compile(r"^--\s+.+\s+--$")
     try:
-        with open(report_path, 'r') as f:
-            for line in f:
-                if 'ns/op' in line and '|' in line:
-                    in_table = True
+        text = open(report_path).read()
+        for line in text.splitlines():
+            if not in_table and 'ns/op' in line and '|' in line:
+                in_table = True
+                continue
+            if in_table:
+                if not line.strip():
+                    continue  # skip blank sub-section separators
+                if section_re.match(line):
                     continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    # Filter out header and separator lines
-                    if len(parts) >= 6 and parts[1] not in ['Operation', '---', '-', ''] and not parts[2].startswith('-'):
-                        data.append([parts[1], parts[2], parts[3], parts[4], parts[5]])
-                if in_table and line.strip() == '' and len(data) > 0:
+                if delim_re.match(line):
+                    continue  # skip delimiter
+                if '|' not in line:
                     break
-    except:
+                parts = [p.strip() for p in line.split('|')]
+                # Detect column offset: if parts[0] is a known header label
+                # (Operation, Add, Sub, ...), shift left by one.
+                if parts[0] in ('Operation', '', '-') and len(parts) >= 7:
+                    cells = parts[1:-1] if not parts[-1] else parts[1:]
+                else:
+                    cells = parts
+                if len(cells) >= 5 and cells[0] and cells[0] not in ('Operation',):
+                    data.append(cells[:5])
+    except Exception:
         pass
     return data
+
 
 def extract_cpu_float_data(report_path):
-    """Extract CPU float data from report"""
+    """Extract CPU float data from report (recognises both markdown and ASCII tables)."""
+    import re
     data = []
     in_table = False
+    delim_re = re.compile(r'^[\s\-:|]+\|?$')
+    section_re = re.compile(r"^--\s+.+\s+--$")
     try:
-        with open(report_path, 'r') as f:
-            for line in f:
-                if 'ns/op' in line and '|' in line:
-                    in_table = True
+        text = open(report_path).read()
+        for line in text.splitlines():
+            if not in_table and 'ns/op' in line and '|' in line:
+                in_table = True
+                continue
+            if in_table:
+                if not line.strip():
+                    continue  # skip blank sub-section separators
+                if section_re.match(line):
                     continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 6 and parts[1] not in ['Operation', '---', '-', ''] and not parts[2].startswith('-'):
-                        data.append([parts[1], parts[2], parts[3], parts[4], parts[5], parts[6] if len(parts) > 6 else ''])
-                if in_table and line.strip() == '' and len(data) > 0:
+                if delim_re.match(line):
+                    continue
+                if '|' not in line:
                     break
-    except:
+                parts = [p.strip() for p in line.split('|')]
+                if parts[0] in ('Operation', '', '-') and len(parts) >= 7:
+                    cells = parts[1:-1] if not parts[-1] else parts[1:]
+                else:
+                    cells = parts
+                if len(cells) >= 5 and cells[0] and cells[0] not in ('Operation',):
+                    data.append(cells[:6])
+    except Exception:
         pass
     return data
 
+
 def extract_multi_core_data(report_path):
-    """Extract multi-core scaling data from report"""
+    """Extract multi-core scaling data (recognises both markdown and ASCII tables)."""
+    import re
     data = []
     in_table = False
+    delim_re = re.compile(r'^[\s\-:|]+\|?$')
+    section_re = re.compile(r"^--\s+.+\s+--$")
     try:
-        with open(report_path, 'r') as f:
-            for line in f:
-                if 'Operation | Category' in line or '|-----------|' in line:
-                    in_table = True
+        text = open(report_path).read()
+        for line in text.splitlines():
+            if not in_table and 'Operation' in line and 'Category' in line and '|' in line:
+                in_table = True
+                continue
+            if in_table:
+                if not line.strip():
+                    continue  # skip blank sub-section separators
+                if section_re.match(line):
                     continue
-                if in_table and '|' in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 7 and parts[1] not in ['Operation', '---', '-', ''] and not parts[2].startswith('-'):
-                        data.append([parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]])
-                if in_table and line.strip() == '' and len(data) > 0:
+                if delim_re.match(line):
+                    continue
+                if '|' not in line:
                     break
-    except:
+                parts = [p.strip() for p in line.split('|')]
+                if parts[0] in ('Operation', '', '-') and len(parts) >= 8:
+                    cells = parts[1:-1] if not parts[-1] else parts[1:]
+                else:
+                    cells = parts
+                if len(cells) >= 6 and cells[0] and cells[0] not in ('Operation',):
+                    # Strip the trailing 'x' from the Speedup column.
+                    # Multi-core binary writes "1.00      x" (with the unit
+                    # on a separate column visually but merged into the
+                    # previous cell by the table parser). The header has
+                    # 7 columns: Operation, Category, Threads, Time(ms),
+                    # Speedup, Efficiency, Status → speedup is cells[4].
+                    if len(cells) >= 5:
+                        cells[4] = cells[4].replace('x', '').strip()
+                    data.append(cells[:6])
+    except Exception:
         pass
     return data
 
 def extract_inter_core_stats(report_path):
-    """Extract inter-core latency statistics"""
+    """Extract inter-core latency statistics.
+
+    The inter-core binary writes a space-delimited 24x24 matrix plus a
+    summary block. We extract min/max/avg by parsing the matrix itself
+    (so this works for any matrix size, not just 24x24).
+    """
+    import re
     stats = {}
     try:
-        with open(report_path, 'r') as f:
-            content = f.read()
-            for line in content.split('\n'):
-                if line.startswith('Min:'):
-                    parts = line.replace('Min:', '').replace('Max:', '').replace('Avg:', '').split(',')
-                    for p in parts:
-                        if 'Min' in line:
-                            stats['Min Latency'] = p.replace('Min', '').strip()
-                        elif 'Max' in line:
-                            stats['Max Latency'] = p.replace('Max', '').strip()
-                        elif 'Avg' in line:
-                            stats['Avg Latency'] = p.replace('Avg', '').strip()
-    except:
+        text = open(report_path).read()
+        # Try the textual summary block first (1-hop Avg: ..., 2-hop Avg: ...)
+        m = re.search(r"1-hop Avg:\s*([0-9]+\.?[0-9]*)\s*ns", text)
+        if m:
+            stats["1-hop Avg"] = f"{m.group(1)} ns"
+        m = re.search(r"2-hop Avg:\s*([0-9]+\.?[0-9]*)\s*ns", text)
+        if m:
+            stats["2-hop Avg"] = f"{m.group(1)} ns"
+        # Try the Range/Avg summary at the end of the matrix
+        m = re.search(r"Range:\s*([0-9]+\.?[0-9]*)\s*-\s*([0-9]+\.?[0-9]*)\s*ns", text)
+        if m:
+            stats["Min Latency"] = f"{m.group(1)} ns"
+            stats["Max Latency"] = f"{m.group(2)} ns"
+        m = re.search(r"Avg:\s*([0-9]+\.?[0-9]*)\s*ns", text)
+        if m:
+            stats["Avg Latency"] = f"{m.group(1)} ns"
+        # If we already have stats from the summary, return them
+        if stats:
+            return stats
+        # Fallback: parse the matrix itself
+        matrix = []
+        in_matrix = False
+        for line in text.splitlines():
+            if "CAS Latency" in line and "ns" in line:
+                in_matrix = True
+                continue
+            if "CAS Throughput" in line:
+                break
+            if not in_matrix:
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            try:
+                int(parts[0])
+            except ValueError:
+                continue
+            for idx in range(1, min(6, len(parts))):
+                if parts[idx] == "-":
+                    # Latencies are at all positions EXCEPT the sentinel.
+                    vals = [float(p) for p in parts[1:] if p != "-" and p.replace('.','').isdigit()]
+                    if vals:
+                        matrix.append(vals)
+                    break
+        if matrix:
+            all_vals = [v for row in matrix for v in row if v > 0]
+            if all_vals:
+                stats["Min Latency"] = f"{min(all_vals):.1f} ns"
+                stats["Max Latency"] = f"{max(all_vals):.1f} ns"
+                stats["Avg Latency"] = f"{(sum(all_vals) / len(all_vals)):.1f} ns"
+                stats["Pairs Measured"] = f"{len(all_vals)}"
+    except Exception:
         pass
     return stats
 
@@ -748,19 +1051,15 @@ def generate_pdf_report():
         spaceBefore=20
     )
 
-    # Watermark function
+    # Watermark function — minimal footer only (the diagonal "CONFIDENTIAL"
+    # was previously causing "ALTIENDFINOC"-style vertical text to appear in
+    # PDF extractors and looked like a rendering bug; removed).
     def add_watermark(canvas, doc):
         canvas.saveState()
         canvas.setFont('Helvetica', 8)
         canvas.setFillColor(colors.grey)
-        # Bottom right watermark
         wm_text = f"{timestamp} | {hostname} | {device_id}"
         canvas.drawRightString(A4[0] - 72, 36, wm_text)
-        # Diagonal watermark on each page
-        canvas.setFillColor(colors.Color(0.9, 0.9, 0.9, alpha=0.3))
-        canvas.rotate(45)
-        canvas.drawString(100, 0, "CONFIDENTIAL")
-        canvas.drawRightString(500, 0, "CONFIDENTIAL")
         canvas.restoreState()
 
     story = []
@@ -937,11 +1236,12 @@ def generate_pdf_report():
         story.append(Paragraph("CPU ALU Test", heading_style))
         alu_data = extract_cpu_alu_data(alu_report)
         if alu_data:
-            table_data = [['Operation', 'Ops/sec', 'ns/op', 'CPI', 'IPC']]
+            # alu_data columns: Operation, Time(ms), Ops/sec, ns/op, CPI
+            table_data = [['Operation', 'Time(ms)', 'Ops/sec', 'ns/op', 'CPI']]
             for row in alu_data:
                 if len(row) >= 5:
-                    table_data.append([row[0], f"{float(row[1]):.0f}", row[2], row[3], row[4]])
-            t = Table(table_data, colWidths=[1.2*inch, 1.5*inch, 1*inch, 0.8*inch, 0.8*inch])
+                    table_data.append([row[0], row[1], f"{float(row[2]):.0f}", row[3], row[4]])
+            t = Table(table_data, colWidths=[1.2*inch, 1*inch, 1.3*inch, 0.8*inch, 0.8*inch])
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
@@ -993,11 +1293,15 @@ def generate_pdf_report():
         story.append(Paragraph("Multi-Core Scaling Test", heading_style))
         multi_data = extract_multi_core_data(multi_report)
         if multi_data:
-            table_data = [['Operation', 'Threads', 'Time(ms)', 'Speedup', 'Efficiency', 'Status']]
+            # multi_data columns: Operation, Category, Threads, Time(ms), Speedup, Efficiency
+            table_data = [['Operation', 'Category', 'Threads', 'Time(ms)', 'Speedup', 'Efficiency']]
             for row in multi_data:
                 if len(row) >= 6:
-                    table_data.append(row)
-            t = Table(table_data, colWidths=[0.9*inch, 0.7*inch, 0.9*inch, 0.8*inch, 0.9*inch, 1.2*inch])
+                    try:
+                        table_data.append([row[0], row[1], row[2], row[3], f"{float(row[4]):.2f}", row[5]])
+                    except (ValueError, IndexError):
+                        table_data.append(row[:6])
+            t = Table(table_data, colWidths=[0.9*inch, 0.7*inch, 0.6*inch, 0.9*inch, 0.8*inch, 0.9*inch])
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
