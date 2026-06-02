@@ -8,6 +8,7 @@ reports/*.md
 reports/*.json
 reports/*.pdf
 reports/*.png
+reports/*.html
 logs/
 *.log
 

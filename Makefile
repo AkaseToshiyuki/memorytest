@@ -25,7 +25,7 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release test smoke sanity regression lint
+.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report report-html score
 
 # Default: build all
 all: tests
@@ -58,6 +58,27 @@ regression:
 # Just record current metrics to history.jsonl without comparing
 regression-record:
 	@python3 test_regression.py --record-only
+
+# Run all benchmarks (assumes binaries are built and reports/*.md are fresh)
+# and produce both PDF (legacy) and HTML (new, zero-dep) reports.
+# Also computes the 0-100 score with letter grade.
+report:
+	@echo "=== generating HTML report (zero deps) ==="
+	@python3.12 report_html.py
+	@echo ""
+	@echo "=== generating PDF report (needs reportlab/matplotlib/numpy) ==="
+	@python3.12 generate_report.py --all 2>&1 | tail -5 || echo "(PDF generation skipped — install requirements.txt deps for full PDF)"
+	@echo ""
+	@echo "=== score summary ==="
+	@python3.12 report_score.py | head -10
+
+# HTML-only report (no PDF deps required)
+report-html:
+	@python3.12 report_html.py
+
+# Print score summary only (no report)
+score:
+	@python3.12 report_score.py | head -10
 
 # lint: static sanity checks — CFLAGS warning hardening + Python compile + shellcheck
 lint:
