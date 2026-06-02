@@ -18,6 +18,15 @@
 #include <stdbool.h>
 #include <linux/perf_event.h>
 
+/* SIMD/Vector intrinsics (for test_cpu_float SIMD tests) */
+#if defined(__aarch64__) || defined(__arm__)
+  #include <arm_neon.h>
+  #define HAVE_NEON_INTRINSICS 1
+#elif defined(__x86_64__) || defined(__i386__)
+  #include <immintrin.h>
+  #define HAVE_SSE_INTRINSICS 1
+#endif
+
 #define NS_PER_SEC 1000000000ULL
 #define KB (1024UL)
 #define MB (1024UL * KB)

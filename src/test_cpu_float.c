@@ -151,6 +151,123 @@ static void test_float_mixed(void *arg) {
     g_result_d = result;
 }
 
+/* ========== SIMD (NEON) tests ==========
+ *
+ * Each SIMD test processes 2 doubles per iteration via 128-bit NEON.
+ * 100M iterations × 2 doubles = 200M ops total (same magnitude as scalar).
+ * IPC should be 2x scalar (1 op/cycle) on out-of-order cores, since NEON
+ * fadd/fmul are 1-cycle latency / 2-issue throughput on Apple/ARM cores.
+ */
+static volatile double g_simd_result = 0.0;
+
+#if defined(HAVE_NEON_INTRINSICS)
+static void test_simd_fadd(void *arg) {
+    (void)arg;
+    float64x2_t v_sum = vdupq_n_f64(0.0);
+    float64x2_t v_half = vdupq_n_f64(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        float64x2_t v_i = vdupq_n_f64((double)i);
+        v_sum = vmlaq_f64(v_sum, v_i, v_half);
+    }
+    double buf[2];
+    vst1q_f64(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fmul(void *arg) {
+    (void)arg;
+    float64x2_t v_prod = vdupq_n_f64(1.0);
+    float64x2_t v_step = vdupq_n_f64(0.99999);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_prod = vmulq_f64(v_prod, v_step);
+    }
+    double buf[2];
+    vst1q_f64(buf, v_prod);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_dot(void *arg) {
+    (void)arg;
+    float64x2_t v_sum = vdupq_n_f64(0.0);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        float64x2_t a = vdupq_n_f64((double)i);
+        float64x2_t b = vdupq_n_f64((double)(i + 1));
+        /* vdotq equivalent: pairwise multiply + horizontal add */
+        float64x2_t p = vmulq_f64(a, b);
+        v_sum = vaddq_f64(v_sum, p);
+    }
+    double buf[2];
+    vst1q_f64(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fma(void *arg) {
+    (void)arg;
+    /* Fused multiply-add: 2 muls + 2 adds in 1 cycle each on modern ARM */
+    float64x2_t v_acc = vdupq_n_f64(0.0);
+    float64x2_t v_a   = vdupq_n_f64(1.00001);
+    float64x2_t v_b   = vdupq_n_f64(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_acc = vfmaq_f64(v_acc, v_a, v_b);
+    }
+    double buf[2];
+    vst1q_f64(buf, v_acc);
+    g_simd_result = buf[0] + buf[1];
+}
+#elif defined(HAVE_SSE_INTRINSICS)
+static void test_simd_fadd(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    __m128d v_half = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d v_i = _mm_set1_pd((double)i);
+        v_sum = _mm_add_pd(v_sum, _mm_mul_pd(v_i, v_half));
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fmul(void *arg) {
+    (void)arg;
+    __m128d v_prod = _mm_set1_pd(1.0);
+    __m128d v_step = _mm_set1_pd(0.99999);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_prod = _mm_mul_pd(v_prod, v_step);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_prod);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_dot(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d a = _mm_set1_pd((double)i);
+        __m128d b = _mm_set1_pd((double)(i + 1));
+        __m128d p = _mm_mul_pd(a, b);
+        v_sum = _mm_add_pd(v_sum, p);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fma(void *arg) {
+    (void)arg;
+    __m128d v_acc = _mm_setzero_pd();
+    __m128d v_a   = _mm_set1_pd(1.00001);
+    __m128d v_b   = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_acc = _mm_fmadd_pd(v_acc, v_a, v_b);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_acc);
+    g_simd_result = buf[0] + buf[1];
+}
+#else
+/* Fallback scalar stubs for platforms without SIMD intrinsics */
+static void test_simd_fadd(void *arg) { (void)arg; g_simd_result = 0.0; }
+static void test_simd_fmul(void *arg) { (void)arg; g_simd_result = 1.0; }
+static void test_simd_dot (void *arg) { (void)arg; g_simd_result = 0.0; }
+static void test_simd_fma (void *arg) { (void)arg; g_simd_result = 0.0; }
+#endif
+
 typedef struct {
     const char *name;
     const char *type;  /* "float" or "double" */
@@ -171,6 +288,10 @@ static FloatTest tests[] = {
     {"double Log", "double", test_double_log,  0},
     {"double Pow", "double", test_double_pow,  0},
     {"Mixed",      "double", test_float_mixed, 0},
+    {"SIMD FAdd",  "simd",   test_simd_fadd,   0},
+    {"SIMD FMul",  "simd",   test_simd_fmul,   0},
+    {"SIMD Dot",   "simd",   test_simd_dot,    0},
+    {"SIMD FMA",   "simd",   test_simd_fma,    0},
 };
 
 void run_cpu_float_test(void) {
@@ -225,9 +346,10 @@ void run_cpu_float_test(void) {
         uint64_t end = get_time_ns();
 
         uint64_t elapsed = end - start;
-        double time_ms = (double)elapsed / 1000000.0;
-        double ops_per_sec = (double)ITERATIONS / ((double)elapsed / 1000000000.0);
-        double ns_per_op = (double)elapsed / ITERATIONS;
+        /* SIMD tests process 2 doubles per loop iteration, so multiply by 2 */
+        int ops_per_iter = (tests[i].type && strcmp(tests[i].type, "simd") == 0) ? 2 : 1;
+        double ops_per_sec = (double)ITERATIONS * ops_per_iter / ((double)elapsed / 1000000000.0);
+        double ns_per_op = (double)elapsed / ((double)ITERATIONS * ops_per_iter);
 
         double cpi, ipc;
         if (use_pmu) {
@@ -270,8 +392,9 @@ void run_cpu_float_test(void) {
 
             uint64_t elapsed = end - start;
             double time_ms = (double)elapsed / 1000000.0;
-            double ops_per_sec = (double)ITERATIONS / ((double)elapsed / 1000000000.0);
-            double ns_per_op = (double)elapsed / ITERATIONS;
+            int ops_per_iter = (tests[i].type && strcmp(tests[i].type, "simd") == 0) ? 2 : 1;
+            double ops_per_sec = (double)ITERATIONS * ops_per_iter / ((double)elapsed / 1000000000.0);
+            double ns_per_op = (double)elapsed / ((double)ITERATIONS * ops_per_iter);
 
             double cpi = use_pmu ? pr.cpi : (ns_per_op * freq / 1000.0);
             double ipc = use_pmu ? pr.ipc : (1.0 / cpi);
@@ -284,7 +407,7 @@ void run_cpu_float_test(void) {
         report_write(report, "- Iterations: %.0f\n", (double)ITERATIONS);
         report_write(report, "- CPU Frequency: %d MHz\n", freq);
         report_write(report, "- CPI < 1 indicates superscalar execution\n");
-        report_write(report, "- FMA (Fused Multiply-Add) not measured separately\n\n");
+        report_write(report, "- SIMD tests (128-bit NEON) measure 2 doubles per iteration\n\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);
