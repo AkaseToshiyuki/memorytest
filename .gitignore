@@ -9,6 +9,7 @@ reports/*.json
 reports/*.pdf
 reports/*.png
 reports/*.html
+reports/charts/
 logs/
 *.log
 
