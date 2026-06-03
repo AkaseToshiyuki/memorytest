@@ -16,11 +16,13 @@ Produces a self-contained HTML file with:
 
 Usage:
     python3 report_html.py                  # writes reports/benchmark_report.html
-    python3 report_html.py --output path    # custom output path
+    python3 report_html.py --output path    # custom HTML output path
+    python3 report_html.py --pdf path       # also write PDF (via headless Firefox)
 
 The output HTML has no external dependencies — all CSS, SVG, and base64
 data URIs are inlined. It can be opened directly in a browser, archived,
-or sent by email.
+or sent by email. The PDF is a 1:1 print of the HTML so there's no second
+report layout to maintain.
 """
 
 import argparse
@@ -107,6 +109,59 @@ def _find_data_table(text: str, skip_first: bool = False):
             return headers, rows
         i += 1
     return None
+
+
+def _find_data_table_after(text: str, header_keyword: str):
+    """Find the first data table whose header line contains header_keyword.
+
+    Identical to `_find_data_table` but does not match the very first
+    table in the file; it requires the keyword to appear in the header
+    line itself. Returns (headers, rows) or None.
+    """
+    import re
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+    lines = text.splitlines()
+    for i in range(len(lines) - 1):
+        if header_keyword.lower() not in lines[i].lower():
+            continue
+        if "|" not in lines[i] or not delim_re.match(lines[i + 1]):
+            continue
+        return _parse_table_at(text, i)
+    return None
+
+
+def _parse_table_at(text: str, header_idx: int):
+    """Parse the markdown/ASCII table whose header is at line `header_idx`."""
+    import re
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+    section_re = re.compile(r"^--\s+.+\s+--$")
+    lines = text.splitlines()
+    if header_idx >= len(lines) - 1:
+        return None
+    line_i = lines[header_idx]
+    if "|" not in line_i or not delim_re.match(lines[header_idx + 1]):
+        return None
+    cells = [c.strip().rstrip("*").strip() for c in line_i.split("|")]
+    if cells and not cells[0]: cells = cells[1:]
+    if cells and not cells[-1]: cells = cells[:-1]
+    headers = cells
+    rows = []
+    j = header_idx + 2
+    while j < len(lines):
+        rl = lines[j]
+        if not rl.strip():
+            j += 1; continue
+        if section_re.match(rl):
+            j += 1; continue
+        if "|" not in rl: break
+        if delim_re.match(rl): break
+        cells = [c.strip().rstrip("*").strip() for c in rl.split("|")]
+        if cells and not cells[0]: cells = cells[1:]
+        if cells and not cells[-1]: cells = cells[:-1]
+        if len(cells) == len(headers):
+            rows.append(cells)
+        j += 1
+    return headers, rows
 
 
 def _parse_all_tables(text: str) -> list:
@@ -257,6 +312,51 @@ def _svg_line_chart(points: list, width: int = 600, height: int = 200,
 </svg>'''
 
 
+def _svg_bar_chart(points: list, width: int = 600, height: int = 200,
+                    xlabel: str = "", ylabel: str = "", title: str = "",
+                    colors: list = None) -> str:
+    """Inline SVG bar chart for small categorical data (e.g. Read/Write/Copy)."""
+    if not points:
+        return "<p>(no data)</p>"
+    ys = [p[1] for p in points if p[1] is not None and p[1] > 0]
+    if not ys:
+        return "<p>(no valid data points)</p>"
+    ymax = max(ys) * 1.15
+    if colors is None: colors = ["steelblue", "coral", "green", "orange", "purple"]
+    pad_l, pad_r, pad_t, pad_b = 60, 20, 30, 50
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    n = len(points)
+    bar_w = plot_w / n * 0.65
+    gap   = plot_w / n * 0.35
+    bars = []
+    x_labels = []
+    for i, (label, v) in enumerate(points):
+        if v is None or v <= 0: continue
+        x = pad_l + (i + 0.5) * (plot_w / n) - bar_w / 2
+        h = (v / ymax) * plot_h
+        y = pad_t + plot_h - h
+        c = colors[i % len(colors)]
+        bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="{c}"/>')
+        bars.append(f'<text x="{x + bar_w/2:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="10" fill="#333">{v:.0f}</text>')
+        x_labels.append(f'<text x="{pad_l + (i + 0.5) * (plot_w / n):.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" font-size="10" fill="#666">{html.escape(label)}</text>')
+    # Y-axis gridlines + labels
+    y_ticks = [ymax * f for f in (0, 0.25, 0.5, 0.75, 1.0)]
+    y_labels = []
+    for t in y_ticks:
+        y = pad_t + (1 - t / ymax) * plot_h
+        y_labels.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{pad_l + plot_w}" y2="{y:.1f}" stroke="#eee" stroke-width="1"/>')
+        y_labels.append(f'<text x="{pad_l - 5}" y="{y + 3:.1f}" text-anchor="end" font-size="10" fill="#666">{t:.0f}</text>')
+    title_html = f'<text x="{width/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">{html.escape(title)}</text>' if title else ""
+    return f'''<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg" style="display:block;margin:10px 0">
+  {title_html}
+  {"".join(y_labels)}
+  {"".join(bars)}
+  {"".join(x_labels)}
+  <text x="{pad_l - 45}" y="{pad_t + plot_h/2}" text-anchor="middle" font-size="11" fill="#666" transform="rotate(-90 {pad_l - 45} {pad_t + plot_h/2})">{html.escape(ylabel)}</text>
+</svg>'''
+
+
 def _table_html(headers: list, rows: list) -> str:
     h = "".join(f"<th>{html.escape(c)}</th>" for c in headers)
     body = ""
@@ -295,29 +395,75 @@ def _collect_cache_chart_data() -> list:
 
 
 def _collect_bw_chart_data() -> list:
+    """Collect (operation, bandwidth) points for the bandwidth chart.
+
+    Reads the canonical "Operation | Bandwidth (MB/s) | Efficiency" table
+    from `memory_bandwidth_report.md`. Falls back to the first table whose
+    header mentions `Bandwidth` if the canonical table is absent, and to
+    a textual summary (`Read: 1234.56 MB/s`) as a last resort.
+    """
     p = REPORTS / "memory_bandwidth_report.md"
     if not p.exists(): return []
     text = p.read_text()
-    tbl = _find_data_table(text)
-    if not tbl: return []
-    headers, rows = tbl
-    bw_col = None
-    for i, h in enumerate(headers):
-        if "bandwidth" in h.lower(): bw_col = i; break
-    if bw_col is None: bw_col = 1
+    # 1) Try the canonical "Bandwidth (MB/s)" table first
+    tbl = _find_data_table_after(text, "Bandwidth (MB/s)")
+    if not tbl:
+        # Last-resort: first table with a "Bandwidth" column
+        tbl = _find_data_table_after(text, "Bandwidth")
+    if tbl:
+        headers, rows = tbl
+        op_col = 0
+        bw_col = None
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if "operation" in hl: op_col = i
+            if "bandwidth" in hl: bw_col = i
+        if bw_col is None and len(headers) > 1: bw_col = 1
+        if bw_col is not None:
+            out = []
+            for row in rows:
+                if op_col >= len(row) or bw_col >= len(row): continue
+                op = row[op_col].strip()
+                if op not in ("Read", "Write", "Copy"): continue
+                try: v = float(row[bw_col].replace(",", ""))
+                except ValueError: continue
+                if v > 0: out.append((op, v))
+            if out: return out
+    # 2) Fallback: textual summary like `Read: 1234.56 MB/s`
+    import re
     out = []
-    for row in rows:
-        try: v = float(row[bw_col])
-        except (ValueError, IndexError): continue
-        if v > 0: out.append((row[0], v))
+    for op in ("Read", "Write", "Copy"):
+        m = re.search(rf"{op}:\s+([0-9]+\.[0-9]+)\s*MB/s", text)
+        if m:
+            try: out.append((op, float(m.group(1))))
+            except ValueError: pass
     return out
+
+
+def _bandwidth_table_html(text: str) -> str | None:
+    """Return HTML for the bandwidth table — markdown table OR textual summary."""
+    tbl = _find_data_table_after(text, "Bandwidth (MB/s)")
+    if tbl:
+        return _table_html(*tbl)
+    # Build a tiny table from the textual summary as a last resort
+    import re
+    rows = []
+    for op in ("Read", "Write", "Copy"):
+        m = re.search(rf"{op}:\s+([0-9]+\.[0-9]+)\s*MB/s", text)
+        if m:
+            rows.append((op, m.group(1)))
+    if not rows: return None
+    headers = ["Operation", "Bandwidth (MB/s)"]
+    body = "".join(f"<tr><td>{o}</td><td>{v}</td></tr>" for o, v in rows)
+    return f'<table class="data"><thead><tr><th>{"</th><th>".join(headers)}</th></tr></thead><tbody>{body}</tbody></table>'
 
 
 def _collect_alu_chart_data() -> list:
     p = REPORTS / "cpu_alu_report.md"
     if not p.exists(): return []
     text = p.read_text()
-    tbl = _find_data_table(text)
+    # The 2nd table (skip System Config). Look for the per-op header.
+    tbl = _find_data_table_after(text, "IPC") or _find_data_table(text, skip_first=True)
     if not tbl: return []
     headers, rows = tbl
     ipc_col = None
@@ -336,7 +482,8 @@ def _collect_simd_chart_data() -> list:
     p = REPORTS / "cpu_float_report.md"
     if not p.exists(): return []
     text = p.read_text()
-    tbl = _find_data_table(text)
+    # The 2nd table (skip System Config).
+    tbl = _find_data_table_after(text, "ns/op") or _find_data_table(text, skip_first=True)
     if not tbl: return []
     headers, rows = tbl
     ns_col = None
@@ -497,15 +644,14 @@ def build_html(score_dict: dict | None) -> str:
     parts.append('<h2>Memory Bandwidth</h2>')
     bw_pts = _collect_bw_chart_data()
     if bw_pts:
-        parts.append(_svg_line_chart(bw_pts, width=600, height=200,
-                                      xlabel="Operation", ylabel="Bandwidth (MB/s)",
-                                      title="Multi-channel memory bandwidth"))
+        parts.append(_svg_bar_chart(bw_pts, width=600, height=200,
+                                    xlabel="Operation", ylabel="Bandwidth (MB/s)",
+                                    title="Multi-channel memory bandwidth"))
     p = REPORTS / "memory_bandwidth_report.md"
     if p.exists():
-        text = p.read_text()
-        tbl = _find_data_table(text)
-        if tbl:
-            parts.append(_table_html(*tbl))
+        tbl_html = _bandwidth_table_html(p.read_text())
+        if tbl_html:
+            parts.append(tbl_html)
     parts.append('</div>')
 
     # --- Inter-core ---
@@ -530,7 +676,7 @@ def build_html(score_dict: dict | None) -> str:
     p = REPORTS / "cpu_alu_report.md"
     if p.exists():
         text = p.read_text()
-        tbl = _find_data_table(text)
+        tbl = _find_data_table_after(text, "IPC") or _find_data_table(text, skip_first=True)
         if tbl:
             parts.append(_table_html(*tbl))
     parts.append('</div>')
@@ -546,33 +692,102 @@ def build_html(score_dict: dict | None) -> str:
     p = REPORTS / "cpu_float_report.md"
     if p.exists():
         text = p.read_text()
-        tbl = _find_data_table(text)
+        tbl = _find_data_table_after(text, "ns/op") or _find_data_table(text, skip_first=True)
         if tbl:
             parts.append(_table_html(*tbl))
     parts.append('</div>')
 
-    # --- CPU Branch + Multi (tables only) ---
-    for label, fname in [("CPU Branch", "cpu_branch_report.md"),
-                         ("Multi-Core Scaling", "cpu_multi_core_report.md")]:
-        parts.append(f'<div class="card"><h2>{label}</h2>')
-        p = REPORTS / fname
-        if p.exists():
-            text = p.read_text()
-            tbl = _find_data_table(text)
-            if tbl:
-                parts.append(_table_html(*tbl))
+    # --- Multi-Core Scaling (PNG chart + data table) ---
+    parts.append('<div class="card">')
+    parts.append('<h2>Multi-Core Scaling</h2>')
+    multi_png = CHARTS / "multi_core_scaling.png"
+    multi_uri = _png_data_uri(multi_png)
+    if multi_uri:
+        parts.append(f'<img class="chart-img" src="{multi_uri}" alt="Multi-core scaling" style="max-width:760px">')
+    else:
+        parts.append('<p class="no-data">No multi-core chart (run generate_report.py first to generate charts/)</p>')
+    p = REPORTS / "cpu_multi_core_report.md"
+    if p.exists():
+        text = p.read_text()
+        tbl = _find_data_table_after(text, "Speedup")
+        if tbl:
+            parts.append(_table_html(*tbl))
         else:
-            parts.append(f'<p class="no-data">{fname} not found</p>')
-        parts.append('</div>')
+            parts.append('<p class="no-data">No multi-core table</p>')
+    else:
+        parts.append('<p class="no-data">cpu_multi_core_report.md not found</p>')
+    parts.append('</div>')
+
+    # --- CPU Branch (table only) ---
+    parts.append('<div class="card"><h2>CPU Branch</h2>')
+    p = REPORTS / "cpu_branch_report.md"
+    if p.exists():
+        text = p.read_text()
+        # The header is `| Pattern | Category | ...` (newer) or
+        # `| Operation | Pattern | ...` (older). Try "Pattern" first
+        # (always present, always a column) then fall back.
+        tbl = _find_data_table_after(text, "Pattern")
+        if not tbl:
+            tbl = _find_data_table_after(text, "Operation")
+        if tbl:
+            parts.append(_table_html(*tbl))
+    else:
+        parts.append('<p class="no-data">cpu_branch_report.md not found</p>')
+    parts.append('</div>')
 
     parts.append('<div class="footer">Memorytest v1.0.1 | Reports: reports/*.md | Source: 7 binaries under bin/</div>')
     parts.append('</div></body></html>')
     return "\n".join(parts)
 
 
+def _html_to_pdf_firefox(html_path: Path, pdf_path: Path, timeout: int = 90) -> bool:
+    """Print an HTML file to PDF using headless Firefox.
+
+    This gives a 1:1 visual match between the HTML and PDF reports —
+    no second report layout to maintain. Returns True on success.
+
+    Tries in order:
+      1. Firefox with `--headless=new` directly
+      2. Firefox under `xvfb-run` if Xvfb is available (workaround for
+         environments where software-GL headless rendering is broken)
+    Requires `firefox` on $PATH.
+    """
+    import shutil, subprocess
+    firefox = shutil.which("firefox") or shutil.which("firefox-esr")
+    if not firefox:
+        print("# ERROR: `firefox` not found on PATH; install it for HTML→PDF", file=sys.stderr)
+        return False
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    common = ["--no-sandbox", "--disable-gpu", f"--print-to-pdf={pdf_path}",
+              f"file://{html_path.resolve()}"]
+    candidates = [
+        # Plain headless (works on systems with working swrast)
+        [firefox, "--headless=new", *common],
+        # Under Xvfb (workaround for headless swrast failures)
+        ["xvfb-run", "-a", firefox, "--headless", *common],
+    ]
+    last_err = ""
+    for cmd in candidates:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                return True
+            last_err = f"exit={r.returncode} stderr={r.stderr[:200]}"
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout after {timeout}s"
+            continue
+        except FileNotFoundError as e:
+            last_err = f"missing: {e}"
+            continue
+    print(f"# ERROR: PDF generation failed ({last_err})", file=sys.stderr)
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output path (default: {DEFAULT_OUTPUT})")
+    ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output HTML path (default: {DEFAULT_OUTPUT})")
+    ap.add_argument("--pdf", type=Path, default=None, help="Also write a PDF (path). Requires `firefox` on PATH.")
     args = ap.parse_args()
 
     score_dict = None
@@ -591,6 +806,13 @@ def main():
     args.output.write_text(html_str)
     size_kb = args.output.stat().st_size / 1024
     print(f"HTML report written: {args.output}  ({size_kb:.1f} KB)")
+
+    if args.pdf is not None:
+        if _html_to_pdf_firefox(args.output, args.pdf):
+            size_kb = args.pdf.stat().st_size / 1024
+            print(f"PDF report written:  {args.pdf}  ({size_kb:.1f} KB)  [via headless Firefox]")
+        else:
+            return 1
     return 0
 
 

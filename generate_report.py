@@ -535,16 +535,16 @@ def create_multi_core_scaling_chart(data, output_path):
 def create_bandwidth_chart(report_path, output_path):
     """Create memory bandwidth chart.
 
-    The bandwidth binary writes a textual summary like::
+    The bandwidth binary writes a markdown table like::
 
-        === BANDWIDTH RESULTS ===
-          Read:    36279.58 MB/s
-          Write:   17463.33 MB/s
-          Copy:    23687.22 MB/s
+        | Operation | Bandwidth (MB/s) | Efficiency |
+        |-----------|--------------------|------------|
+        | Read      | 37070.79           | 49427.7%   |
+        | Write     | 17503.41           | -          |
+        | Copy      | 23724.28           | -          |
 
-    (no markdown/ASCII table). We extract values via regex; falls back
-    to a multi-channel bandwidth table (`Size | Read | Write | Copy`)
-    if the textual summary is absent.
+    We also accept the textual summary (`Read: 1234.56 MB/s`) or a
+    multi-channel table (`Size | Read | Write | Copy`) as fallbacks.
     """
     if not HAS_MATPLOTLIB:
         return None
@@ -553,25 +553,54 @@ def create_bandwidth_chart(report_path, output_path):
         import re
         text = open(report_path).read()
         read_bw = write_bw = copy_bw = None
-        patterns = {
-            "Read":  r"Read:\s+([0-9]+\.[0-9]+)\s*MB/s",
-            "Write": r"Write:\s+([0-9]+\.[0-9]+)\s*MB/s",
-            "Copy":  r"Copy:\s+([0-9]+\.[0-9]+)\s*MB/s",
-        }
-        for op, pat in patterns.items():
-            m = re.search(pat, text)
-            if m:
-                v = float(m.group(1))
-                if op == "Read":  read_bw  = v
-                elif op == "Write": write_bw = v
-                else:               copy_bw  = v
 
-        # Fallback: try the multi-channel bandwidth table (Size | Read | Write | Copy)
-        if read_bw is None:
+        # 1) Try the canonical "Bandwidth Results" table (Operation | Bandwidth | Efficiency)
+        tbl = _find_table_after(text, "Bandwidth (MB/s)", max_skip=0)
+        if tbl:
+            headers, rows = tbl
+            op_col = 0
+            for i, h in enumerate(headers):
+                if "operation" in h.lower():
+                    op_col = i; break
+            bw_col = None
+            for i, h in enumerate(headers):
+                if "bandwidth" in h.lower():
+                    bw_col = i; break
+            if bw_col is None and len(headers) > 1:
+                bw_col = 1
+            if bw_col is not None:
+                for row in rows:
+                    if op_col >= len(row) or bw_col >= len(row):
+                        continue
+                    op = row[op_col].strip()
+                    try:
+                        v = float(row[bw_col].replace(",", ""))
+                    except ValueError:
+                        continue
+                    if op == "Read":  read_bw  = v
+                    elif op == "Write": write_bw = v
+                    elif op == "Copy":  copy_bw  = v
+
+        # 2) Fallback: textual summary
+        if read_bw is None and write_bw is None and copy_bw is None:
+            patterns = {
+                "Read":  r"Read:\s+([0-9]+\.[0-9]+)\s*MB/s",
+                "Write": r"Write:\s+([0-9]+\.[0-9]+)\s*MB/s",
+                "Copy":  r"Copy:\s+([0-9]+\.[0-9]+)\s*MB/s",
+            }
+            for op, pat in patterns.items():
+                m = re.search(pat, text)
+                if m:
+                    v = float(m.group(1))
+                    if op == "Read":  read_bw  = v
+                    elif op == "Write": write_bw = v
+                    else:               copy_bw  = v
+
+        # 3) Fallback: multi-channel table (Size | Read | Write | Copy)
+        if read_bw is None and write_bw is None and copy_bw is None:
             tbl = _find_table_after(text, "Read", max_skip=0)
             if tbl:
                 headers, rows = tbl
-                # Average across all rows for a stable single-value summary
                 def col_idx(*cands):
                     for i, h in enumerate(headers):
                         hl = h.lower()
@@ -585,7 +614,7 @@ def create_bandwidth_chart(report_path, output_path):
                 r_vals = [float(row[r_col]) for row in rows if r_col is not None and r_col < len(row)]
                 w_vals = [float(row[w_col]) for row in rows if w_col is not None and w_col < len(row)]
                 c_vals = [float(row[c_col]) for row in rows if c_col is not None and c_col < len(row)]
-                if r_vals: read_bw = max(r_vals)  # use peak across buffer sizes
+                if r_vals: read_bw = max(r_vals)
                 if w_vals: write_bw = max(w_vals)
                 if c_vals: copy_bw = max(c_vals)
 
@@ -670,12 +699,11 @@ def create_cpu_chart(report_path, output_path, chart_type='alu'):
 def create_inter_core_heatmap(report_path, output_path):
     """Create inter-core latency heatmap.
 
-    The inter-core binary writes a 24x24 matrix using SPACE-delimited
-    floats (NOT `|`). The matrix starts after `=== CAS Latency (ns) ===`
-    and continues until `=== CAS Throughput` (or end of file).
-    Each row begins with the source core id; the second cell is `-`
-    (self-pair sentinel); the rest of the cells are the cross-core
-    latencies in nanoseconds.
+    The inter-core binary writes a 24x24 matrix as a markdown table
+    (pipe-delimited). The matrix starts after `## CAS Latency Matrix (ns)`
+    and continues until `## CAS Throughput` (or end of file).
+    Each row begins with the source core id; the cell at column `src` is
+    `-` (self-pair sentinel); the rest are cross-core latencies in ns.
     """
     if not HAS_MATPLOTLIB:
         return None
@@ -685,38 +713,39 @@ def create_inter_core_heatmap(report_path, output_path):
         matrix = []
         in_matrix = False
         for line in text.splitlines():
-            if "CAS Latency" in line and "ns" in line:
+            if "CAS Latency Matrix" in line and "ns" in line:
                 in_matrix = True
                 continue
             if "CAS Throughput" in line:
                 break
             if not in_matrix:
                 continue
-            parts = line.split()
-            if len(parts) < 3:
+            if "|" not in line:
                 continue
+            # Skip the header (`| **Core** | 0 | 1 | ...`) and the
+            # delimiter (`|---|---:|...`) rows.
+            cells = _parse_table_row(line)
+            if not cells or cells[0].lower().startswith("**core"):
+                continue
+            if all(set(c) <= set("-:| ") for c in cells):
+                continue
+            if len(cells) < 3:
+                continue
+            # First cell is the source core id
             try:
-                src = int(parts[0])
+                src = int(cells[0])
             except ValueError:
                 continue
-            # Find the self-pair sentinel. The matrix is space-delimited
-            # and the sentinel is the "-" sitting at column (src) of
-            # the matrix row. We scan up to position 5 because the
-            # leftmost columns may be present (so sentinel_idx can
-            # range from 1 to 5 for src=0..4).
-            sentinel_idx = None
-            for idx in range(1, min(6, len(parts))):
-                if parts[idx] == "-":
-                    sentinel_idx = idx
-                    break
-            if sentinel_idx is None:
+            # The remaining cells are latencies (one per target core).
+            # The self-pair sentinel (`-`) sits at column (src) of the
+            # data row, but the data cells start at cells[1]. So in the
+            # data array, the self-sentinel is at index (src).
+            data = cells[1:]
+            if len(data) <= src:
                 continue
-            # Latencies to ALL cores. The full NxN matrix should be
-            # exactly N cells long (excluding src and the sentinel).
-            # Pad/truncate as needed to keep rows rectangular.
             row_vals = []
-            for k, p in enumerate(parts[1:], start=1):
-                if k == sentinel_idx:
+            for k, p in enumerate(data):
+                if k == src:
                     continue  # skip the self-sentinel
                 try:
                     row_vals.append(float(p))
@@ -770,28 +799,55 @@ def create_inter_core_heatmap(report_path, output_path):
 def extract_bandwidth_data(report_path):
     """Extract bandwidth data from report.
 
-    The bandwidth binary writes a textual summary like::
+    The bandwidth binary writes a markdown table::
 
-        === BANDWIDTH RESULTS ===
-          Read:    36279.58 MB/s
-          Write:   17463.33 MB/s
-          Copy:    23687.22 MB/s
+        | Operation | Bandwidth (MB/s) | Efficiency |
+        |-----------|--------------------|------------|
+        | Read      | 37070.79           | 49427.7%   |
+        | Write     | 17503.41           | -          |
+        | Copy      | 23724.28           | -          |
 
-    (no markdown table), so we use regex. Falls back to a markdown table
-    parser if the textual summary is absent.
+    Falls back to a textual summary (`Read: 1234.56 MB/s`) or a
+    multi-channel table (`Size | Read | Write | Copy`) if the canonical
+    table is absent.
     """
     import re
     data = []
     try:
         text = open(report_path).read()
-        # Primary: regex against the textual summary
+        # 1) Try the canonical "Operation | Bandwidth (MB/s) | Efficiency" table
+        tbl = _find_table_after(text, "Bandwidth (MB/s)", max_skip=0)
+        if tbl:
+            headers, rows = tbl
+            op_col = 0
+            bw_col = None
+            eff_col = None
+            for i, h in enumerate(headers):
+                hl = h.lower()
+                if "operation" in hl: op_col = i
+                if "bandwidth" in hl: bw_col = i
+                if "efficiency" in hl: eff_col = i
+            if bw_col is None and len(headers) > 1: bw_col = 1
+            for row in rows:
+                if op_col >= len(row) or bw_col is None or bw_col >= len(row):
+                    continue
+                op = row[op_col].strip()
+                if op not in ("Read", "Write", "Copy"):
+                    continue
+                try: bw = float(row[bw_col].replace(",", ""))
+                except ValueError: continue
+                eff = "-"
+                if eff_col is not None and eff_col < len(row):
+                    eff = row[eff_col].strip() or "-"
+                data.append((op, bw, eff))
+            if data:
+                return data
+        # 2) Fallback: textual summary
         for op in ("Read", "Write", "Copy"):
             m = re.search(rf"{op}:\s+([0-9]+\.[0-9]+)\s*MB/s", text)
             if m:
                 bw = float(m.group(1))
-                # Theoretical peak is roughly 76 GB/s for 2-channel DDR4-4800
-                # per the binary's "理论峰值" line. Compute efficiency
-                # against it as a sanity-check number.
+                # Theoretical peak from the binary's "理论峰值" line.
                 peak_m = re.search(r"理论峰值[^\d]*([0-9]+\.?[0-9]*)\s*GB/s", text)
                 if peak_m:
                     peak = float(peak_m.group(1)) * 1000  # GB/s → MB/s
@@ -801,7 +857,7 @@ def extract_bandwidth_data(report_path):
                 data.append((op, bw, eff))
         if data:
             return data
-        # Fallback: try a markdown/ASCII table (multi-channel bandwidth)
+        # 3) Fallback: multi-channel table (Size | Read | Write | Copy)
         tbl = _find_table_after(text, "Read", max_skip=0)
         if tbl:
             headers, rows = tbl

@@ -60,19 +60,16 @@ regression-record:
 	@python3 test_regression.py --record-only
 
 # Run all benchmarks (assumes binaries are built and reports/*.md are fresh)
-# and produce both PDF (legacy) and HTML (new, zero-dep) reports.
+# and produce both the canonical HTML report and a 1:1 PDF print of it.
 # Also computes the 0-100 score with letter grade.
 report:
-	@echo "=== generating HTML report (zero deps) ==="
-	@python3.12 report_html.py
-	@echo ""
-	@echo "=== generating PDF report (needs reportlab/matplotlib/numpy) ==="
-	@python3.12 generate_report.py --all 2>&1 | tail -5 || echo "(PDF generation skipped — install requirements.txt deps for full PDF)"
+	@echo "=== generating HTML report (canonical, zero deps) ==="
+	@python3.12 report_html.py --pdf reports/benchmark_report.pdf
 	@echo ""
 	@echo "=== score summary ==="
 	@python3.12 report_score.py | head -10
 
-# HTML-only report (no PDF deps required)
+# HTML-only report (no PDF; no browser required)
 report-html:
 	@python3.12 report_html.py
 
