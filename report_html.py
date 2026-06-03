@@ -393,10 +393,73 @@ def _collect_cache_chart_data() -> list:
     return out
 
 
+def _collect_cache_kpis() -> list:
+    """Extract L1D / L2 / L3 / RAM latency as KPI cards.
+
+    Returns a list of (label, value_str, unit) tuples. The 'Expected' column
+    in cache_hierarchy_report.md is authoritative (L1 / L2 / L3 / RAM).
+    """
+    p = REPORTS / "cache_hierarchy_report.md"
+    if not p.exists(): return []
+    text = p.read_text()
+    tbl = _find_data_table(text, skip_first=True)
+    if not tbl: return []
+    headers, rows = tbl
+    # Find size, expected, rdlat columns
+    col = {"size": 0, "expected": None, "rdlat": None}
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if hl == "size": col["size"] = i
+        elif hl == "expected": col["expected"] = i
+        elif "rdlat" in hl: col["rdlat"] = i
+    if col["expected"] is None or col["rdlat"] is None: return []
+    # Take the first row tagged with each level
+    seen = set()
+    out = []
+    for row in rows:
+        try:
+            level = row[col["expected"]].strip()
+            v = float(row[col["rdlat"]])
+        except (ValueError, IndexError):
+            continue
+        if level in seen: continue
+        seen.add(level)
+        out.append((level, f"{v:.2f}", "ns"))
+    return out
+
+
+def _system_info_html() -> str:
+    """Top-of-page System Information card.
+
+    Pulls the System Configuration table from cache_hierarchy_report.md
+    (the canonical first source — every test binary writes the same fields).
+    """
+    p = REPORTS / "cache_hierarchy_report.md"
+    if not p.exists():
+        return '<div class="card"><h2>System Information</h2><p class="no-data">No report available</p></div>'
+    text = p.read_text()
+    # Find the table that follows "## System Configuration"
+    tbl = _find_data_table_after(text, "Item")
+    if not tbl:
+        return '<div class="card"><h2>System Information</h2><p class="no-data">No system info parsed</p></div>'
+    headers, rows = tbl
+    body = "".join(
+        f"<tr><td>{html.escape(h)}</td><td>{html.escape(v)}</td></tr>"
+        for h, v in rows
+    )
+    return (
+        '<div class="card">'
+        '<h2>System Information</h2>'
+        f'<table class="data"><thead><tr><th>{"</th><th>".join(headers)}</th></tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+        '</div>'
+    )
+
+
 def _collect_bw_chart_data() -> list:
     """Collect (operation, bandwidth) points for the bandwidth chart.
 
-    Reads the canonical "Operation | Bandwidth (MB/s) | Efficiency" table
+    Reads the canonical "Operation | Bandwidth (MB/s)" table
     from `memory_bandwidth_report.md`. Falls back to the first table whose
     header mentions `Bandwidth` if the canonical table is absent, and to
     a textual summary (`Read: 1234.56 MB/s`) as a last resort.
@@ -551,6 +614,11 @@ table.data tr:hover { background: #fafbfc; }
 .metric-row .score-bad { color: #ef4444; }
 .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .chart-img { width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; }
+.kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 12px 0 18px; }
+.kpi { background: linear-gradient(135deg, #1a2540 0%, #243254 100%); color: #e0e6f0; padding: 14px 16px; border-radius: 6px; border: 1px solid #3a4870; }
+.kpi-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #8aa0c8; margin-bottom: 6px; }
+.kpi-value { font-size: 26px; font-weight: 700; color: #fff; }
+.kpi-unit { font-size: 14px; font-weight: 400; color: #8aa0c8; margin-left: 3px; }
 .warn { color: #f97316; }
 .info { color: #666; font-size: 12px; margin: 8px 0; }
 .footer { color: #999; font-size: 11px; text-align: center; margin-top: 30px; }
@@ -566,6 +634,9 @@ def build_html(score_dict: dict | None) -> str:
              f'<style>{CSS}</style>', '</head>', '<body>', '<div class="container">']
     parts.append('<h1>Memory Benchmark Report</h1>')
     parts.append(f'<p class="subtitle">Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
+
+    # --- System info: pinned to the very top, before all score/chart sections ---
+    parts.append(_system_info_html())
 
     # --- Score section ---
     if score_dict:
@@ -621,6 +692,15 @@ def build_html(score_dict: dict | None) -> str:
     # --- Cache hierarchy chart ---
     parts.append('<div class="card">')
     parts.append('<h2>Cache Hierarchy</h2>')
+    # KPI cards (L1D / L2 / L3 / RAM latency) — concrete numbers, prominent
+    kpis = _collect_cache_kpis()
+    if kpis:
+        cards = "".join(
+            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+            for label, value, unit in kpis
+        )
+        parts.append(f'<div class="kpi-row">{cards}</div>')
     cache_pts = _collect_cache_chart_data()
     if cache_pts:
         parts.append(_svg_line_chart(cache_pts, width=700, height=240,
@@ -633,7 +713,7 @@ def build_html(score_dict: dict | None) -> str:
     p = REPORTS / "cache_hierarchy_report.md"
     if p.exists():
         text = p.read_text()
-        tbl = _find_data_table(text)
+        tbl = _find_data_table(text, skip_first=True)
         if tbl:
             parts.append(_table_html(*tbl))
     parts.append('</div>')
@@ -659,7 +739,7 @@ def build_html(score_dict: dict | None) -> str:
     heatmap = CHARTS / "inter_core_heatmap.png"
     uri = _png_data_uri(heatmap)
     if uri:
-        parts.append(f'<img class="chart-img" src="{uri}" alt="Inter-core heatmap" style="max-width:600px">')
+        parts.append(f'<img class="chart-img" src="{uri}" alt="Inter-core heatmap">')
     else:
         parts.append('<p class="no-data">No inter-core heatmap (run generate_report.py first to generate charts/)</p>')
     parts.append('</div>')
@@ -702,7 +782,7 @@ def build_html(score_dict: dict | None) -> str:
     multi_png = CHARTS / "multi_core_scaling.png"
     multi_uri = _png_data_uri(multi_png)
     if multi_uri:
-        parts.append(f'<img class="chart-img" src="{multi_uri}" alt="Multi-core scaling" style="max-width:760px">')
+        parts.append(f'<img class="chart-img" src="{multi_uri}" alt="Multi-core scaling">')
     else:
         parts.append('<p class="no-data">No multi-core chart (run generate_report.py first to generate charts/)</p>')
     p = REPORTS / "cpu_multi_core_report.md"

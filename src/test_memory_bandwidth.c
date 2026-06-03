@@ -338,11 +338,11 @@ void run_memory_bandwidth_test(size_t size, int threads) {
         report_write(report, "- Theoretical Bandwidth: ~%.0f GB/s\n\n", rep_theoretical / 1000);
 
         report_write(report, "## Bandwidth Results\n\n");
-        report_write(report, "| Operation | Bandwidth (MB/s) | Efficiency |\n");
-        report_write(report, "|-----------|--------------------|------------|\n");
-        report_write(report, "| Read      | %.2f           | %.1f%%     |\n", read_bw, read_bw / rep_theoretical * 100);
-        report_write(report, "| Write     | %.2f           | -         |\n", write_bw);
-        report_write(report, "| Copy      | %.2f           | -         |\n\n", copy_bw);
+        report_write(report, "| Operation | Bandwidth (MB/s) |\n");
+        report_write(report, "|-----------|--------------------|\n");
+        report_write(report, "| Read      | %.2f           |\n", read_bw);
+        report_write(report, "| Write     | %.2f           |\n", write_bw);
+        report_write(report, "| Copy      | %.2f           |\n\n", copy_bw);
 
         report_write(report, "## Latency\n\n");
         report_write(report, "- Random Read Latency:  %.2f ns\n", read_latency);

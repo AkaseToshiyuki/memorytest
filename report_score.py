@@ -205,6 +205,41 @@ def _col_index(headers: list[str], *candidates: str) -> int | None:
     return None
 
 
+def _find_data_table_after(text: str, header_keyword: str) -> tuple[list[str], list[list[str]]] | None:
+    """Find the first markdown table whose header row contains `header_keyword`.
+
+    Used to skip past the System Configuration (Item/Value) table and pick
+    up the data table that follows.
+    """
+    import re
+    lines = text.splitlines()
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+    for i, line in enumerate(lines):
+        if "|" not in line or header_keyword.lower() not in line.lower():
+            continue
+        if i + 1 >= len(lines) or not delim_re.match(lines[i + 1]):
+            continue
+        # Parse header
+        cells = [c.strip().rstrip("*").strip() for c in line.split("|")]
+        if cells and not cells[0]: cells = cells[1:]
+        if cells and not cells[-1]: cells = cells[:-1]
+        headers = cells
+        rows = []
+        j = i + 2
+        while j < len(lines):
+            rline = lines[j]
+            if not rline.strip() or "|" not in rline: break
+            if delim_re.match(rline): break
+            rcells = [c.strip() for c in rline.split("|")]
+            if rcells and not rcells[0]: rcells = rcells[1:]
+            if rcells and not rcells[-1]: rcells = rcells[:-1]
+            rows.append(rcells)
+            j += 1
+        if rows:
+            return headers, rows
+    return None
+
+
 def _safe_float(s: str) -> float | None:
     s = s.replace(",", "").strip()
     try:
@@ -220,11 +255,10 @@ def _row_label(row: list[str]) -> str:
 
 def parse_cache_hierarchy(text: str) -> dict:
     out = {}
-    # Binary output uses ASCII-aligned tables, not markdown tables.
-    # The first such table in cache_hierarchy_report.md is the actual
-    # data table (Size | RdLat | WrLat | BW | Expected | Analysis),
-    # so skip_first must be False here.
-    tbl = _find_data_table(text, skip_first=False)
+    # The first markdown table in cache_hierarchy_report.md is the System
+    # Configuration (Item/Value) table; the actual cache data table follows
+    # it, so skip_first must be True.
+    tbl = _find_data_table(text, skip_first=True)
     if not tbl: return out
     headers, rows = tbl
     rd_col = _col_index(headers, "rdlat", "read latency", "latency")
@@ -250,18 +284,33 @@ def parse_cache_hierarchy(text: str) -> dict:
 def parse_memory_bandwidth(text: str) -> dict:
     """Parse the memory bandwidth report.
 
-    The bandwidth binary writes a textual summary like::
+    The bandwidth binary now writes a markdown table of the form::
 
-        === BANDWIDTH RESULTS ===
-          Thread Count: 24
-          Read:    36279.58 MB/s  (48372.8% of theoretical 0 GB/s)
-          Write:   17463.33 MB/s
-          Copy:    23687.22 MB/s
+        | Operation | Bandwidth (MB/s) |
+        | Read      | 36382.30          |
+        | Write     | 17250.72          |
+        | Copy      | 23904.88          |
 
-    with no markdown/ASCII table. Use regex to extract the MB/s values.
+    Falls back to a textual `Read: 1234.56 MB/s` regex for older reports.
     """
-    import re
     out = {}
+    # 1) Markdown table (current format)
+    tbl = _find_data_table_after(text, "Bandwidth (MB/s)")
+    if tbl:
+        headers, rows = tbl
+        op_col = _col_index(headers, "operation")
+        bw_col = _col_index(headers, "bandwidth (mb/s)", "bandwidth")
+        if op_col is not None and bw_col is not None:
+            for row in rows:
+                op = _row_label(row).lower()
+                v = _safe_float(row[bw_col] if bw_col < len(row) else None)
+                if v is not None and v > 100:
+                    if op.startswith("read"):  out["read_mbps"]  = v
+                    elif op.startswith("write"): out["write_mbps"] = v
+                    elif op.startswith("copy"):  out["copy_mbps"]  = v
+            if out: return out
+    # 2) Textual fallback (older format)
+    import re
     patterns = {
         "read_mbps":  r"Read:\s+([0-9]+\.[0-9]+)\s*MB/s",
         "write_mbps": r"Write:\s+([0-9]+\.[0-9]+)\s*MB/s",
@@ -271,7 +320,7 @@ def parse_memory_bandwidth(text: str) -> dict:
         m = re.search(pat, text)
         if m:
             v = float(m.group(1))
-            if v > 100:  # sanity: bandwidth should be > 100 MB/s
+            if v > 100:
                 out[key] = v
     return out
 
@@ -279,70 +328,55 @@ def parse_memory_bandwidth(text: str) -> dict:
 def parse_inter_core(text: str) -> dict:
     """Parse the NxN inter-core latency matrix.
 
-    The inter-core binary writes a 24x24 grid where row/col index = core id,
-    separated by spaces (NOT pipes), e.g.::
-
-         0    1    2    3    4    5  ...
-    0    - 11.2 11.2 11.2 12.8 12.7 ...
-    1  11.3    - 11.2 11.1 12.7 12.8 ...
-
-    Note that the self-sentinel `-` is at parts[1] for row 0 (and any
-    other left-aligned row) but at parts[2] for row 1+ where there's a
-    left-side 1-hop cell first. We detect the sentinel position
-    dynamically. 1-hop latency is the cell adjacent to the sentinel
-    (parts[sentinel_idx-1] OR parts[sentinel_idx+1] whichever is non-zero).
+    The inter-core binary writes a 24x24 markdown table where row/col
+    index = core id. Self-sentinels are `-` (a literal dash), and the
+    1-hop latency for each row is the non-zero minimum of the cells
+    adjacent to that row's self-sentinel. We compute the average and
+    minimum across all 24 row minima and return `cas_avg_ns` / `cas_min_ns`.
     """
-    import re
-    lines = text.splitlines()
+    tbl = _find_data_table_after(text, "Core")
+    if not tbl: return {}
+    headers, rows = tbl
+    # The first header cell is the row-label sentinel (e.g. "**Core**")
+    # and the rest are column indices 0..N-1.
+    try:
+        n_cols = len(headers) - 1
+    except Exception:
+        return {}
+    if n_cols < 2: return {}
     one_hop = []
-    for line in lines:
-        parts = line.split()
-        if not parts:
-            continue
+    for row in rows:
+        # First cell is the row index (core id)
         try:
-            src = int(parts[0])
-        except ValueError:
+            src = int(row[0])
+        except (ValueError, IndexError):
             continue
-        if len(parts) < 3:
-            continue
-        # Find the self-sentinel: it sits at column (src) of the matrix
-        # row, which can be at parts[1] (src=0) up to parts[src+1].
-        # We scan up to position 5.
-        sentinel_idx = None
-        for idx in range(1, min(6, len(parts))):
-            if parts[idx] == "-":
-                sentinel_idx = idx
-                break
-        if sentinel_idx is None:
-            continue
-        # 1-hop = the cell adjacent to the sentinel, but only if src > 0
-        # (i.e. there's a left neighbour). For src=0, 1-hop is to the
-        # right. We collect both directions.
+        if len(row) < n_cols + 1: continue
+        # The cell at position src+1 corresponds to column src (self)
+        sentinel_col = src + 1
         candidates = []
-        for k in (sentinel_idx - 1, sentinel_idx + 1):
-            if 0 < k < len(parts):
+        for k in (sentinel_col - 1, sentinel_col + 1):
+            if 1 <= k <= n_cols:
                 try:
-                    v = float(parts[k])
+                    v = float(row[k])
                     if 1 < v < 5000:
                         candidates.append(v)
-                except ValueError:
+                except (ValueError, IndexError):
                     pass
-        # Take the minimum of the candidates (the closer neighbour, which
-        # is the actual 1-hop)
         if candidates:
-            one_hop.append((src, min(candidates)))
+            one_hop.append(min(candidates))
     if one_hop:
-        vals = [v for _, v in one_hop]
         return {
-            "cas_avg_ns": sum(vals) / len(vals),
-            "cas_min_ns": min(vals),
+            "cas_avg_ns": sum(one_hop) / len(one_hop),
+            "cas_min_ns": min(one_hop),
         }
     return {}
 
 
+
 def parse_cpu_alu(text: str) -> dict:
     out = {}
-    tbl = _find_data_table(text, skip_first=False)
+    tbl = _find_data_table(text, skip_first=True)
     if not tbl: return out
     headers, rows = tbl
     ipc_col = _col_index(headers, "ipc")
@@ -362,7 +396,7 @@ def parse_cpu_alu(text: str) -> dict:
 
 def parse_cpu_float(text: str) -> dict:
     out = {}
-    tbl = _find_data_table(text, skip_first=False)
+    tbl = _find_data_table(text, skip_first=True)
     if not tbl: return out
     headers, rows = tbl
     ns_col = _col_index(headers, "ns/op", "ns_per_op", "nsec/op")
