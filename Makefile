@@ -25,7 +25,7 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report report-html score
+.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report score
 
 # Default: build all
 all: tests
@@ -60,18 +60,15 @@ regression-record:
 	@python3 test_regression.py --record-only
 
 # Run all benchmarks (assumes binaries are built and reports/*.md are fresh)
-# and produce both the canonical HTML report and a 1:1 PDF print of it.
-# Also computes the 0-100 score with letter grade.
+# and produce the canonical HTML report. The HTML is the single source of truth —
+# open it in any browser, or use the browser's print-to-PDF. Also computes the
+# 0-100 score with letter grade.
 report:
-	@echo "=== generating HTML report (canonical, zero deps) ==="
-	@python3.12 report_html.py --pdf reports/benchmark_report.pdf
+	@echo "=== generating HTML report ==="
+	@python3.12 report_html.py
 	@echo ""
 	@echo "=== score summary ==="
 	@python3.12 report_score.py | head -10
-
-# HTML-only report (no PDF; no browser required)
-report-html:
-	@python3.12 report_html.py
 
 # Print score summary only (no report)
 score:
@@ -82,7 +79,7 @@ lint:
 	@echo "--- C: recompile with -Werror on key warnings ---"
 	$(MAKE) clean tests CFLAGS="-O2 -Wall -std=c11 -pthread -Werror -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers"
 	@echo "--- Python: py_compile all .py ---"
-	@python3 -m py_compile generate_report.py test_sanity.py test_regression.py
+	@python3 -m py_compile generate_report.py report_html.py test_sanity.py test_regression.py
 	@echo "--- bash: -n syntax check ---"
 	@bash -n test_smoke.sh
 	@echo "lint: all passed"
@@ -119,7 +116,7 @@ clean:
 
 # Clean reports
 clean-reports:
-	rm -rf reports/*.md reports/*.json
+	rm -rf reports/*.md reports/*.json reports/*.html
 
 # Clean everything
 distclean: clean clean-reports

@@ -2,12 +2,15 @@
 """
 Memory Benchmark Report Generator
 
-Generates PDF reports with visualizations.
+Generates per-test markdown reports (in reports/) and PNG charts (in reports/charts/).
+The canonical HTML report is produced separately by `report_html.py` (which reads the
+markdown reports generated here). Print-to-PDF is a one-click browser action on the
+HTML — we don't maintain a separate PDF pipeline.
 
 Usage:
-    python3 generate_report.py --all                # Run all tests and generate PDF report
-    python3 generate_report.py --test <test_name> # Run single test and generate report
-    python3 generate_report.py --list              # List available tests
+    python3 generate_report.py --all                # Run all tests
+    python3 generate_report.py --test <test_name>   # Run single test
+    python3 generate_report.py --list               # List available tests
 """
 
 import os
@@ -18,18 +21,6 @@ import getpass
 import json
 import time
 from datetime import datetime
-
-try:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch, cm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
-    from reportlab.graphics.shapes import Drawing, Rect
-    from reportlab.graphics import renderPDF
-    HAS_REPORTLAB = True
-except ImportError:
-    HAS_REPORTLAB = False
 
 try:
     import matplotlib
@@ -1066,347 +1057,6 @@ def extract_inter_core_stats(report_path):
         pass
     return stats
 
-def generate_pdf_report():
-    """Generate final PDF report with charts"""
-    if not HAS_REPORTLAB:
-        print("\n[Info] reportlab not installed. Skipping PDF generation.")
-        print("Install with: pip install reportlab matplotlib numpy")
-        return True  # Return True so the test doesn't fail
-
-    print("\n" + "="*70)
-    print("GENERATING PDF REPORT")
-    print("="*70)
-
-    # Get device info
-    import socket
-    hostname = socket.gethostname()
-    try:
-        with open('/etc/machine-id', 'r') as f:
-            device_id = f.read().strip()[:8]
-    except:
-        device_id = hostname[:8]
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    pdf_path = os.path.join(REPORTS_DIR, "benchmark_report.pdf")
-    doc = SimpleDocTemplate(pdf_path, pagesize=A4,
-                           rightMargin=72, leftMargin=72,
-                           topMargin=72, bottomMargin=72)
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        spaceAfter=30
-    )
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=16,
-        spaceAfter=12,
-        spaceBefore=20
-    )
-
-    # Watermark function — minimal footer only (the diagonal "CONFIDENTIAL"
-    # was previously causing "ALTIENDFINOC"-style vertical text to appear in
-    # PDF extractors and looked like a rendering bug; removed).
-    def add_watermark(canvas, doc):
-        canvas.saveState()
-        canvas.setFont('Helvetica', 8)
-        canvas.setFillColor(colors.grey)
-        wm_text = f"{timestamp} | {hostname} | {device_id}"
-        canvas.drawRightString(A4[0] - 72, 36, wm_text)
-        canvas.restoreState()
-
-    story = []
-
-    # Title
-    story.append(Paragraph("Memory Benchmark Report", title_style))
-    story.append(Paragraph(f"<i>Generated: {timestamp}</i>", styles['Normal']))
-    story.append(Spacer(1, 10))
-
-    # Device Info Box
-    device_info = [
-        ['Device ID', device_id],
-        ['Hostname', hostname],
-        ['Report Time', timestamp],
-    ]
-    t = Table(device_info, colWidths=[1.5*inch, 3*inch])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (0, -1), colors.Color(0.95, 0.95, 1.0)),
-        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 0), (-1, -1), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOX', (0, 0), (-1, -1), 1, colors.Color(0.7, 0.7, 0.9)),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.Color(0.8, 0.8, 0.9)),
-    ]))
-    story.append(t)
-    story.append(Spacer(1, 20))
-
-    # System Info Section (at beginning)
-    cache_report = os.path.join(REPORTS_DIR, "cache_hierarchy_report.md")
-    sys_info = []
-    if os.path.exists(cache_report):
-        with open(cache_report, 'r') as f:
-            content = f.read()
-            in_config = False
-            for line in content.split('\n'):
-                if 'System Configuration' in line:
-                    in_config = True
-                    continue
-                if in_config and '|' in line and '-' not in line:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 3 and parts[1]:
-                        sys_info.append([parts[1], parts[2]])
-                elif in_config and line.strip() == '':
-                    break
-
-    if sys_info:
-        story.append(Paragraph("System Configuration", heading_style))
-        t = Table(sys_info, colWidths=[2*inch, 3*inch])
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        story.append(t)
-        story.append(Spacer(1, 20))
-
-    # Generate charts
-    charts_generated = []
-
-    # Cache hierarchy chart
-    if os.path.exists(cache_report):
-        data = parse_cache_report(cache_report)
-        chart_path = os.path.join(CHARTS_DIR, "cache_latency.png")
-        if create_cache_latency_chart(data, chart_path):
-            charts_generated.append(('Cache Hierarchy', chart_path))
-
-    # Multi-core scaling chart
-    multi_report = os.path.join(REPORTS_DIR, "cpu_multi_core_report.md")
-    if os.path.exists(multi_report):
-        data = parse_multi_core_report(multi_report)
-        chart_path = os.path.join(CHARTS_DIR, "multi_core_scaling.png")
-        if create_multi_core_scaling_chart(data, chart_path):
-            charts_generated.append(('Multi-Core Scaling', chart_path))
-
-    # Memory bandwidth chart
-    bw_report = os.path.join(REPORTS_DIR, "memory_bandwidth_report.md")
-    if os.path.exists(bw_report):
-        chart_path = os.path.join(CHARTS_DIR, "memory_bandwidth.png")
-        if create_bandwidth_chart(bw_report, chart_path):
-            charts_generated.append(('Memory Bandwidth', chart_path))
-
-    # CPU ALU chart
-    alu_report = os.path.join(REPORTS_DIR, "cpu_alu_report.md")
-    if os.path.exists(alu_report):
-        chart_path = os.path.join(CHARTS_DIR, "cpu_alu.png")
-        if create_cpu_chart(alu_report, chart_path, 'alu'):
-            charts_generated.append(('CPU ALU', chart_path))
-
-    # CPU Float chart
-    float_report = os.path.join(REPORTS_DIR, "cpu_float_report.md")
-    if os.path.exists(float_report):
-        chart_path = os.path.join(CHARTS_DIR, "cpu_float.png")
-        if create_cpu_chart(float_report, chart_path, 'float'):
-            charts_generated.append(('CPU Float', chart_path))
-
-    # Inter-core heatmap
-    ic_report = os.path.join(REPORTS_DIR, "inter_core_latency_report.md")
-    if os.path.exists(ic_report):
-        chart_path = os.path.join(CHARTS_DIR, "inter_core_heatmap.png")
-        if create_inter_core_heatmap(ic_report, chart_path):
-            charts_generated.append(('Inter-Core Latency', chart_path))
-
-    # Cache Hierarchy Section
-    if os.path.exists(cache_report):
-        story.append(Paragraph("Cache Hierarchy Test", heading_style))
-        data = parse_cache_report(cache_report)
-        if data['sizes']:
-            table_data = [['Size', 'Rd Lat (ns)', 'Wr Lat (ns)', 'BW (MB/s)', 'Expected']]
-            for i, size in enumerate(data['sizes']):
-                if i < len(data['rd_lat']):
-                    table_data.append([
-                        size,
-                        f"{data['rd_lat'][i]:.2f}",
-                        f"{data['wr_lat'][i]:.2f}",
-                        f"{data['bw'][i]:.0f}",
-                        data['expected'][i] if i < len(data['expected']) else ''
-                    ])
-            t = Table(table_data, colWidths=[1*inch, 1.2*inch, 1.2*inch, 1.2*inch, 1*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "cache_latency.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=4*inch))
-        story.append(PageBreak())
-
-    # Memory Bandwidth Section
-    bw_report = os.path.join(REPORTS_DIR, "memory_bandwidth_report.md")
-    if os.path.exists(bw_report):
-        story.append(Paragraph("Memory Bandwidth Test", heading_style))
-        bw_data = extract_bandwidth_data(bw_report)
-        if bw_data:
-            table_data = [['Operation', 'Bandwidth (MB/s)', 'Efficiency']]
-            for op, bw, eff in bw_data:
-                table_data.append([op, f"{bw:.2f}", eff])
-            t = Table(table_data, colWidths=[1.5*inch, 1.5*inch, 1.5*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "memory_bandwidth.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=4*inch))
-        story.append(PageBreak())
-
-    # CPU ALU Section
-    alu_report = os.path.join(REPORTS_DIR, "cpu_alu_report.md")
-    if os.path.exists(alu_report):
-        story.append(Paragraph("CPU ALU Test", heading_style))
-        alu_data = extract_cpu_alu_data(alu_report)
-        if alu_data:
-            # alu_data columns: Operation, Time(ms), Ops/sec, ns/op, CPI
-            table_data = [['Operation', 'Time(ms)', 'Ops/sec', 'ns/op', 'CPI']]
-            for row in alu_data:
-                if len(row) >= 5:
-                    table_data.append([row[0], row[1], f"{float(row[2]):.0f}", row[3], row[4]])
-            t = Table(table_data, colWidths=[1.2*inch, 1*inch, 1.3*inch, 0.8*inch, 0.8*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "cpu_alu.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=4*inch))
-        story.append(PageBreak())
-
-    # CPU Float Section
-    float_report = os.path.join(REPORTS_DIR, "cpu_float_report.md")
-    if os.path.exists(float_report):
-        story.append(Paragraph("CPU Floating-Point Test", heading_style))
-        float_data = extract_cpu_float_data(float_report)
-        if float_data:
-            table_data = [['Operation', 'Type', 'Ops/sec', 'ns/op', 'CPI', 'IPC']]
-            for row in float_data:
-                if len(row) >= 6:
-                    table_data.append([row[0], row[1], f"{float(row[2]):.0f}", row[3], row[4], row[5]])
-            t = Table(table_data, colWidths=[1*inch, 0.8*inch, 1.3*inch, 0.8*inch, 0.7*inch, 0.7*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 7),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                ('TOPPADDING', (0, 0), (-1, -1), 3),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "cpu_float.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=4*inch))
-        story.append(PageBreak())
-
-    # Multi-Core Section
-    multi_report = os.path.join(REPORTS_DIR, "cpu_multi_core_report.md")
-    if os.path.exists(multi_report):
-        story.append(Paragraph("Multi-Core Scaling Test", heading_style))
-        multi_data = extract_multi_core_data(multi_report)
-        if multi_data:
-            # multi_data columns: Operation, Category, Threads, Time(ms), Speedup, Efficiency
-            table_data = [['Operation', 'Category', 'Threads', 'Time(ms)', 'Speedup', 'Efficiency']]
-            for row in multi_data:
-                if len(row) >= 6:
-                    try:
-                        table_data.append([row[0], row[1], row[2], row[3], f"{float(row[4]):.2f}", row[5]])
-                    except (ValueError, IndexError):
-                        table_data.append(row[:6])
-            t = Table(table_data, colWidths=[0.9*inch, 0.7*inch, 0.6*inch, 0.9*inch, 0.8*inch, 0.9*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 7),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-                ('TOPPADDING', (0, 0), (-1, -1), 2),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "multi_core_scaling.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=4*inch))
-        story.append(PageBreak())
-
-    # Inter-Core Section
-    ic_report = os.path.join(REPORTS_DIR, "inter_core_latency_report.md")
-    if os.path.exists(ic_report):
-        story.append(Paragraph("Inter-Core Latency Test", heading_style))
-        ic_stats = extract_inter_core_stats(ic_report)
-        if ic_stats:
-            table_data = [['Metric', 'Value']]
-            for k, v in ic_stats.items():
-                table_data.append([k, v])
-            t = Table(table_data, colWidths=[2*inch, 2*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-        chart_path = os.path.join(CHARTS_DIR, "inter_core_heatmap.png")
-        if os.path.exists(chart_path):
-            story.append(Image(chart_path, width=6*inch, height=5*inch))
-
-    # Build PDF with watermark
-    doc.build(story, onFirstPage=add_watermark, onLaterPages=add_watermark)
-    print(f"\n[PDF] Report generated: {pdf_path}")
-    return True
-
-
 def run_all_tests(verbose=False, test_names=None, clean_cache=True):
     """Run a sequence of tests (defaults to all) and (optionally) clean caches between them.
 
@@ -1457,11 +1107,6 @@ def run_all_tests(verbose=False, test_names=None, clean_cache=True):
         print(f"  {status} {TESTS[test_name]['name']}")
 
     print(f"\nTotal: {passed}/{total} passed")
-
-    # Generate PDF report if dependencies available
-    if passed > 0:
-        generate_pdf_report()
-
     return passed == total
 
 
@@ -1474,7 +1119,7 @@ def main():
     parser.add_argument("--test", "-t", type=str,
                         help="Run a single test and generate its report")
     parser.add_argument("--all", "-a", action="store_true",
-                        help="Run all tests and generate PDF report")
+                        help="Run all tests")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List all available tests")
     # Additive flags (ported from legacy run_tests.py)

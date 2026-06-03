@@ -17,12 +17,11 @@ Produces a self-contained HTML file with:
 Usage:
     python3 report_html.py                  # writes reports/benchmark_report.html
     python3 report_html.py --output path    # custom HTML output path
-    python3 report_html.py --pdf path       # also write PDF (via headless Firefox)
 
 The output HTML has no external dependencies — all CSS, SVG, and base64
 data URIs are inlined. It can be opened directly in a browser, archived,
-or sent by email. The PDF is a 1:1 print of the HTML so there's no second
-report layout to maintain.
+or sent by email. Print-to-PDF is a one-click browser action; we don't
+maintain a separate PDF rendering pipeline.
 """
 
 import argparse
@@ -676,7 +675,7 @@ def build_html(score_dict: dict | None) -> str:
     p = REPORTS / "cpu_alu_report.md"
     if p.exists():
         text = p.read_text()
-        tbl = _find_data_table_after(text, "IPC") or _find_data_table(text, skip_first=True)
+        tbl = _find_data_table_after(text, "IPC")
         if tbl:
             parts.append(_table_html(*tbl))
     parts.append('</div>')
@@ -692,7 +691,7 @@ def build_html(score_dict: dict | None) -> str:
     p = REPORTS / "cpu_float_report.md"
     if p.exists():
         text = p.read_text()
-        tbl = _find_data_table_after(text, "ns/op") or _find_data_table(text, skip_first=True)
+        tbl = _find_data_table_after(text, "ns/op")
         if tbl:
             parts.append(_table_html(*tbl))
     parts.append('</div>')
@@ -740,54 +739,9 @@ def build_html(score_dict: dict | None) -> str:
     return "\n".join(parts)
 
 
-def _html_to_pdf_firefox(html_path: Path, pdf_path: Path, timeout: int = 90) -> bool:
-    """Print an HTML file to PDF using headless Firefox.
-
-    This gives a 1:1 visual match between the HTML and PDF reports —
-    no second report layout to maintain. Returns True on success.
-
-    Tries in order:
-      1. Firefox with `--headless=new` directly
-      2. Firefox under `xvfb-run` if Xvfb is available (workaround for
-         environments where software-GL headless rendering is broken)
-    Requires `firefox` on $PATH.
-    """
-    import shutil, subprocess
-    firefox = shutil.which("firefox") or shutil.which("firefox-esr")
-    if not firefox:
-        print("# ERROR: `firefox` not found on PATH; install it for HTML→PDF", file=sys.stderr)
-        return False
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-
-    common = ["--no-sandbox", "--disable-gpu", f"--print-to-pdf={pdf_path}",
-              f"file://{html_path.resolve()}"]
-    candidates = [
-        # Plain headless (works on systems with working swrast)
-        [firefox, "--headless=new", *common],
-        # Under Xvfb (workaround for headless swrast failures)
-        ["xvfb-run", "-a", firefox, "--headless", *common],
-    ]
-    last_err = ""
-    for cmd in candidates:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                return True
-            last_err = f"exit={r.returncode} stderr={r.stderr[:200]}"
-        except subprocess.TimeoutExpired:
-            last_err = f"timeout after {timeout}s"
-            continue
-        except FileNotFoundError as e:
-            last_err = f"missing: {e}"
-            continue
-    print(f"# ERROR: PDF generation failed ({last_err})", file=sys.stderr)
-    return False
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output HTML path (default: {DEFAULT_OUTPUT})")
-    ap.add_argument("--pdf", type=Path, default=None, help="Also write a PDF (path). Requires `firefox` on PATH.")
     args = ap.parse_args()
 
     score_dict = None
@@ -806,13 +760,6 @@ def main():
     args.output.write_text(html_str)
     size_kb = args.output.stat().st_size / 1024
     print(f"HTML report written: {args.output}  ({size_kb:.1f} KB)")
-
-    if args.pdf is not None:
-        if _html_to_pdf_firefox(args.output, args.pdf):
-            size_kb = args.pdf.stat().st_size / 1024
-            print(f"PDF report written:  {args.pdf}  ({size_kb:.1f} KB)  [via headless Firefox]")
-        else:
-            return 1
     return 0
 
 
