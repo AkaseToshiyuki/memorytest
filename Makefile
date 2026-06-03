@@ -116,7 +116,7 @@ clean:
 
 # Clean reports
 clean-reports:
-	rm -rf reports/*.md reports/*.json reports/*.html
+	rm -rf reports/*.md reports/*.json reports/*.html reports/charts
 
 # Clean everything
 distclean: clean clean-reports

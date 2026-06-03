@@ -462,7 +462,10 @@ void run_inter_core_latency_test(void) {
             for (int j = 0; j < max_cores; j++) {
                 if (j > 0) fprintf(json_fp, ", ");
                 if (i == j) {
-                    fprintf(json_fp, "0.0");
+                    // self-pair is a sentinel; mark as null in JSON so
+                    // downstream consumers can distinguish "not measured"
+                    // from a real (but suspiciously small) value like 0.0
+                    fprintf(json_fp, "null");
                 } else {
                     int count = 0;
                     run_cas_test(i, j, results, &count);
@@ -470,7 +473,7 @@ void run_inter_core_latency_test(void) {
                         qsort(results, count, sizeof(double), compare_uint64);
                         fprintf(json_fp, "%.1f", results[count / 2]);
                     } else {
-                        fprintf(json_fp, "-1.0");
+                        fprintf(json_fp, "null");
                     }
                 }
             }

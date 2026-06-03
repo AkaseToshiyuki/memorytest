@@ -695,13 +695,23 @@ def create_inter_core_heatmap(report_path, output_path):
     and continues until `## CAS Throughput` (or end of file).
     Each row begins with the source core id; the cell at column `src` is
     `-` (self-pair sentinel); the rest are cross-core latencies in ns.
+
+    The self-sentinel cells are rendered as `NaN` in the heatmap (matplotlib
+    shows them as a distinct "no data" colour) so the matrix is always
+    square (N×N) and column labels stay aligned with the actual cores.
     """
     if not HAS_MATPLOTLIB:
         return None
 
     try:
+        import numpy as np
         text = open(report_path).read()
-        matrix = []
+        # The first row in the matrix is `| 0 | - | 11.2 | ...`, where the
+        # first cell is the source core id, the rest are the data cells
+        # (one per target core). The self-sentinel (`-`) sits at column
+        # `src` in the data array, i.e. data[src].
+        rows_data = []
+        max_src = -1
         in_matrix = False
         for line in text.splitlines():
             if "CAS Latency Matrix" in line and "ns" in line:
@@ -713,8 +723,6 @@ def create_inter_core_heatmap(report_path, output_path):
                 continue
             if "|" not in line:
                 continue
-            # Skip the header (`| **Core** | 0 | 1 | ...`) and the
-            # delimiter (`|---|---:|...`) rows.
             cells = _parse_table_row(line)
             if not cells or cells[0].lower().startswith("**core"):
                 continue
@@ -722,69 +730,117 @@ def create_inter_core_heatmap(report_path, output_path):
                 continue
             if len(cells) < 3:
                 continue
-            # First cell is the source core id
             try:
                 src = int(cells[0])
             except ValueError:
                 continue
-            # The remaining cells are latencies (one per target core).
-            # The self-pair sentinel (`-`) sits at column (src) of the
-            # data row, but the data cells start at cells[1]. So in the
-            # data array, the self-sentinel is at index (src).
             data = cells[1:]
-            if len(data) <= src:
-                continue
-            row_vals = []
-            for k, p in enumerate(data):
-                if k == src:
-                    continue  # skip the self-sentinel
-                try:
-                    row_vals.append(float(p))
-                except ValueError:
-                    row_vals.append(0.0)
-            if len(row_vals) >= 4:
-                matrix.append(row_vals)
+            if src > max_src: max_src = src
+            rows_data.append((src, data))
 
-        if not matrix or len(matrix) < 4:
+        if not rows_data:
             return None
 
-        # Pad rows to consistent width (some rows may be shorter on 1st pass)
-        ncols = max(len(r) for r in matrix)
-        for r in matrix:
-            while len(r) < ncols:
-                r.append(0.0)
+        # Build a square N×N matrix. N = max_src + 1 (rows are 0..N-1).
+        # Use NaN for self-sentinels so the heatmap can mark them as "no
+        # data" and column/row labels stay aligned.
+        n = max_src + 1
+        matrix = np.full((n, n), np.nan, dtype=float)
+        for src, data in rows_data:
+            if src >= n: continue
+            for k, p in enumerate(data):
+                col = k  # in the data array, position k corresponds to target col k
+                if col >= n: break
+                if col == src:
+                    continue  # leave NaN
+                try:
+                    matrix[src, col] = float(p)
+                except ValueError:
+                    pass  # leave NaN for non-numeric (e.g. "N/A")
 
-        fig, ax = plt.subplots(figsize=(12, 10))
-        im = ax.imshow(matrix, cmap='YlOrRd', aspect='auto')
-        ax.set_title('Inter-Core CAS Latency (ns)', fontsize=14)
-        ax.set_xlabel('Core ID', fontsize=12)
-        ax.set_ylabel('Core ID', fontsize=12)
+        if np.all(np.isnan(matrix)):
+            return None
 
-        n = len(matrix)
-        ax.set_xticks(range(n))
-        ax.set_yticks(range(n))
-        ax.set_xticklabels(range(n))
-        ax.set_yticklabels(range(n))
-
-        for i in range(n):
-            for j in range(len(matrix[i])):
-                val = matrix[i][j]
-                row_min = min(matrix[i])
-                row_max = max(matrix[i])
-                text_color = 'white' if val > (row_max + row_min) / 2 else 'black'
-                ax.text(j, i, f'{val:.1f}', ha='center', va='center',
-                       color=text_color, fontsize=6)
-
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label('Latency (ns)', fontsize=10)
-
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        _render_heatmap(matrix, output_path)
         return output_path
     except Exception as e:
         print(f"Error creating heatmap: {e}")
         return None
+
+
+def create_inter_core_heatmap_from_json(json_path, output_path):
+    """Render the inter-core heatmap from the JSON data file written by
+    the C binary (`reports/inter_core_heatmap_data.json`).
+
+    The JSON is the authoritative source: self-pair cells are `null`,
+    which we render as NaN (grey "no data" in the heatmap). The matrix
+    is always N×N where N is the row count.
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    import json as _json
+    import numpy as np
+    with open(json_path) as f:
+        data = _json.load(f)
+    raw = data.get("cas_latency_matrix")
+    if not raw:
+        return None
+    n = len(raw)
+    matrix = np.full((n, n), np.nan, dtype=float)
+    for i, row in enumerate(raw):
+        if i >= n: break
+        for j, v in enumerate(row):
+            if j >= n: break
+            if v is None: continue  # leave NaN (self-sentinel or missing)
+            try:
+                matrix[i, j] = float(v)
+            except (TypeError, ValueError):
+                pass
+    if np.all(np.isnan(matrix)):
+        return None
+    _render_heatmap(matrix, output_path)
+    return output_path
+
+
+def _render_heatmap(matrix, output_path):
+    """Common matplotlib rendering for an NxN latency matrix (NaN = no data)."""
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(12, 10))
+    cmap = plt.get_cmap('YlOrRd').copy()
+    cmap.set_bad(color='#d0d0d0')
+    masked = np.ma.masked_invalid(matrix)
+    im = ax.imshow(masked, cmap=cmap, aspect='auto',
+                   vmin=np.nanmin(matrix), vmax=np.nanmax(matrix))
+    ax.set_title('Inter-Core CAS Latency (ns) — diagonal = self (not measured)', fontsize=13)
+    ax.set_xlabel('Core ID', fontsize=12)
+    ax.set_ylabel('Core ID', fontsize=12)
+
+    n = matrix.shape[0]
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(range(n))
+    ax.set_yticklabels(range(n))
+
+    finite_max = np.nanmax(matrix)
+    finite_min = np.nanmin(matrix)
+    threshold = (finite_max + finite_min) / 2
+    for i in range(n):
+        for j in range(n):
+            if np.isnan(matrix[i, j]):
+                label = "—"
+                color = '#888'
+            else:
+                label = f'{matrix[i, j]:.1f}'
+                color = 'white' if matrix[i, j] > threshold else 'black'
+            ax.text(j, i, label, ha='center', va='center',
+                    color=color, fontsize=6)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Latency (ns) — grey = self-pair (not measured)', fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
 
 
 def extract_bandwidth_data(report_path):
@@ -952,45 +1008,60 @@ def extract_cpu_float_data(report_path):
 
 
 def extract_multi_core_data(report_path):
-    """Extract multi-core scaling data (recognises both markdown and ASCII tables)."""
+    """Extract multi-core scaling data into the shape create_multi_core_scaling_chart
+    expects::
+
+        {
+          'thread_counts': [1, 2, 4, 8, 16, 24],
+          'operations': {
+              'Add': {'speedup': [1.0, 1.88, ...], 'efficiency': [99.8, 94.2, ...]},
+              ...
+          }
+        }
+
+    The multi-core binary writes a markdown table with one row per
+    (operation, threads) pair and 6 columns: Operation, Category, Threads,
+    Time(ms), Speedup, Efficiency, Status.
+    """
     import re
-    data = []
-    in_table = False
+    out = {"thread_counts": [], "operations": {}}
     delim_re = re.compile(r'^[\s\-:|]+\|?$')
-    section_re = re.compile(r"^--\s+.+\s+--$")
     try:
         text = open(report_path).read()
+        in_table = False
         for line in text.splitlines():
-            if not in_table and 'Operation' in line and 'Category' in line and '|' in line:
-                in_table = True
+            if not in_table:
+                if 'Operation' in line and 'Category' in line and '|' in line:
+                    in_table = True
                 continue
-            if in_table:
-                if not line.strip():
-                    continue  # skip blank sub-section separators
-                if section_re.match(line):
-                    continue
-                if delim_re.match(line):
-                    continue
-                if '|' not in line:
-                    break
-                parts = [p.strip() for p in line.split('|')]
-                if parts[0] in ('Operation', '', '-') and len(parts) >= 8:
-                    cells = parts[1:-1] if not parts[-1] else parts[1:]
-                else:
-                    cells = parts
-                if len(cells) >= 6 and cells[0] and cells[0] not in ('Operation',):
-                    # Strip the trailing 'x' from the Speedup column.
-                    # Multi-core binary writes "1.00      x" (with the unit
-                    # on a separate column visually but merged into the
-                    # previous cell by the table parser). The header has
-                    # 7 columns: Operation, Category, Threads, Time(ms),
-                    # Speedup, Efficiency, Status → speedup is cells[4].
-                    if len(cells) >= 5:
-                        cells[4] = cells[4].replace('x', '').strip()
-                    data.append(cells[:6])
+            if not line.strip():
+                continue
+            if delim_re.match(line):
+                continue
+            if '|' not in line:
+                break
+            parts = [p.strip() for p in line.split('|')]
+            # Drop leading/trailing empty fragments
+            if parts and not parts[0]: parts = parts[1:]
+            if parts and not parts[-1]: parts = parts[:-1]
+            if len(parts) < 6 or not parts[0] or parts[0] == 'Operation':
+                continue
+            try:
+                op       = parts[0]
+                threads  = int(parts[2])
+                speedup  = float(parts[4].replace('x', '').strip())
+                eff      = float(parts[5].replace('%', '').strip())
+            except (ValueError, IndexError):
+                continue
+            if threads not in out["thread_counts"]:
+                out["thread_counts"].append(threads)
+            out["thread_counts"].sort()
+            bucket = out["operations"].setdefault(op, {"speedup": [], "efficiency": []})
+            bucket["speedup"].append(speedup)
+            bucket["efficiency"].append(eff)
     except Exception:
         pass
-    return data
+    return out
 
 def extract_inter_core_stats(report_path):
     """Extract inter-core latency statistics.

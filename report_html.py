@@ -819,10 +819,92 @@ def build_html(score_dict: dict | None) -> str:
     return "\n".join(parts)
 
 
+def _ensure_charts() -> None:
+    """Regenerate the matplotlib PNG charts in reports/charts/.
+
+    The HTML report embeds three PNGs (cache latency, memory bandwidth,
+    inter-core heatmap, multi-core scaling). They are produced by
+    `generate_report.py`'s `create_*` functions. The C binaries also
+    write markdown reports and a JSON, but they do NOT regenerate these
+    PNGs (the C side used to call a now-missing `reports/inter_core_heatmap.py`).
+    So before the HTML pipeline runs, we call the create_* helpers to
+    refresh the PNGs from the freshly-written markdown/JSON reports.
+
+    Safe to call multiple times — each helper is idempotent.
+    """
+    try:
+        import generate_report as gr
+    except ImportError:
+        return
+    CHARTS.mkdir(parents=True, exist_ok=True)
+    cache_md = REPORTS / "cache_hierarchy_report.md"
+    bw_md    = REPORTS / "memory_bandwidth_report.md"
+    ic_md    = REPORTS / "inter_core_latency_report.md"
+    ic_json  = REPORTS / "inter_core_heatmap_data.json"
+    multi_md = REPORTS / "cpu_multi_core_report.md"
+    alu_md   = REPORTS / "cpu_alu_report.md"
+    float_md = REPORTS / "cpu_float_report.md"
+    # Cache latency (no markdown consumer — chart from parsed table)
+    if cache_md.exists():
+        try:
+            data = gr.parse_cache_report(str(cache_md))
+            gr.create_cache_latency_chart(data, str(CHARTS / "cache_latency.png"))
+        except Exception as e:
+            print(f"# WARN: cache_latency chart failed: {e}", file=sys.stderr)
+    # Memory bandwidth
+    if bw_md.exists():
+        try:
+            gr.create_bandwidth_chart(str(bw_md), str(CHARTS / "memory_bandwidth.png"))
+        except Exception as e:
+            print(f"# WARN: memory_bandwidth chart failed: {e}", file=sys.stderr)
+    # Inter-core heatmap (use the freshly-written JSON when present so the
+    # self-sentinel nulls are honoured by the heatmap renderer; fall back
+    # to the markdown otherwise).
+    if ic_json.exists():
+        try:
+            gr.create_inter_core_heatmap_from_json(str(ic_json), str(CHARTS / "inter_core_heatmap.png"))
+        except AttributeError:
+            # older generate_report.py — parse from the markdown instead
+            if ic_md.exists():
+                try:
+                    gr.create_inter_core_heatmap(str(ic_md), str(CHARTS / "inter_core_heatmap.png"))
+                except Exception as e:
+                    print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
+    elif ic_md.exists():
+        try:
+            gr.create_inter_core_heatmap(str(ic_md), str(CHARTS / "inter_core_heatmap.png"))
+        except Exception as e:
+            print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
+    # Multi-core scaling
+    if multi_md.exists():
+        try:
+            data = gr.extract_multi_core_data(str(multi_md))
+            gr.create_multi_core_scaling_chart(data, str(CHARTS / "multi_core_scaling.png"))
+        except Exception as e:
+            print(f"# WARN: multi-core scaling chart failed: {e}", file=sys.stderr)
+    # CPU ALU / Float (matplotlib flavours — informational, HTML uses SVG)
+    if alu_md.exists():
+        try:
+            gr.create_cpu_chart(str(alu_md), str(CHARTS / "cpu_alu.png"), chart_type="alu")
+        except Exception as e:
+            print(f"# WARN: cpu_alu chart failed: {e}", file=sys.stderr)
+    if float_md.exists():
+        try:
+            gr.create_cpu_chart(str(float_md), str(CHARTS / "cpu_float.png"), chart_type="float")
+        except Exception as e:
+            print(f"# WARN: cpu_float chart failed: {e}", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output HTML path (default: {DEFAULT_OUTPUT})")
+    ap.add_argument("--skip-charts", action="store_true", help="Don't regenerate the matplotlib PNGs (HTML will use whatever is already in charts/)")
     args = ap.parse_args()
+
+    if not args.skip_charts:
+        _ensure_charts()
 
     score_dict = None
     if HAS_SCORE:

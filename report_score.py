@@ -556,6 +556,14 @@ def score_to_dict(summary: ScoreSummary) -> dict:
 
 
 if __name__ == "__main__":
+    # Ignore SIGPIPE so `python3 report_score.py | head` doesn't raise
+    # BrokenPipeError at process exit (cosmetic; doesn't affect the HTML
+    # pipeline which doesn't pipe through head).
+    try:
+        import signal
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (ImportError, AttributeError):
+        pass
     s = score_run()
     print(format_score_summary(s))
     print()
