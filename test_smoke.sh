@@ -61,16 +61,12 @@ for binary in "${!TESTS[@]}"; do
     pre_mtime=0
     [ -f "$report_file" ] && pre_mtime=$(stat -c %Y "$report_file" 2>/dev/null || echo 0)
 
-    # test_inter_core scales super-linearly with core count (24x24 CAS matrix);
-    # everything else uses CPU_TIMEOUT.
+    # test_inter_core always runs (user requirement: do not skip, do not
+    # time out). For nproc > 64 the binary internally halves BW_ITERATIONS
+    # to keep wall time manageable. We still cap the smoke timeout at 30
+    # min as a safety net against infinite loops, but the test is no
+    # longer skipped on big machines.
     if [ "$binary" = "test_inter_core" ]; then
-        # On machines with many cores, the 24x24 CAS matrix takes too long
-        # for smoke. Skip with a SKIP line (don't count as pass or fail).
-        if [ "$NCPU" -gt 32 ]; then
-            printf "  - %-25s SKIPPED (nproc=%d > 32; run separately)\n" "$binary" "$NCPU"
-            SKIP=$((SKIP+1))
-            continue
-        fi
         THIS_TIMEOUT=$INTER_TIMEOUT
     else
         THIS_TIMEOUT=$TIMEOUT_SEC

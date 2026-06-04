@@ -19,9 +19,17 @@
 #include <sys/syscall.h>
 #include <time.h>
 
-#define NUM_SAMPLES 10           /* Samples for latency measurement (was 50) */
-#define ROUND_TRIPS_PER_SAMPLE 1000  /* (was 10000) */
-#define BW_ITERATIONS 10000      /* Iterations for bandwidth measurement (per pair, was 100000) */
+/* Default iteration counts (full-fidelity). Reduced at runtime on big
+ * machines to keep wall time reasonable. */
+#define NUM_SAMPLES 10                 /* Samples for latency measurement (must be compile-time const for VLA sizing) */
+#define ROUND_TRIPS_PER_SAMPLE 1000    /* CAS round-trips per sample */
+#define BW_ITERATIONS_DEFAULT 100000   /* Iterations for bandwidth measurement (per pair) */
+#define BW_ITERATIONS_LARGE  50000     /* Used when nproc > 64 (halved for big-machines) */
+
+/* Actual BW_ITERATIONS used in the loops, set in main() based on
+ * sysconf(_SC_NPROCESSORS_ONLN). Cannot be a #define because we need to
+ * pick the value at runtime. The loops use this directly. */
+static int g_bw_iterations = BW_ITERATIONS_DEFAULT;
 /* cas_flag and cpu_to_node are now dynamically sized at runtime
  * (allocated based on sysconf(_SC_NPROCESSORS_ONLN)) — no hardcoded MAX_CORES. */
 
@@ -147,7 +155,7 @@ static void *bw_ping(void *arg) {
 
     pthread_barrier_wait(&barrier);
 
-    for (int i = 0; i < BW_ITERATIONS; i++) {
+    for (int i = 0; i < g_bw_iterations; i++) {
         bool expected = true;
         while (!atomic_compare_exchange_weak_explicit(flag, &expected, false,
                                                       memory_order_relaxed,
@@ -169,7 +177,7 @@ static void *bw_pong(void *arg) {
 
     pthread_barrier_wait(&barrier);
 
-    for (int i = 0; i < BW_ITERATIONS; i++) {
+    for (int i = 0; i < g_bw_iterations; i++) {
         bool expected = false;
         while (!atomic_compare_exchange_weak_explicit(flag, &expected, true,
                                                       memory_order_relaxed,
@@ -593,6 +601,23 @@ int main(int argc, char *argv[]) {
     initialize_cache_config();
     initialize_system_config();
     pmu_init_cache_counters();
+
+    /* Pick BW_ITERATIONS based on core count. On machines with >64 cores
+     * (e.g. 96-core EPYC, 128-core Ampere) the N×N CAS matrix is huge and
+     * 100k iterations per pair would take too long. Halve to 50k to keep
+     * wall time reasonable while still averaging out scheduling noise. */
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc > 64) {
+        g_bw_iterations = BW_ITERATIONS_LARGE;
+        fprintf(stderr, "[inter_core] nproc=%ld > 64: using %d BW iterations "
+                "(reduced from %d) to keep wall time reasonable\n",
+                nproc, g_bw_iterations, BW_ITERATIONS_DEFAULT);
+    } else {
+        g_bw_iterations = BW_ITERATIONS_DEFAULT;
+        fprintf(stderr, "[inter_core] nproc=%ld <= 64: using %d BW iterations\n",
+                nproc, g_bw_iterations);
+    }
+
     print_system_info();
     run_inter_core_latency_test();
     return 0;
