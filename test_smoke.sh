@@ -16,16 +16,21 @@ REPORTS="$REPO_ROOT/reports"
 PASS=0
 FAIL=0
 # Per-binary timeout, scaled to the host's CPU count so big machines (e.g.
-# 96-core EPYC, 128-core Ampere) get enough wall time for the 24x24 CAS matrix
-# in test_inter_core. The base of 90s covers a 24-core ARM; we add 8s per
-# extra core pair (8 cores per pair of measurement threads).
+# 96-core EPYC, 128-core Ampere) get enough wall time. The base covers
+# single-threaded tests (< 5s each); test_inter_core (24x24 CAS matrix)
+# and test_memory_bandwidth scale with core count more aggressively.
 NCPU=$(nproc 2>/dev/null || echo 1)
-EXTRA=$(( (NCPU - 24) * 8 ))
-[ $EXTRA -lt 0 ] && EXTRA=0
-TIMEOUT_SEC=$(( 90 + EXTRA ))
-# Floor at 90s, cap at 600s.
-[ $TIMEOUT_SEC -lt 90 ] && TIMEOUT_SEC=90
-[ $TIMEOUT_SEC -gt 600 ] && TIMEOUT_SEC=600
+# CPU tests: ~90s base, +4s per extra core pair
+CPU_TIMEOUT=$(( 90 + (NCPU - 24) * 4 ))
+# Inter-core test: 24x24 = 576 CAS pairs. On x86_64 with -O2 each pair is
+# 1-2s on a slow EPYC core. At 96 cores, scheduling overhead multiplies.
+INTER_TIMEOUT=$(( 90 + (NCPU * NCPU) / 6 ))
+# Cap both.
+[ $CPU_TIMEOUT -lt 90 ] && CPU_TIMEOUT=90
+[ $CPU_TIMEOUT -gt 600 ] && CPU_TIMEOUT=600
+[ $INTER_TIMEOUT -lt 90 ] && INTER_TIMEOUT=90
+[ $INTER_TIMEOUT -gt 1800 ] && INTER_TIMEOUT=1800
+TIMEOUT_SEC=$CPU_TIMEOUT
 
 mkdir -p "$REPORTS"
 
@@ -55,14 +60,22 @@ for binary in "${!TESTS[@]}"; do
     pre_mtime=0
     [ -f "$report_file" ] && pre_mtime=$(stat -c %Y "$report_file" 2>/dev/null || echo 0)
 
+    # test_inter_core scales super-linearly with core count (24x24 CAS matrix);
+    # everything else uses CPU_TIMEOUT.
+    if [ "$binary" = "test_inter_core" ]; then
+        THIS_TIMEOUT=$INTER_TIMEOUT
+    else
+        THIS_TIMEOUT=$TIMEOUT_SEC
+    fi
+
     # Run with empty stdin (skip sudo prompt), bound by timeout
-    output=$(timeout "$TIMEOUT_SEC" "$BIN/$binary" < /dev/null 2>&1)
+    output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
     exit_code=$?
 
     # 124 = timeout; 0 = OK; allow non-zero for benign reasons
     # (e.g. detecting PMU unavailable)
     if [ $exit_code -eq 124 ]; then
-        printf "  ✗ %-25s TIMEOUT after %ds\n" "$binary" "$TIMEOUT_SEC"
+        printf "  ✗ %-25s TIMEOUT after %ds\n" "$binary" "$THIS_TIMEOUT"
         FAIL=$((FAIL+1))
         continue
     fi
