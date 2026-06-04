@@ -383,11 +383,11 @@ int platform_cache_detect(CacheConfig *cfg) {
         if (platform_is_tty() && !g_non_interactive) {
             fprintf(stderr, "[Cache] Auto-detection failed. Using defaults unless specified.\n");
         }
-        int kb = platform_prompt_int("  L1d cache size in KB", 32, 4, 1024);
+        int kb = platform_prompt_int("  L1d cache size in KB", 0, 0, 1024);
         cfg->l1d_size = (size_t)kb * 1024;
     }
     if (cfg->l2_size == 0) {
-        int kb = platform_prompt_int("  L2 cache size in KB", 512, 64, 16384);
+        int kb = platform_prompt_int("  L2 cache size in KB", 0, 0, 16384);
         cfg->l2_size = (size_t)kb * 1024;
     }
     if (cfg->l3_size == 0) {
@@ -450,9 +450,10 @@ int platform_mem_channels_detect(int user_known) {
     }
 #endif
 
-    /* Method 3: ask user (TTY) or use default (non-TTY) */
+    /* Method 3: ask user (TTY) or use default (non-TTY).
+     * Non-TTY default is 0 (unknown), NOT a guessed number. */
     fprintf(stderr, "[Mem] Auto-detection of memory channels failed.\n");
-    return platform_prompt_int("  Memory channels", 4, 1, 12);
+    return platform_prompt_int("  Memory channels", 0, 0, 16);
 }
 
 /* ============================================================
@@ -534,7 +535,8 @@ int platform_cpu_freq_detect(int user_known) {
     if (mhz > 0) return mhz;
 
     fprintf(stderr, "[CPU] Auto-detection of CPU frequency failed.\n");
-    return platform_prompt_int("  CPU frequency in MHz", 2000, 100, 10000);
+    /* Non-TTY default is 0 (unknown). Do NOT guess a number like 2000. */
+    return platform_prompt_int("  CPU frequency in MHz", 0, 0, 10000);
 }
 
 /* ============================================================

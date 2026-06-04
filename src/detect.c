@@ -589,12 +589,19 @@ static int detect_memory_channels_numa(void) {
             numa_nodes++;
         }
     }
-    /* On single-NUMA systems, assume at least 2 channels (dual-channel) */
+    /* On single-NUMA systems, channel count is UNKNOWN.
+     * Single NUMA != single channel; a 1-socket EPYC can have 2-12 channels.
+     * Do NOT guess 2 here. Caller will get 0 and prompt user. */
     if (numa_nodes == 1) {
-        return 2;
+        return 0;
     }
-    /* Multi-NUMA is more complex, return as detected */
-    return numa_nodes;
+    /* Multi-NUMA: each node often has its own channel set, but not always.
+     * Return as detected — caller will warn user to verify. */
+    if (numa_nodes > 1) {
+        return numa_nodes;
+    }
+    /* numa_nodes == 0: no NUMA sysfs (very old system) */
+    return 0;
 }
 
 int detect_memory_channels(void) {
@@ -613,19 +620,15 @@ int detect_memory_channels(void) {
      *    Return 0 to force explicit user input. */
     channels = detect_memory_channels_numa();
     if (channels > 1) {
-        /* Multi-NUMA is a stronger signal (each NUMA node has its own
-         * memory controller + channel set). Still warn user. */
-        printf("[Memory] WARNING: assuming %d channels from %d NUMA node(s). "
-               "Verify with: dmidecode -t memory | grep 'Number Of Devices'\n",
+        /* Multi-NUMA: each node usually has its own memory controller.
+         * Still warn user — not all multi-NUMA systems map 1:1 to channels. */
+        printf("[Memory] WARNING: detected %d NUMA node(s), assuming %d channels. "
+               "Verify with: sudo dmidecode -t memory | grep 'Number Of Devices'\n",
                channels, channels);
         return channels;
     }
-    if (channels == 1) {
-        /* Single NUMA = unknown channel count. Do NOT guess. */
-        printf("[Memory] WARNING: 1 NUMA node detected, but channel count unknown. "
-               "Single-socket systems often have 2-12 channels. Forcing user prompt.\n");
-        return 0;
-    }
+    /* channels == 0: NUMA detection failed or returned 0/1. We do NOT
+     * silently guess. Return 0 to force explicit user input. */
 
     /* Cannot detect, return 0 to trigger user prompt */
     return 0;

@@ -86,7 +86,12 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * For L1-sized tests (<= 32KB on most CPUs), skip prefetch and let the
      * natural L1 hit latency show. */
     int working_set_kb = (int)(size / 1024);
-    int use_prefetch = (working_set_kb > 64);  /* > L1D = 64KB on this host */
+    /* Prefetch only when buffer EXCEEDS detected L1D, not a hardcoded 64KB.
+     * When buffer is < L1D, skip prefetch so we measure real L1 hit latency
+     * (prefetching would mask misses for L1-resident buffers, especially on
+     * machines with smaller L1D like 32KB Zen2/Zen3). */
+    size_t l1_kb = global_cache_config.l1d_size / 1024;
+    int use_prefetch = (l1_kb > 0 && working_set_kb > (int)l1_kb);
 
     for (int b = 0; b < num_batches && count < num_batches; b++) {
         /* Pseudo-random access - LCG to avoid stride patterns that HW prefetches */
