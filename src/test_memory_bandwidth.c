@@ -315,9 +315,17 @@ void run_memory_bandwidth_test(size_t size, int threads) {
     printf("=== BANDWIDTH RESULTS ===\n");
     printf("  Thread Count: %d\n", threads);
     int bw_channels = get_memory_channels();
-    double theoretical_bw = bw_channels * 4800.0 * 8 / 1024;  /* channels * MT/s * bytes / 1024 = MB/s */
-    printf("  Read:    %8.2f MB/s  (%.1f%% of theoretical %.0f GB/s)\n",
-           read_bw, read_bw / theoretical_bw * 100, theoretical_bw / 1000);
+    int bw_dram_mt_s = get_dram_speed_mt_s();
+    double theoretical_bw = get_theoretical_bw_mbps();  /* computed at runtime, no hardcode */
+    if (bw_dram_mt_s > 0 && bw_channels > 0) {
+        printf("  DRAM: %d MT/s × %d channels = %.0f MB/s theoretical peak\n",
+               bw_dram_mt_s, bw_channels, theoretical_bw);
+        printf("  Read:    %8.2f MB/s  (%.1f%% of theoretical %.1f GB/s)\n",
+               read_bw, read_bw / theoretical_bw * 100, theoretical_bw / 1000);
+    } else {
+        printf("  DRAM speed or channel count unknown; theoretical bandwidth undetermined\n");
+        printf("  Read:    %8.2f MB/s  (theoretical N/A)\n", read_bw);
+    }
     printf("  Write:   %8.2f MB/s\n", write_bw);
     printf("  Copy:    %8.2f MB/s\n\n", copy_bw);
 
@@ -339,9 +347,18 @@ void run_memory_bandwidth_test(size_t size, int threads) {
         report_write(report, "- Memory Size: %.2f MB\n", size / (double)MB);
         report_write(report, "- Thread Count: %d\n", threads);
         int rep_channels = get_memory_channels();
-        double rep_theoretical = rep_channels * 4800.0 * 8 / 1024;  /* MB/s */
+        int rep_dram_mt_s = get_dram_speed_mt_s();
+        double rep_theoretical = get_theoretical_bw_mbps();  /* computed at runtime */
         report_write(report, "- Memory Channels: %d\n", rep_channels);
-        report_write(report, "- Theoretical Bandwidth: ~%.0f GB/s\n\n", rep_theoretical / 1000);
+        if (rep_dram_mt_s > 0) {
+            report_write(report, "- DRAM Standard: detected at runtime\n");
+            report_write(report, "- DRAM Speed: %d MT/s\n", rep_dram_mt_s);
+            report_write(report, "- Theoretical Bandwidth: ~%.1f GB/s (computed: %d MT/s × %d ch × 8B/transfer)\n\n",
+                         rep_theoretical / 1000, rep_dram_mt_s, rep_channels);
+        } else {
+            report_write(report, "- DRAM Standard: unknown (detection failed)\n");
+            report_write(report, "- Theoretical Bandwidth: undetermined (DRAM speed unknown)\n\n");
+        }
 
         report_write(report, "## Bandwidth Results\n\n");
         report_write(report, "| Operation | Bandwidth (MB/s) |\n");
@@ -360,9 +377,15 @@ void run_memory_bandwidth_test(size_t size, int threads) {
 
         report_write(report, "## Notes\n");
         int note_channels = get_memory_channels();
+        int note_dram_mt_s = get_dram_speed_mt_s();
+        double note_theoretical = get_theoretical_bw_mbps();
         report_write(report, "- Multi-threaded test uses %d threads to saturate %d-channel memory\n", threads, note_channels);
-        double note_theoretical = note_channels * 4800.0 * 8 / 1024;
-        report_write(report, "- Theoretical peak: ~%.0f GB/s\n", note_theoretical / 1000);
+        if (note_dram_mt_s > 0) {
+            report_write(report, "- Theoretical peak: ~%.1f GB/s (computed at runtime from %d MT/s × %d channels)\n",
+                         note_theoretical / 1000, note_dram_mt_s, note_channels);
+        } else {
+            report_write(report, "- Theoretical peak: undetermined (DRAM speed unknown)\n");
+        }
         report_write(report, "- Actual bandwidth depends on memory controller efficiency and core count\n\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));

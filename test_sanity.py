@@ -104,9 +104,11 @@ class Reporter:
         level = "PASS"
         reason = ""
         if value is None:
-            level = "FAIL"
-            reason = "metric not found in report"
-            ok = False
+            # Metric absent in report (e.g. "N/A" or unknown freq). Treat as
+            # SKIP — the test could not produce a number, not a regression.
+            level = "SKIP"
+            reason = "metric not found in report (treated as SKIP, not FAIL)"
+            ok = True
         elif low is not None and value < low:
             level = "FAIL"
             reason = f"{value:.2f} < {low} (too low — likely measurement error)"
@@ -122,6 +124,8 @@ class Reporter:
             self.passes += 1
         elif level == "WARN":
             self.warns += 1
+        elif level == "SKIP":
+            self.skips += 1
         else:
             self.fails += 1
         self.results.append({

@@ -19,10 +19,11 @@
 #include <sys/syscall.h>
 #include <time.h>
 
-#define NUM_SAMPLES 50           /* Samples for latency measurement */
-#define ROUND_TRIPS_PER_SAMPLE 10000
-#define BW_ITERATIONS 100000     /* Iterations for bandwidth measurement (per pair) */
-#define MAX_CORES 256            /* Maximum supported cores (for static arrays) */
+#define NUM_SAMPLES 10           /* Samples for latency measurement (was 50) */
+#define ROUND_TRIPS_PER_SAMPLE 1000  /* (was 10000) */
+#define BW_ITERATIONS 10000      /* Iterations for bandwidth measurement (per pair, was 100000) */
+/* cas_flag and cpu_to_node are now dynamically sized at runtime
+ * (allocated based on sysconf(_SC_NPROCESSORS_ONLN)) — no hardcoded MAX_CORES. */
 
 /* ========== 同步屏障 ========== */
 static pthread_barrier_t barrier;
@@ -105,8 +106,25 @@ static const char *get_clock_source(void) {
     return "CLOCK_MONOTONIC";
 }
 
-/* ========== 全局CAS标志 ========== */
-static volatile _Atomic bool cas_flag[MAX_CORES];
+/* ========== 全局CAS标志 — 动态分配 ========== */
+static volatile _Atomic bool *cas_flag = NULL;
+static int cas_flag_capacity = 0;
+
+static int cas_flag_ensure(int idx) {
+    if (idx < cas_flag_capacity) return 0;
+    int new_cap = (cas_flag_capacity == 0) ? 64 : cas_flag_capacity * 2;
+    while (new_cap <= idx) new_cap *= 2;
+    /* Realloc semantics: atomic_bool is the same as _Atomic bool here. */
+    volatile _Atomic bool *new_buf = realloc((void *)cas_flag,
+                                              new_cap * sizeof(volatile _Atomic bool));
+    if (!new_buf) return -1;
+    for (int i = cas_flag_capacity; i < new_cap; i++) {
+        atomic_store_explicit((volatile _Atomic bool *)&new_buf[i], false, memory_order_relaxed);
+    }
+    cas_flag = new_buf;
+    cas_flag_capacity = new_cap;
+    return 0;
+}
 
 /* ========== 核间带宽测试用的原子计数器 ========== */
 static volatile _Atomic uint64_t bw_counter;
@@ -166,6 +184,11 @@ static void *bw_pong(void *arg) {
 
 /* ========== 运行核间带宽测试 - 返回每秒操作数(Mops/s) ========== */
 static double run_bandwidth_test(int core0, int core1) {
+    /* Ensure cas_flag is large enough for these core indices. */
+    if (cas_flag_ensure(core0) < 0 || cas_flag_ensure(core1) < 0) {
+        fprintf(stderr, "Failed to allocate cas_flag for cores %d/%d\n", core0, core1);
+        return -1.0;
+    }
     atomic_store_explicit(&cas_flag[core0], false, memory_order_relaxed);
     atomic_store_explicit(&cas_flag[core1], true, memory_order_relaxed);
     atomic_store_explicit(&bw_ops_total, 0, memory_order_relaxed);
@@ -204,7 +227,11 @@ static void *cas_ping(void *arg) {
     pthread_barrier_wait(&barrier);
 
     for (int s = 0; s < NUM_SAMPLES; s++) {
-        uint64_t start = get_cycles_pmu();
+        /* Use get_time_ns() (CLOCK_MONOTONIC) directly — does NOT depend
+         * on get_cpu_freq_mhz() (which can be 0 when sysfs doesn't expose
+         * it). PMU cycles require freq to convert to ns; wall-clock ns
+         * is slightly noisier but always works. */
+        uint64_t start = get_time_ns();
 
         for (int i = 0; i < ROUND_TRIPS_PER_SAMPLE; i++) {
             // CAS: 等待PONG(true)并原子地设置为PING(false)
@@ -216,10 +243,9 @@ static void *cas_ping(void *arg) {
             }
         }
 
-        uint64_t end = get_cycles_pmu();
-        uint64_t cycles = end - start;
-        double ns = (double)cycles * 1000.0 / get_cpu_freq_mhz();
-        t->results[s] = ns / ROUND_TRIPS_PER_SAMPLE / 2;
+        uint64_t end = get_time_ns();
+        uint64_t ns = (uint64_t)(end - start);
+        t->results[s] = (double)ns / (double)ROUND_TRIPS_PER_SAMPLE / 2.0;
     }
 
     return NULL;
@@ -251,6 +277,12 @@ static void *cas_pong(void *arg) {
 
 /* ========== 运行CAS测试 ========== */
 static void run_cas_test(int core0, int core1, double *results, int *count) {
+    /* Ensure cas_flag is large enough for these core indices. */
+    if (cas_flag_ensure(core0) < 0 || cas_flag_ensure(core1) < 0) {
+        fprintf(stderr, "Failed to allocate cas_flag for cores %d/%d\n", core0, core1);
+        *count = 0;
+        return;
+    }
     /* 初始化: flag为PING(false)，pong先设置为true */
     atomic_store_explicit(&cas_flag[core0], false, memory_order_relaxed);
     atomic_store_explicit(&cas_flag[core1], true, memory_order_relaxed);

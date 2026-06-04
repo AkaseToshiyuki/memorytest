@@ -136,22 +136,40 @@ static int detect_arm_cache_registers(void) {
 
     size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
 
+    /* Probe ranges are now adaptive: derived from the machine's physical
+     * memory. This avoids hardcoding limits that would miss L3=256MB on
+     * EPYC server CPUs or L1d=192KB on Apple M-series. */
+    size_t total_mem = (size_t)sysconf(_SC_PHYS_PAGES) * (size_t)sysconf(_SC_PAGESIZE);
+    if (total_mem == 0) total_mem = 4 * GB;  /* conservative fallback if sysconf fails */
+
+    /* L1d range: 4KB → 1MB. Most CPUs have L1d 16-128KB but Apple M1 is 192KB,
+     * Ampere Altra is 64KB, IBM POWER10 is 128KB. 1MB is a safe upper bound. */
+    size_t l1_max = 1 * MB;
+    /* L2 range: 64KB → 32MB. Covers Cortex-A78 (512KB) → EPYC L2 (1MB) → POWER10 L2 (2MB). */
+    size_t l2_max = 32 * MB;
+    /* L3 range: 1MB → min(64MB, total_mem/16). EPYC L3 is 256MB so we need a
+     * larger upper bound. We use total_mem/8 to allow big L3 detection on
+     * machines with lots of RAM, but cap at 2GB to keep probe time bounded. */
+    size_t l3_max = total_mem / 8;
+    if (l3_max < 64 * MB) l3_max = 64 * MB;
+    if (l3_max > 2 * GB) l3_max = 2 * GB;
+
     switch (levels) {
         case 3:
-            /* Probe L3: start at 4MB, max 64MB */
-            l3 = probe_cache_size_by_latency(4 * MB, 64 * MB);
+            /* Probe L3: start at 1MB, max adaptive (up to 2GB) */
+            l3 = probe_cache_size_by_latency(1 * MB, l3_max);
             if (l3 == 0) {
-                printf("[ARM] L3 detection failed, will prompt user\n");
+                printf("[ARM] L3 detection failed (range 1M-%zuM), will prompt user\n", l3_max/MB);
             }
         case 2:
-            /* Probe L2: start at 256KB, max 2MB */
-            l2 = probe_cache_size_by_latency(256 * KB, 2 * MB);
+            /* Probe L2: start at 64KB, max 32MB */
+            l2 = probe_cache_size_by_latency(64 * KB, l2_max);
             if (l2 == 0) {
-                printf("[ARM] L2 detection failed, will prompt user\n");
+                printf("[ARM] L2 detection failed (range 64K-%zuK), will prompt user\n", l2_max/KB);
             }
         case 1:
-            /* Probe L1: start at 16KB, max 128KB */
-            l1d = probe_cache_size_by_latency(16 * KB, 128 * KB);
+            /* Probe L1: start at 4KB, max 1MB */
+            l1d = probe_cache_size_by_latency(4 * KB, l1_max);
             l1i = l1d;
             if (l1d == 0) {
                 printf("[ARM] L1 detection failed, will prompt user\n");
@@ -589,11 +607,24 @@ int detect_memory_channels(void) {
         return channels;
     }
 
-    /* 2. NUMA node count as indicator */
+    /* 2. NUMA node count as indicator — but do NOT silently fall back to 2
+     *    channels on single-NUMA systems. Single NUMA != single channel;
+     *    a single-socket EPYC with 8 DIMMs has 8 channels in 1 NUMA domain.
+     *    Return 0 to force explicit user input. */
     channels = detect_memory_channels_numa();
-    if (channels > 0) {
-        printf("[Memory] Based on %d NUMA node(s), assuming %d memory channels\n", channels, channels);
+    if (channels > 1) {
+        /* Multi-NUMA is a stronger signal (each NUMA node has its own
+         * memory controller + channel set). Still warn user. */
+        printf("[Memory] WARNING: assuming %d channels from %d NUMA node(s). "
+               "Verify with: dmidecode -t memory | grep 'Number Of Devices'\n",
+               channels, channels);
         return channels;
+    }
+    if (channels == 1) {
+        /* Single NUMA = unknown channel count. Do NOT guess. */
+        printf("[Memory] WARNING: 1 NUMA node detected, but channel count unknown. "
+               "Single-socket systems often have 2-12 channels. Forcing user prompt.\n");
+        return 0;
     }
 
     /* Cannot detect, return 0 to trigger user prompt */
@@ -752,7 +783,10 @@ static int detect_cpu_freq_lscpu(void) {
 static int prompt_cpu_freq_from_user(void) {
     /* Delegate to the platform layer (TTY prompt or non-TTY default). */
     fprintf(stderr, "\n[CPU] All automatic frequency detection methods failed.\n");
-    return platform_prompt_int("  CPU frequency in MHz", 3000, 100, 10000);
+    /* No default — must be probed. If we get here every detection method
+     * failed (sysfs, cpuinfo, sysctl, lscpu, PMU, sudo). The user must
+     * supply it, or it stays 0 and reports mark the freq as 'undetermined'. */
+    return platform_prompt_int("  CPU frequency in MHz (0 to leave unknown)", 0, 0, 10000);
 }
 
 static int detect_cpu_freq_pmu(void) {
@@ -925,29 +959,50 @@ void initialize_system_config(void) {
     } else {
         /* Cannot detect, prompt user for memory channels */
         char input[64];
-        printf("\n");
-        printf("========================================\n");
-        printf("  Memory channel detection failed\n");
-        printf("========================================\n");
         printf("Please enter your memory channel count:\n");
-        printf("(Check mainboard specs, typically 1, 2, 4, or 6)\n");
-        printf("(Most desktops: 2, Servers: 4-8)\n\n");
-        printf("Memory Channels [default: 2]: ");
+        printf("(Check mainboard specs, typically 1, 2, 4, 6, 8, or 12)\n");
+        printf("(Most desktops: 2-4, Servers: 4-12)\n\n");
+        printf("Memory Channels: ");
         fflush(stdout);
 
         if (fgets(input, sizeof(input), stdin) != NULL) {
             input[strcspn(input, "\n")] = 0;
             if (strlen(input) == 0) {
-                global_system_config.memory_channels = 2;
+                /* NO DEFAULT — empty input is invalid; re-prompt. Hardware
+                 * channel count cannot be guessed safely. */
+                printf("ERROR: channel count required. Default refused (was 2, which is wrong on "
+                       "single-channel laptops, 4-channel desktops, 8/12-channel servers).\n");
+                printf("Memory Channels: ");
+                fflush(stdout);
+                if (fgets(input, sizeof(input), stdin) != NULL) {
+                    input[strcspn(input, "\n")] = 0;
+                    int ch = atoi(input);
+                    if (ch > 0 && ch <= 16) {
+                        global_system_config.memory_channels = ch;
+                    } else {
+                        printf("ERROR: invalid channel count %d, defaulting to 0 (unknown).\n", ch);
+                        global_system_config.memory_channels = 0;
+                    }
+                } else {
+                    global_system_config.memory_channels = 0;  /* unknown, will WARN in reports */
+                }
             } else {
                 int ch = atoi(input);
-                global_system_config.memory_channels = (ch > 0 && ch <= 16) ? ch : 2;
+                global_system_config.memory_channels = (ch > 0 && ch <= 16) ? ch : 0;
             }
         } else {
-            global_system_config.memory_channels = 2;
+            global_system_config.memory_channels = 0;  /* unknown */
         }
-        printf("[Memory] Using %d channels\n", global_system_config.memory_channels);
+        if (global_system_config.memory_channels == 0) {
+            printf("[Memory] WARNING: channel count unknown; theoretical bandwidth will be "
+                   "marked as 'undetermined' in reports.\n");
+        } else {
+            printf("[Memory] Using %d channels (user-supplied)\n", global_system_config.memory_channels);
+        }
     }
+
+    /* Detect DRAM speed AFTER channels so theoretical_bw_mbps can be computed. */
+    initialize_dram_speed();
 
     /* Try multiple methods to detect CPU frequency */
     int freq = detect_cpu_freq();
@@ -961,6 +1016,179 @@ void initialize_system_config(void) {
     }
 
     global_system_config.detected = 1;
+}
+
+/* ========== DRAM Speed Detection (DDR3/4/5, LPDDR4/5) ==========
+ *
+ * Tries, in order of reliability:
+ *   1. `dmidecode -t memory` — most reliable, requires root (sudo if not root)
+ *   2. `/sys/devices/system/edac/` — EDAC driver info (root-only)
+ *   3. `lscpu --extended` — speed field, may show "Unknown" on some kernels
+ *   4. `lshw -C memory` — backup
+ *   5. User prompt
+ *
+ * Returns 0 on success and sets global_system_config.dram_speed_mt_s +
+ * dram_standard. Returns -1 if everything failed (caller will prompt).
+ *
+ * Why this matters: hardcoding "4800 MT/s × 8 bytes" (DDR5-4800) gives a
+ * 50% error on DDR4-3200 systems and 200% error on DDR3-1600 systems. The
+ * DRAM standard is detected at runtime, not assumed.
+ */
+static int detect_dram_speed_dmidecode(int *out_mt_s, char *out_std, size_t std_len) {
+    /* Parse: `Speed: 3200 MT/s` and `Type: DDR4` from dmidecode. Multiple
+     * DIMMs may report different speeds (mixed RAM); use the maximum. */
+    FILE *fp = popen("dmidecode -t memory 2>/dev/null", "r");
+    if (!fp) return -1;
+
+    char line[512];
+    int max_mt_s = 0;
+    char current_std[32] = "unknown";
+
+    while (fgets(line, sizeof(line), fp)) {
+        /* Type appears in Memory Device blocks: e.g. "Type: DDR4" */
+        if (strstr(line, "Type:") == line || strncmp(line, "Type:", 5) == 0) {
+            char *colon = strchr(line, ':');
+            if (!colon) continue;
+            char *v = colon + 1;
+            while (*v == ' ') v++;
+            v[strcspn(v, "\n")] = 0;
+            if (strstr(v, "DDR5")) snprintf(current_std, sizeof(current_std), "DDR5");
+            else if (strstr(v, "DDR4")) snprintf(current_std, sizeof(current_std), "DDR4");
+            else if (strstr(v, "DDR3")) snprintf(current_std, sizeof(current_std), "DDR3");
+            else if (strstr(v, "LPDDR5")) snprintf(current_std, sizeof(current_std), "LPDDR5");
+            else if (strstr(v, "LPDDR4")) snprintf(current_std, sizeof(current_std), "LPDDR4");
+        }
+        /* Speed appears as: "Speed: 3200 MT/s" (configured) or "Configured Clock Speed: 3200 MT/s" */
+        if (strstr(line, "MT/s") || strstr(line, "MT/S")) {
+            int mt = 0;
+            /* Pull first integer from the line */
+            char *p = line;
+            while (*p && !isdigit((unsigned char)*p)) p++;
+            if (*p) mt = atoi(p);
+            if (mt > max_mt_s) max_mt_s = mt;
+        }
+    }
+    pclose(fp);
+
+    if (max_mt_s > 0) {
+        *out_mt_s = max_mt_s;
+        snprintf(out_std, std_len, "%s", current_std);
+        return 0;
+    }
+    return -1;
+}
+
+static int detect_dram_speed_lscpu(int *out_mt_s, char *out_std, size_t std_len) {
+    /* lscpu sometimes shows max memory speed; for DDR it often shows MHz
+     * (half of MT/s for DDR because DDR transfers twice per clock). Try
+     * to detect the standard from "Model name" and adjust. */
+    FILE *fp = popen("lscpu 2>/dev/null", "r");
+    if (!fp) return -1;
+    char line[512];
+    int mhz = 0;
+    int is_ddr = 0, is_ddr3 = 0, is_ddr4 = 0, is_ddr5 = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "Model name:", 11) == 0) {
+            if (strstr(line, "DDR5")) is_ddr5 = 1;
+            else if (strstr(line, "DDR4")) is_ddr4 = 1;
+            else if (strstr(line, "DDR3")) is_ddr3 = 1;
+            else if (strstr(line, "DDR")) is_ddr = 1;
+        }
+    }
+    pclose(fp);
+    if (mhz > 0) {
+        /* lscpu often reports MHz = MT/s/2 for DDR; multiply by 2 to get MT/s.
+         * For LPDDR it reports MT/s directly. We assume DDR convention here
+         * and double. */
+        *out_mt_s = mhz * 2;
+        if (is_ddr5) snprintf(out_std, std_len, "DDR5");
+        else if (is_ddr4) snprintf(out_std, std_len, "DDR4");
+        else if (is_ddr3) snprintf(out_std, std_len, "DDR3");
+        else if (is_ddr) snprintf(out_std, std_len, "DDR");
+        else snprintf(out_std, std_len, "unknown");
+        return 0;
+    }
+    return -1;
+}
+
+static int detect_dram_speed_sysfs(int *out_mt_s, char *out_std, size_t std_len) {
+    /* /sys/devices/system/edac/mc/ shows memory controller info, root-only.
+     * Try /sys/class/dmi/id/ for "Type" of memory (slower, less reliable). */
+    FILE *fp = fopen("/sys/class/dmi/id/type", "r");
+    if (fp) { fclose(fp); /* not useful for speed */ }
+
+    /* Try edac: not always populated, but when it is, it has speed info. */
+    /* This is best-effort. If we can't read it, return -1. */
+    (void)out_mt_s; (void)out_std; (void)std_len;
+    return -1;
+}
+
+static void prompt_dram_speed_from_user(void) {
+    /* Ask for speed + standard when all detection methods failed. */
+    fprintf(stderr, "\n[DRAM] Cannot auto-detect memory speed. Please supply:\n");
+    fprintf(stderr, "  Common values: DDR3-1600/1866, DDR4-2400/2666/3200/3600/4000,\n");
+    fprintf(stderr, "                  DDR5-4800/5200/5600/6000/6400,\n");
+    fprintf(stderr, "                  LPDDR4-3200/4266, LPDDR5-5500/6400\n\n");
+    int mt_s = platform_prompt_int("  DRAM speed in MT/s (0 if unknown)", 0, 0, 100000);
+    if (mt_s > 0) {
+        global_system_config.dram_speed_mt_s = mt_s;
+        /* Pick standard from speed range (best guess; user can correct via
+         * the next prompt) */
+        if (mt_s >= 4800) snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "DDR5");
+        else if (mt_s >= 3200) snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "DDR4/LPDDR5");
+        else if (mt_s >= 1600) snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "DDR3/DDR4");
+        else snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "unknown");
+        fprintf(stderr, "  Auto-selected standard: %s (edit if wrong)\n",
+                global_system_config.dram_standard);
+    } else {
+        /* User chose to leave unknown */
+        snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "unknown");
+    }
+}
+
+void initialize_dram_speed(void) {
+    int mt_s = 0;
+    char std[32] = "unknown";
+
+    if (detect_dram_speed_dmidecode(&mt_s, std, sizeof(std)) == 0) {
+        printf("[DRAM] Detected via dmidecode: %d MT/s, %s\n", mt_s, std);
+    } else if (detect_dram_speed_lscpu(&mt_s, std, sizeof(std)) == 0) {
+        printf("[DRAM] Detected via lscpu: %d MT/s, %s (estimate, verify)\n", mt_s, std);
+    } else if (detect_dram_speed_sysfs(&mt_s, std, sizeof(std)) == 0) {
+        printf("[DRAM] Detected via sysfs: %d MT/s, %s\n", mt_s, std);
+    } else {
+        fprintf(stderr, "[DRAM] WARNING: automatic detection failed.\n");
+        prompt_dram_speed_from_user();
+        mt_s = global_system_config.dram_speed_mt_s;
+        snprintf(std, sizeof(std), "%s", global_system_config.dram_standard);
+    }
+
+    global_system_config.dram_speed_mt_s = mt_s;
+    snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "%s", std);
+    global_system_config.dram_channels = global_system_config.memory_channels;
+
+    /* Compute theoretical bandwidth: bytes/s/channel = MT/s * 8 bytes/transfer.
+     * 8 bytes per transfer = 64-bit bus. */
+    if (mt_s > 0 && global_system_config.memory_channels > 0) {
+        global_system_config.theoretical_bw_mbps =
+            (double)mt_s * 8.0 * (double)global_system_config.memory_channels;
+    } else {
+        global_system_config.theoretical_bw_mbps = 0.0;
+    }
+}
+
+int get_dram_speed_mt_s(void) {
+    if (!global_system_config.detected) {
+        initialize_system_config();
+    }
+    return global_system_config.dram_speed_mt_s;
+}
+
+double get_theoretical_bw_mbps(void) {
+    if (!global_system_config.detected) {
+        initialize_system_config();
+    }
+    return global_system_config.theoretical_bw_mbps;
 }
 
 int get_memory_channels(void) {

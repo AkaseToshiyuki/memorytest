@@ -266,9 +266,16 @@ void run_cpu_alu_test(void) {
             cpi = pr.cpi;
             ipc = pr.ipc;
         } else {
-            /* Fallback: estimate CPI assuming 1 instruction per op */
-            cpi = ns_per_op * freq / 1000.0;  /* cycles per ns * ns per op */
-            ipc = 1.0 / cpi;
+            /* Fallback: estimate CPI assuming 1 instruction per op.
+             * If freq is unknown (0), we cannot derive a meaningful CPI/IPC
+             * from wall-clock ns; mark it as N/A (-1) and 0 respectively. */
+            if (freq > 0) {
+                cpi = ns_per_op * freq / 1000.0;  /* cycles per ns * ns per op */
+                ipc = 1.0 / cpi;
+            } else {
+                cpi = -1.0;  /* unknown */
+                ipc = 0.0;
+            }
         }
 
         printf("%-10s | %-10.2f | %-12.0f | %-10.2f | %-8.2f | %-8.2f | %-10s\n",
@@ -318,12 +325,20 @@ void run_cpu_alu_test(void) {
             double ops_per_sec = (double)ITERATIONS / ((double)elapsed / 1000000000.0);
             double ns_per_op = (double)elapsed / ITERATIONS;
 
-            double cpi = use_pmu ? pr.cpi : (ns_per_op * freq / 1000.0);
-            double ipc = use_pmu ? pr.ipc : (1.0 / cpi);
+            double cpi = use_pmu ? pr.cpi : (freq > 0 ? (ns_per_op * freq / 1000.0) : -1.0);
+            double ipc = use_pmu ? pr.ipc : (freq > 0 ? (1.0 / cpi) : 0.0);
 
-            report_write(report, "| %s | %.2f | %.0f | %.2f | %.2f | %.2f | %s |\n",
-                        tests[i].name, time_ms, ops_per_sec, ns_per_op,
-                        cpi, ipc, use_pmu ? "PMU" : "Estimated");
+            /* When freq is unknown, write "N/A" for CPI/IPC so sanity
+             * parser sees non-numeric and skips (out[v] = None). */
+            if (cpi < 0) {
+                report_write(report, "| %s | %.2f | %.0f | %.2f | N/A | N/A | %s |\n",
+                            tests[i].name, time_ms, ops_per_sec, ns_per_op,
+                            use_pmu ? "PMU" : "Estimated");
+            } else {
+                report_write(report, "| %s | %.2f | %.0f | %.2f | %.2f | %.2f | %s |\n",
+                            tests[i].name, time_ms, ops_per_sec, ns_per_op,
+                            cpi, ipc, use_pmu ? "PMU" : "Estimated");
+            }
         }
 
         report_section(report, "SIMD Capabilities");

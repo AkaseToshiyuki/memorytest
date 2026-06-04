@@ -82,6 +82,16 @@ typedef struct {
     int cpu_freq_mhz;
     char cpu_model[128];
     int detected;
+    /* DRAM speed (in MT/s, e.g. 3200 for DDR4-3200) and standard. These are
+     * read from sysfs / dmidecode / lscpu at runtime; 0 = unknown. Used to
+     * compute theoretical bandwidth without hardcoding 4800 (DDR5-4800). */
+    int dram_speed_mt_s;      /* e.g. 2400, 3200, 4800, 6400 */
+    char dram_standard[32];   /* "DDR3", "DDR4", "DDR5", "LPDDR4", "LPDDR5", or "unknown" */
+    int dram_channels;        /* Often == memory_channels; kept separate for clarity */
+    /* Computed: bytes_per_sec_per_channel = dram_speed_mt_s * 8 (DDR transfers 8B/clock
+     * per channel: 64-bit bus / 8 bits = 8 bytes per transfer, but transfers per
+     * second = MT/s, so 8 bytes × MT/s = MB/s). 0 if undetermined. */
+    double theoretical_bw_mbps;
 } SystemConfig;
 
 typedef struct {
@@ -170,6 +180,10 @@ int get_memory_channels(void);
 int get_cpu_freq_mhz(void);
 int request_sudo_password(void);
 int pmu_init_cache_counters(void);
+/* DRAM speed + theoretical bandwidth (computed at runtime, not hardcoded) */
+void initialize_dram_speed(void);
+int get_dram_speed_mt_s(void);
+double get_theoretical_bw_mbps(void);
 
 /* SIMD/Vectorization detection */
 typedef struct {

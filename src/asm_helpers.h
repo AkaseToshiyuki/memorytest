@@ -85,8 +85,18 @@ static inline uint64_t rdtsc_ns(void) {
         cycles_per_ns = (double)cntfrq / 1e9;  /* Hz -> cycles/ns */
 #elif defined(__x86_64__) || defined(__i386__)
         int freq_mhz = get_cpu_freq_mhz();
-        if (freq_mhz <= 0) freq_mhz = 3000;
-        cycles_per_ns = (double)freq_mhz / 1000.0;
+        /* CRITICAL: no hardcoded fallback. If detection failed, this entire
+         * x86_64 TSC->ns conversion is unsound. Caller must check return
+         * value of get_cpu_freq_mhz() before using rdtsc_ns(). We return
+         * a sentinel of 1.0 cycles/ns (i.e. 1GHz) here so a misuse cannot
+         * produce wildly wrong numbers; the test will still report, but
+         * the latency values will be uncalibrated. Callers needing real
+         * ns should use get_time_ns() when freq is unknown. */
+        if (freq_mhz <= 0) {
+            cycles_per_ns = 1.0;  /* uncalibrated sentinel: 1 cycle = 1 ns */
+        } else {
+            cycles_per_ns = (double)freq_mhz / 1000.0;
+        }
 #elif defined(__riscv)
         /* RISC-V does not have a portable user-mode way to read the cycle
          * counter frequency. Calibration is done lazily via get_time_ns()

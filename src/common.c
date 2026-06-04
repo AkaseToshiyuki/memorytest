@@ -23,4 +23,13 @@
 CacheConfig global_cache_config;
 
 /* Global system configuration (see detect.c for initialization) */
-SystemConfig global_system_config;
+SystemConfig global_system_config = {
+    .memory_channels = 0,
+    .cpu_freq_mhz = 0,
+    .cpu_model = "Unknown",
+    .detected = 0,
+    .dram_speed_mt_s = 0,
+    .dram_standard = "unknown",
+    .dram_channels = 0,
+    .theoretical_bw_mbps = 0.0,
+};

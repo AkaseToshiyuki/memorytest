@@ -467,8 +467,13 @@ void run_cpu_float_test(void) {
             cpi = pr.cpi;
             ipc = pr.ipc;
         } else {
-            cpi = ns_per_op * freq / 1000.0;
-            ipc = 1.0 / cpi;
+            if (freq > 0) {
+                cpi = ns_per_op * freq / 1000.0;
+                ipc = 1.0 / cpi;
+            } else {
+                cpi = -1.0;  /* unknown */
+                ipc = 0.0;
+            }
         }
 
         printf("%-12s | %-10s | %-12.0f | %-10.2f | %-8.2f | %-8.2f\n",
@@ -507,11 +512,18 @@ void run_cpu_float_test(void) {
             double ops_per_sec = (double)ITERATIONS * ops_per_iter / ((double)elapsed / 1000000000.0);
             double ns_per_op = (double)elapsed / ((double)ITERATIONS * ops_per_iter);
 
-            double cpi = use_pmu ? pr.cpi : (ns_per_op * freq / 1000.0);
-            double ipc = use_pmu ? pr.ipc : (1.0 / cpi);
+            double cpi = use_pmu ? pr.cpi : (freq > 0 ? (ns_per_op * freq / 1000.0) : -1.0);
+            double ipc = use_pmu ? pr.ipc : (freq > 0 ? (1.0 / cpi) : 0.0);
 
-            report_write(report, "| %s | %s | %.2f | %.0f | %.2f | %.2f | %.2f |\n",
-                        tests[i].name, tests[i].type, time_ms, ops_per_sec, ns_per_op, cpi, ipc);
+            /* When freq is unknown, write "N/A" for CPI/IPC so sanity
+             * parser sees non-numeric and skips. */
+            if (cpi < 0) {
+                report_write(report, "| %s | %s | %.2f | %.0f | %.2f | N/A | N/A |\n",
+                            tests[i].name, tests[i].type, time_ms, ops_per_sec, ns_per_op);
+            } else {
+                report_write(report, "| %s | %s | %.2f | %.0f | %.2f | %.2f | %.2f |\n",
+                            tests[i].name, tests[i].type, time_ms, ops_per_sec, ns_per_op, cpi, ipc);
+            }
         }
 
         report_section(report, "Notes");

@@ -431,84 +431,100 @@ static double multi_bandwidth(void *ptr, size_t size, int threads, int iteration
 }
 
 /* Maximum number of cache test sizes */
-#define MAX_CACHE_TEST_SIZES 16
+/* Two-phase scan: phase 1 fine 1.05x from 1KB→1MB (~230 points),
+ * phase 2 coarse 1.20x from 1MB→2GB (~85 points). Total ~315.
+ * Round up to 512 for safety. */
+#define MAX_CACHE_TEST_SIZES 512
 
 /* Result structure for cache hierarchy tests */
 typedef struct {
     size_t size;
-    char name[16];
+    char name[32];
     char expected[8];
     double rd_lat;
     double wr_lat;
     double bw;
-    char analysis[16];
+    char analysis[32];
 } CacheTestResult;
 
 /* Run cache hierarchy scan and return results */
 static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
                                      size_t l1_size, size_t l2_size, size_t l3_size,
                                      int threads) {
-    int num_results = 0;
-
-    /* Helper to add result */
+    /* Helper to add result (legacy — no longer used by the new adaptive
+     * scan below, kept for backward compat with any callers). */
     #define ADD_RESULT(sz, nm, level, rd, wr, bw_val, anal) do { \
-        if (num_results < max_results) { \
-            results[num_results].size = (sz); \
-            strncpy(results[num_results].name, (nm), sizeof(results[num_results].name) - 1); \
-            results[num_results].name[sizeof(results[num_results].name) - 1] = 0; \
-            strncpy(results[num_results].expected, (level), sizeof(results[num_results].expected) - 1); \
-            results[num_results].expected[sizeof(results[num_results].expected) - 1] = 0; \
-            results[num_results].rd_lat = (rd); \
-            results[num_results].wr_lat = (wr); \
-            results[num_results].bw = (bw_val); \
-            strncpy(results[num_results].analysis, (anal), sizeof(results[num_results].analysis) - 1); \
-            results[num_results].analysis[sizeof(results[num_results].analysis) - 1] = 0; \
-            num_results++; \
-        } \
+        (void)(sz); (void)(nm); (void)(level); (void)(rd); \
+        (void)(wr); (void)(bw_val); (void)(anal); \
     } while(0)
 
-    /* L1 test sizes: 0.25x, 0.5x, 1x L1 */
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 4 / 1024);
-    ADD_RESULT(l1_size / 4, buf, "L1", 0, 0, 0, "");
-    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 2 / 1024);
-    ADD_RESULT(l1_size / 2, buf, "L1", 0, 0, 0, "");
-    snprintf(buf, sizeof(buf), "%.0fKB", (double)l1_size / 1024);
-    ADD_RESULT(l1_size, buf, "L1", 0, 0, 0, "baseline");
+    /* ============================================================
+     * Two-phase adaptive cache hierarchy scan.
+     *
+     * Phase 1: 1KB → 1MB with fine spacing (1.05x) — high resolution for
+     *          L1 (typically 16-192KB) and L2 (typically 256KB-1MB).
+     * Phase 2: 1MB → 2GB with coarser spacing (1.20x) — L3 and RAM.
+     *
+     * This handles L1d=16KB (Cortex-A53) and L1d=192KB (Apple M1) without
+     * missing the boundary.
+     * ============================================================ */
+    const size_t MIN_SIZE = 1 * KB;
+    const size_t PHASE1_END = 1 * MB;
+    const size_t MAX_SIZE = 2 * GB;
+    const double FINE_FACTOR = 1.05;   /* ~230 points from 1K to 1M */
+    const double COARSE_FACTOR = 1.20; /* ~85 points from 1M to 2G */
 
-    /* L2 test sizes */
-    if (l2_size > l1_size) {
-        snprintf(buf, sizeof(buf), "%.0fKB", (double)l2_size / 2 / 1024);
-        ADD_RESULT(l2_size / 2, buf, "L2", 0, 0, 0, "");
-        snprintf(buf, sizeof(buf), "%.0fKB", (double)l2_size / 1024);
-        ADD_RESULT(l2_size, buf, "L2", 0, 0, 0, "");
+    size_t size = MIN_SIZE;
+    int num_results = 0;
+    /* Phase 1: fine */
+    while (size <= PHASE1_END && num_results < max_results) {
+        char name[32];
+        if (size < 1 * MB) {
+            snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
+        } else {
+            snprintf(name, sizeof(name), "%.0fMB", (double)size / MB);
+        }
+        results[num_results].size = size;
+        snprintf(results[num_results].name, sizeof(results[num_results].name), "%s", name);
+        results[num_results].expected[0] = 0;
+        results[num_results].rd_lat = 0;
+        results[num_results].wr_lat = 0;
+        results[num_results].bw = 0;
+        results[num_results].analysis[0] = 0;
+        num_results++;
+
+        size_t next = (size_t)((double)size * FINE_FACTOR);
+        size = (next + 63) & ~(size_t)63;
+        if (size <= 0 || size < MIN_SIZE) break;  /* overflow guard */
     }
+    /* Phase 2: coarse */
+    if (num_results < max_results) {
+        if (size < PHASE1_END) size = PHASE1_END;
+        while (size <= MAX_SIZE && num_results < max_results) {
+            char name[32];
+            if (size < 1 * MB) {
+                snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
+            } else {
+                snprintf(name, sizeof(name), "%.0fMB", (double)size / MB);
+            }
+            results[num_results].size = size;
+            snprintf(results[num_results].name, sizeof(results[num_results].name), "%s", name);
+            results[num_results].expected[0] = 0;
+            results[num_results].rd_lat = 0;
+            results[num_results].wr_lat = 0;
+            results[num_results].bw = 0;
+            results[num_results].analysis[0] = 0;
+            num_results++;
 
-    /* L3 test sizes */
-    if (l3_size > l2_size) {
-        snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size / 2 / MB);
-        ADD_RESULT(l3_size / 2, buf, "L3", 0, 0, 0, "");
-        snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size / MB);
-        ADD_RESULT(l3_size, buf, "L3", 0, 0, 0, "");
-        /* 2x L3 to show L3->RAM transition */
-        if (l3_size * 2 <= 128 * MB) {
-            snprintf(buf, sizeof(buf), "%.0fMB", (double)l3_size * 2 / MB);
-            ADD_RESULT(l3_size * 2, buf, "RAM", 0, 0, 0, "");
+            size_t next = (size_t)((double)size * COARSE_FACTOR);
+            size = (next + 63) & ~(size_t)63;
+            if (size <= 0 || size < PHASE1_END) break;
         }
     }
 
-    /* RAM test sizes - must be significantly > L3 */
-    if (l3_size < 64 * MB) {
-        ADD_RESULT(64 * MB, "64MB", "RAM", 0, 0, 0, "");
-    }
-    if (l3_size < 256 * MB) {
-        ADD_RESULT(256 * MB, "256MB", "RAM", 0, 0, 0, "");
-    }
-    ADD_RESULT(1024 * MB, "1GB", "RAM", 0, 0, 0, "");
-
-    #undef ADD_RESULT
-
-    /* Run actual measurements */
+    /* Run actual measurements. After measurement, fill in `expected` (L1/L2/L3/RAM)
+     * for each row based on which cache level it falls into, so downstream
+     * consumers (test_sanity.py) can read the table by level. */
     double prev_lat = 0;
     for (int i = 0; i < num_results; i++) {
         size_t size = results[i].size;
@@ -595,6 +611,140 @@ void run_cache_hierarchy_test(void) {
     int num_results = run_cache_hierarchy_scan(results, MAX_CACHE_TEST_SIZES,
                                                 l1_size, l2_size, l3_size, threads);
 
+    /* ========== Boundary inference from latency transitions ==========
+     *
+     * A cache boundary manifests as a sudden latency increase: the curve
+     * is flat within a level and jumps when you cross to a slower level.
+     * We find the top 3 jumps and label the regions before them.
+     *
+     * This produces an INDEPENDENT measurement that we can compare against
+     * the sysfs-reported L1/L2/L3 sizes in the comparison table. */
+    typedef struct {
+        size_t size;          /* test size at which transition occurred */
+        double lat_before;    /* latency just before the jump */
+        double lat_after;     /* latency just after the jump */
+        double ratio;         /* lat_after / lat_before */
+    } BoundaryHit;
+    BoundaryHit hits[8];
+    int num_hits = 0;
+
+    /* Skip the first 2 measurement points. Buffers smaller than ~3 cache
+     * lines (e.g. 1KB) are not representative: hardware prefetchers can
+     * mask miss latency, making the measurement look unrealistically fast
+     * (we observed 2.7ns on 1KB vs 6.7ns on 1.1KB — the 1KB value is
+     * spurious). */
+    const int SKIP_HEAD = 2;
+
+    /* Need at least 3 points past the skip to compute the slope. */
+    if (num_results < SKIP_HEAD + 3) return;
+
+    for (int i = SKIP_HEAD + 2; i < num_results && num_hits < 8; i++) {
+        if (results[i-2].rd_lat <= 0 || results[i-1].rd_lat <= 0 || results[i].rd_lat <= 0) continue;
+        double ratio = results[i].rd_lat / results[i-2].rd_lat;
+        if (ratio >= 1.5) {
+            hits[num_hits].size = results[i-1].size;
+            hits[num_hits].lat_before = results[i-2].rd_lat;
+            hits[num_hits].lat_after = results[i].rd_lat;
+            hits[num_hits].ratio = ratio;
+            num_hits++;
+            i += 1;
+        }
+    }
+
+    /* Now fill in `expected` (L1/L2/L3/RAM) for each row using the
+     * inferred boundaries. Used by test_sanity.py to find the latency
+     * for each level.
+     *
+     * Fallback strategy when num_hits < 3 (boundary detector missed levels
+     * due to HW prefetch masking the latency jump, common on ARM cores):
+     * use the sysfs-reported L1/L2/L3 sizes from global_cache_config. This
+     * gives sane labels so downstream consumers can still extract latency. */
+    int l1_upper = (int)((num_hits >= 1 ? hits[0].size : l1_size) / 1);
+    int l2_upper = (num_hits >= 2) ? (int)hits[1].size : (int)l2_size;
+    int l3_upper = (num_hits >= 3) ? (int)hits[2].size : (int)l3_size;
+    if (l2_upper <= l1_upper) l2_upper = (int)l2_size;  /* safeguard */
+    if (l3_upper <= l2_upper) l3_upper = (int)l3_size;
+
+    for (int i = 0; i < num_results; i++) {
+        int sz = (int)results[i].size;
+        if (sz <= l1_upper)
+            snprintf(results[i].expected, sizeof(results[i].expected), "L1");
+        else if (sz <= l2_upper)
+            snprintf(results[i].expected, sizeof(results[i].expected), "L2");
+        else if (l3_size > 0 && sz <= l3_upper)
+            snprintf(results[i].expected, sizeof(results[i].expected), "L3");
+        else
+            snprintf(results[i].expected, sizeof(results[i].expected), "RAM");
+    }
+
+    /* The "boundaries" are: the LARGEST size still in each cache level. */
+    size_t inferred_l1 = 0, inferred_l2 = 0, inferred_l3 = 0;
+    const char *level_names[8] = {0};
+    if (num_hits >= 1) {
+        inferred_l1 = hits[0].size;
+        level_names[0] = "L1->L2";
+    }
+    if (num_hits >= 2) {
+        inferred_l2 = hits[1].size;
+        level_names[1] = "L2->L3";
+    }
+    if (num_hits >= 3) {
+        inferred_l3 = hits[2].size;
+        level_names[2] = "L3->RAM";
+    }
+
+    /* ========== Print comparison table ========== */
+    printf("=== Cache Boundary Detection (from latency measurements) ===\n\n");
+    printf("Top latency transitions detected (>= 1.5x jump):\n");
+    for (int i = 0; i < num_hits && i < 8; i++) {
+        printf("  %s @ ~%.0f %s (%.1fns -> %.1fns, %.2fx)\n",
+               level_names[i] ? level_names[i] : "transition",
+               hits[i].size < 1*MB ? (double)hits[i].size/KB : (double)hits[i].size/MB,
+               hits[i].size < 1*MB ? "KB" : "MB",
+               hits[i].lat_before, hits[i].lat_after, hits[i].ratio);
+    }
+    if (num_hits == 0) {
+        printf("  (No latency transitions >= 1.5x detected — cache sizes may be very large,\n");
+        printf("   or hardware prefetchers are masking the boundary.)\n");
+    }
+    printf("\n");
+
+    /* The comparison table the user asked for: detected vs sysfs-reported */
+    printf("=== Inferred vs Reported Cache Hierarchy ===\n\n");
+    printf("| Level | Inferred (from latency) | Reported (sysfs/lscpu) | Match |\n");
+    printf("|-------|-------------------------|------------------------|-------|\n");
+    char inf_l1_s[32], inf_l2_s[32], inf_l3_s[32];
+    char rep_l1_s[32], rep_l2_s[32], rep_l3_s[32];
+    if (inferred_l1) snprintf(inf_l1_s, sizeof(inf_l1_s), "%.0f KB", (double)inferred_l1 / KB);
+    else snprintf(inf_l1_s, sizeof(inf_l1_s), "undetected");
+    if (inferred_l2) snprintf(inf_l2_s, sizeof(inf_l2_s), "%.0f KB", (double)inferred_l2 / KB);
+    else snprintf(inf_l2_s, sizeof(inf_l2_s), "undetected");
+    if (inferred_l3) snprintf(inf_l3_s, sizeof(inf_l3_s), "%.0f MB", (double)inferred_l3 / MB);
+    else snprintf(inf_l3_s, sizeof(inf_l3_s), "undetected");
+    if (l1_size) snprintf(rep_l1_s, sizeof(rep_l1_s), "%zu KB", l1_size / KB);
+    else snprintf(rep_l1_s, sizeof(rep_l1_s), "unknown");
+    if (l2_size) snprintf(rep_l2_s, sizeof(rep_l2_s), "%zu KB", l2_size / KB);
+    else snprintf(rep_l2_s, sizeof(rep_l2_s), "unknown");
+    if (l3_size) snprintf(rep_l3_s, sizeof(rep_l3_s), "%zu MB", l3_size / MB);
+    else snprintf(rep_l3_s, sizeof(rep_l3_s), "unknown");
+
+    /* "Match" if both are within 2x of each other (latency boundaries are
+     * inherently fuzzy — exact-byte match is not expected). The inferred
+     * size is the LARGEST size that still fits, so it should be very close
+     * to the actual cache size (within 1.5x typically). */
+    const char *l1_match = (inferred_l1 && l1_size) ?
+        ((inferred_l1 >= l1_size/2 && inferred_l1 <= l1_size*2) ? "OK" : "MISMATCH") : "n/a";
+    const char *l2_match = (inferred_l2 && l2_size) ?
+        ((inferred_l2 >= l2_size/2 && inferred_l2 <= l2_size*2) ? "OK" : "MISMATCH") : "n/a";
+    const char *l3_match = (inferred_l3 && l3_size) ?
+        ((inferred_l3 >= l3_size/2 && inferred_l3 <= l3_size*2) ? "OK" : "MISMATCH") : "n/a";
+    printf("| L1d   | %-23s | %-22s | %-5s |\n", inf_l1_s, rep_l1_s, l1_match);
+    printf("| L2    | %-23s | %-22s | %-5s |\n", inf_l2_s, rep_l2_s, l2_match);
+    printf("| L3    | %-23s | %-22s | %-5s |\n", inf_l3_s, rep_l3_s, l3_match);
+    printf("\nNote: 'Inferred' is the largest size still in the level (just before the\n");
+    printf("latency jump to the next level). It will be slightly LESS than the actual\n");
+    printf("cache size. 'Match' is OK if values are within 2x.\n\n");
+
     /* ========== 缓存层级扫描 ========== */
     printf("=== 缓存层级扫描 ===\n\n");
 
@@ -672,6 +822,17 @@ void run_cache_hierarchy_test(void) {
     /* ========== 多通道内存带宽 ========== */
     printf("=== 多通道内存带宽 (多线程) ===\n\n");
 
+    /* Get detected DRAM speed and compute real theoretical bandwidth.
+     * NO hardcoded 4800 MT/s. */
+    int dram_mt_s = get_dram_speed_mt_s();
+    double theoretical_bw_mbps = get_theoretical_bw_mbps();
+    if (dram_mt_s > 0) {
+        printf("  DRAM: %d MT/s × %d channels = %.0f MB/s theoretical\n",
+               dram_mt_s, global_system_config.memory_channels, theoretical_bw_mbps);
+    } else {
+        printf("  DRAM speed unknown — theoretical bandwidth will be marked undetermined\n");
+    }
+
     /* Use detected cache sizes + RAM sizes */
     size_t bw_sizes[5];
     char bw_names[5][16];
@@ -736,12 +897,42 @@ void run_cache_hierarchy_test(void) {
         free(ptr2);
     }
 
-    printf("\n理论峰值: %d GB/s (假设单通道 4800 MT/s, 实际取决于内存规格)\n\n", channels * 38);
+    if (dram_mt_s > 0 && global_system_config.memory_channels > 0) {
+        /* Real peak: dram_speed_mt_s × 8 bytes/transfer × channels / 1000 = GB/s */
+        double peak_gbps = (double)dram_mt_s * 8.0 * (double)global_system_config.memory_channels / 1000.0;
+        printf("\n理论峰值: %.1f GB/s (DDR %d MT/s × %d channels × 8B/transfer)\n\n",
+               peak_gbps, dram_mt_s, global_system_config.memory_channels);
+    } else {
+        printf("\n理论峰值: undetermined (DRAM speed or channel count unknown — see [DRAM] lines above)\n\n");
+    }
 
     /* ========== 生成报告 ========== */
     ReportContext *report = report_init("cache_hierarchy", REPORT_FORMAT_MARKDOWN);
     if (report) {
         report_write_system_info(report);
+
+        report_section(report, "Cache Boundary Detection (from Latency Measurements)");
+        report_write(report, "Top latency transitions detected (>= 1.5x jump):\n\n");
+        for (int i = 0; i < num_hits && i < 8; i++) {
+            report_write(report, "- **%s** @ ~%.0f %s (%.1fns -> %.1fns, %.2fx)\n",
+                         level_names[i] ? level_names[i] : "transition",
+                         hits[i].size < 1*MB ? (double)hits[i].size/KB : (double)hits[i].size/MB,
+                         hits[i].size < 1*MB ? "KB" : "MB",
+                         hits[i].lat_before, hits[i].lat_after, hits[i].ratio);
+        }
+        if (num_hits == 0) {
+            report_write(report, "- (No latency transitions >= 1.5x detected)\n");
+        }
+        report_write(report, "\n");
+
+        report_section(report, "Inferred vs Reported Cache Hierarchy");
+        report_write(report, "| Level | Inferred (from latency) | Reported (sysfs/lscpu) | Match |\n");
+        report_write(report, "|-------|-------------------------|------------------------|-------|\n");
+        report_write(report, "| L1d   | %-23s | %-22s | %-5s |\n", inf_l1_s, rep_l1_s, l1_match);
+        report_write(report, "| L2    | %-23s | %-22s | %-5s |\n", inf_l2_s, rep_l2_s, l2_match);
+        report_write(report, "| L3    | %-23s | %-22s | %-5s |\n", inf_l3_s, rep_l3_s, l3_match);
+        report_write(report, "\n*Inferred* is the largest size still in the level (just before the latency jump).\n");
+        report_write(report, "It will be slightly LESS than the actual cache size. *Match* is OK if within 2x.\n\n");
 
         report_section(report, "Cache Hierarchy Scan");
         report_write(report, "| Size | RdLat(ns) | WrLat(ns) | BW(MB/s) | Expected | Analysis |\n");
@@ -785,7 +976,12 @@ void run_cache_hierarchy_test(void) {
         report_write(report, "- Memory bandwidth: multi-threaded (%d threads)\n", threads);
         int report_channels = get_memory_channels();
         report_write(report, "- Memory channels: %d\n", report_channels);
-        report_write(report, "- Theoretical peak: ~%d GB/s\n\n", report_channels * 38);
+        if (dram_mt_s > 0) {
+            report_write(report, "- DRAM: %d MT/s (%s), theoretical peak %.1f GB/s\n\n",
+                         dram_mt_s, global_system_config.dram_standard, theoretical_bw_mbps / 1000);
+        } else {
+            report_write(report, "- DRAM: unknown\n\n");
+        }
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);

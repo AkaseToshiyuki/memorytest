@@ -355,9 +355,17 @@ int perf_measure(void (*func)(void*), void *arg, PerfResult *result) {
 static PerfResult perf_estimate_cpi_fallback(uint64_t iterations, double ns_per_op) {
     PerfResult result = {0};
 
-    /* Get CPU frequency for cycle estimation */
+    /* Get CPU frequency for cycle estimation.
+     * If freq unknown (0), we cannot derive cycles from wall-clock ns.
+     * Return zeroed result to signal "no estimate possible" (caller must
+     * check instructions > 0). */
     int freq = global_system_config.cpu_freq_mhz;
-    if (freq <= 0) freq = 2200;  /* Default 2.2 GHz */
+    if (freq <= 0) {
+        /* No hardcoded fallback. cycles=0, instructions=0, cpi=0, ipc=0.
+         * Caller (perf_measure) will see instructions=0 and return non-zero,
+         * and use_pmu=0 fallback path will handle it. */
+        return result;
+    }
 
     double cycles_per_ns = freq / 1000.0;  /* MHz to cycles/ns */
     double total_cycles = ns_per_op * cycles_per_ns;
@@ -452,11 +460,17 @@ uint64_t pmu_measure_cache_latency(void *ptr, int level) {
 
     /* Calculate latency per access */
     if (cycle_count > 0 && accesses > 0) {
-        /* Get CPU frequency for cycle to ns conversion */
+        /* Get CPU frequency for cycle to ns conversion.
+         * If freq unknown (0), we cannot convert cycles to ns.
+         * Return 0 to signal "cannot measure latency". */
         static double cycles_per_ns = 0;
         if (cycles_per_ns == 0) {
             int freq = global_system_config.cpu_freq_mhz;
-            if (freq <= 0) freq = 2200;  /* Default 2.2 GHz */
+            if (freq <= 0) {
+                /* No hardcoded fallback. Return 0 — caller treats as "not measured". */
+                pmu_disable_counters();
+                return 0.0;
+            }
             cycles_per_ns = freq / 1000.0;  /* MHz to cycles/ns */
         }
         return (cycle_count / accesses) / cycles_per_ns;
