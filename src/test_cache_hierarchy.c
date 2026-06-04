@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <math.h>
 
 /* MAX_THREADS: per-stack-array limit. See test_memory_bandwidth.c for
  * the rationale on the value 256. */
@@ -436,10 +437,13 @@ static double multi_bandwidth(void *ptr, size_t size, int threads, int iteration
 }
 
 /* Maximum number of cache test sizes */
-/* Two-phase scan: phase 1 fine 1.05x from 1KB→1MB (~230 points),
- * phase 2 coarse 1.20x from 1MB→2GB (~85 points). Total ~315.
- * Round up to 512 for safety. */
-#define MAX_CACHE_TEST_SIZES 512
+/* Cache-prior scan: 3 segments around detected L1/L2/L3 (15 pts each) + 20
+ * points from L3*2 to 2GB to find DRAM. Total ~65 points. Old blind scan
+ * used 1KB→2GB @ 1.05x which produced 315 points and missed real boundaries
+ * (rdtsc noise on every point made ratio=2.0x detection pick spurious
+ * transitions 1000x away from the actual cache size). With priors we measure
+ * where it matters and get reliable boundaries. */
+#define MAX_CACHE_TEST_SIZES 128
 
 /* Result structure for cache hierarchy tests */
 typedef struct {
@@ -464,54 +468,82 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
     } while(0)
 
     /* ============================================================
-     * Two-phase adaptive cache hierarchy scan.
+     * Cache-prior adaptive scan. Uses sysfs-detected L1/L2/L3 as priors
+     * and places 15 log-spaced points in [size*0.5, size*2] around each
+     * level boundary. Final 20 points from L3*2 to 2GB to find DRAM.
      *
-     * Phase 1: 1KB → 1MB with fine spacing (1.05x) — high resolution for
-     *          L1 (typically 16-192KB) and L2 (typically 256KB-1MB).
-     * Phase 2: 1MB → 2GB with coarser spacing (1.20x) — L3 and RAM.
+     * Why: blind 1KB→2GB @ 1.05x (315 points) had ratio=2.0x detection
+     * picking spurious transitions at sizes 1000x away from the real
+     * cache (e.g. "L1->L2 @ 11MB" on a 32KB L1 system). With priors we
+     * measure around the actual boundary, so the latency jump is large
+     * (real cache miss) and ratio detection is reliable.
      *
-     * This handles L1d=16KB (Cortex-A53) and L1d=192KB (Apple M1) without
-     * missing the boundary.
-     * ============================================================ */
-    const size_t MIN_SIZE = 1 * KB;
-    const size_t PHASE1_END = 1 * MB;
-    const size_t MAX_SIZE = 2 * GB;
-    const double FINE_FACTOR = 1.05;   /* ~230 points from 1K to 1M */
-    const double COARSE_FACTOR = 1.20; /* ~85 points from 1M to 2G */
+     * Falls back to a coarse 1MB→2GB scan if no priors are available
+     * (e.g. auto-detection failed and user declined to supply). */
+    const int PTS_PER_SEGMENT = 15;
+    const int RAM_SEGMENT_PTS = 20;
 
-    size_t size = MIN_SIZE;
     int num_results = 0;
-    /* Phase 1: fine */
-    while (size <= PHASE1_END && num_results < max_results) {
-        char name[32];
-        if (size < 1 * MB) {
-            snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
-        } else {
-            snprintf(name, sizeof(name), "%.0fMB", (double)size / MB);
-        }
-        results[num_results].size = size;
-        snprintf(results[num_results].name, sizeof(results[num_results].name), "%s", name);
-        results[num_results].expected[0] = 0;
-        results[num_results].rd_lat = 0;
-        results[num_results].wr_lat = 0;
-        results[num_results].bw = 0;
-        results[num_results].analysis[0] = 0;
-        num_results++;
+    int has_priors = (l1_size > 0 && l2_size > 0);
+    int has_l3 = (l3_size > 0);
 
-        size_t next = (size_t)((double)size * FINE_FACTOR);
-        size = (next + 63) & ~(size_t)63;
-        if (size <= 0 || size < MIN_SIZE) break;  /* overflow guard */
-    }
-    /* Phase 2: coarse */
-    if (num_results < max_results) {
-        if (size < PHASE1_END) size = PHASE1_END;
-        while (size <= MAX_SIZE && num_results < max_results) {
+    /* Helper lambda-like macro: generate PTS_PER_SEGMENT log-spaced points
+     * in [lo, hi] range. size_t with overflow protection. */
+    #define GEN_SEGMENT(lo, hi, pts, label) do { \
+        size_t _lo = (lo), _hi = (hi); \
+        if (_lo < 4*1024) _lo = 4*1024;  /* never go below 4KB (cache-line noise) */ \
+        if (_hi <= _lo) _hi = _lo * 2; \
+        double ratio = pow((double)_hi / (double)_lo, 1.0 / ((pts) - 1)); \
+        for (int k = 0; k < (pts) && num_results < max_results; k++) { \
+            size_t sz = (size_t)((double)_lo * pow(ratio, k)); \
+            sz = (sz + 63) & ~(size_t)63;  /* align to 64B */ \
+            if (sz < _lo) sz = _lo; \
+            if (sz > _hi) sz = _hi; \
+            char name[32]; \
+            if (sz < 1*MB) snprintf(name, sizeof(name), "%.1fKB", (double)sz / KB); \
+            else if (sz < 1*GB) snprintf(name, sizeof(name), "%.1fMB", (double)sz / MB); \
+            else snprintf(name, sizeof(name), "%.2fGB", (double)sz / GB); \
+            results[num_results].size = sz; \
+            snprintf(results[num_results].name, sizeof(results[num_results].name), "%s", name); \
+            results[num_results].expected[0] = 0; \
+            results[num_results].rd_lat = 0; \
+            results[num_results].wr_lat = 0; \
+            results[num_results].bw = 0; \
+            results[num_results].analysis[0] = 0; \
+            num_results++; \
+        } \
+    } while(0)
+
+    if (has_priors) {
+        /* Segment 1: L1 boundary — [L1/2, L1*2] */
+        GEN_SEGMENT(l1_size / 2, l1_size * 2, PTS_PER_SEGMENT, "L1");
+        /* Segment 2: L2 boundary — [L2/2, L2*2] */
+        if (num_results < max_results)
+            GEN_SEGMENT(l2_size / 2, l2_size * 2, PTS_PER_SEGMENT, "L2");
+        /* Segment 3: L3 boundary (or L2→RAM if no L3) */
+        if (num_results < max_results) {
+            if (has_l3)
+                GEN_SEGMENT(l3_size / 2, l3_size * 2, PTS_PER_SEGMENT, "L3");
+            else
+                /* No L3: skip the L3 segment, just bridge to RAM later */
+                ;
+        }
+        /* Segment 4: L3 → RAM. If L3 exists, [L3*2, min(2GB, L3*32)];
+         * else [L2*2, min(2GB, 4GB)]. */
+        if (num_results < max_results) {
+            size_t lo = has_l3 ? l3_size * 2 : l2_size * 2;
+            size_t hi = has_l3 ? (l3_size * 32) : (4 * GB);
+            if (hi > 2 * GB) hi = 2 * GB;
+            if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
+        }
+    } else {
+        /* No priors: fall back to coarse 1MB→2GB @ 1.20x. ~85 points. */
+        size_t size = 1 * MB;
+        while (size <= 2 * GB && num_results < max_results) {
             char name[32];
-            if (size < 1 * MB) {
-                snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
-            } else {
-                snprintf(name, sizeof(name), "%.0fMB", (double)size / MB);
-            }
+            if (size < 1*MB) snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
+            else if (size < 1*GB) snprintf(name, sizeof(name), "%.1fMB", (double)size / MB);
+            else snprintf(name, sizeof(name), "%.2fGB", (double)size / GB);
             results[num_results].size = size;
             snprintf(results[num_results].name, sizeof(results[num_results].name), "%s", name);
             results[num_results].expected[0] = 0;
@@ -520,12 +552,11 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
             results[num_results].bw = 0;
             results[num_results].analysis[0] = 0;
             num_results++;
-
-            size_t next = (size_t)((double)size * COARSE_FACTOR);
+            size_t next = (size_t)((double)size * 1.20);
             size = (next + 63) & ~(size_t)63;
-            if (size <= 0 || size < PHASE1_END) break;
         }
     }
+    #undef GEN_SEGMENT
 
     /* Run actual measurements. After measurement, fill in `expected` (L1/L2/L3/RAM)
      * for each row based on which cache level it falls into, so downstream
