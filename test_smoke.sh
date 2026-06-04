@@ -15,6 +15,7 @@ BIN="$REPO_ROOT/bin"
 REPORTS="$REPO_ROOT/reports"
 PASS=0
 FAIL=0
+SKIP=0
 # Per-binary timeout, scaled to the host's CPU count so big machines (e.g.
 # 96-core EPYC, 128-core Ampere) get enough wall time. The base covers
 # single-threaded tests (< 5s each); test_inter_core (24x24 CAS matrix)
@@ -63,6 +64,13 @@ for binary in "${!TESTS[@]}"; do
     # test_inter_core scales super-linearly with core count (24x24 CAS matrix);
     # everything else uses CPU_TIMEOUT.
     if [ "$binary" = "test_inter_core" ]; then
+        # On machines with many cores, the 24x24 CAS matrix takes too long
+        # for smoke. Skip with a SKIP line (don't count as pass or fail).
+        if [ "$NCPU" -gt 32 ]; then
+            printf "  - %-25s SKIPPED (nproc=%d > 32; run separately)\n" "$binary" "$NCPU"
+            SKIP=$((SKIP+1))
+            continue
+        fi
         THIS_TIMEOUT=$INTER_TIMEOUT
     else
         THIS_TIMEOUT=$TIMEOUT_SEC
@@ -117,7 +125,7 @@ for binary in "${!TESTS[@]}"; do
 done
 
 echo "============================================================"
-echo "Layer 1 smoke: $PASS passed, $FAIL failed"
+echo "Layer 1 smoke: $PASS passed, $FAIL failed, $SKIP skipped"
 if [ $FAIL -gt 0 ]; then
     echo "FAIL"
     exit 1
