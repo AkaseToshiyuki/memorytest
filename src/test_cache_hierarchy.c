@@ -8,6 +8,7 @@
  */
 
 #include "common.h"
+#include "util.h"
 #include "asm_helpers.h"
 #include <stdlib.h>
 #include <string.h>
@@ -784,7 +785,7 @@ void run_cache_hierarchy_test(void) {
 }
 
 int main(int argc, char *argv[]) {
-    request_sudo_password();
+    init_platform_layer();
     initialize_cache_config();
     initialize_system_config();
     pmu_init_cache_counters();

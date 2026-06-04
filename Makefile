@@ -1,15 +1,26 @@
 # Memory Benchmark Makefile
-
-CC ?= gcc
-# Default CFLAGS (-O2). Can be overridden via `make CFLAGS="..."` or the
-# release/opt targets below.
 #
-# Notes on warnings:
+# Build model (2026-06-04 rewrite):
+# - Default `make tests` produces portable -O2 binaries that run on
+#   x86_64 / arm64 / riscv64 / ppc64. SIMD is selected at runtime via
+#   platform_simd_detect() (src/platform.c), so the binary doesn't need
+#   -march=native to use AVX2/NEON/etc.
+# - `make opt` adds -O3 -DNDEBUG and (by default) a SAFE set of -m flags
+#   that are valid on the current build host. -march=native is opt-in
+#   via `make opt-native` so cross-compiled binaries don't get garbage flags.
+# - LTO / ofast / asan targets unchanged in spirit.
+#
+# CFLAGS notes:
 #  -Wno-unused-function: every test_*.c links the entire common module set,
 #   and not every helper is used by every binary. Linker errors would catch
 #   truly dead code; the warning is noise. Keep it off.
 #  -Wno-unused-result: read/fscanf/system calls in detect.c that we don't
 #   care about the return value of. Tightening these up is a future cleanup.
+#  -Wno-discarded-qualifiers: <linux/perf_event.h> uses __u64 qualifiers
+#   that we pass into syscall(); safe to drop.
+
+CC ?= gcc
+HOST_CC ?= $(CC)
 CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers
 LDFLAGS ?=
 SRC_DIR = src
@@ -21,11 +32,13 @@ MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
 CPU_TESTS = test_cpu_alu test_cpu_float test_cpu_branch test_cpu_multi
 ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 
-# Common source modules (split from monolithic common.c)
-COMMON_SRCS = src/common.c src/util.c src/detect.c src/report.c \
+# Common source modules (split from monolithic common.c).
+# platform.c is the new cross-platform detection layer.
+COMMON_SRCS = src/common.c src/util.c src/platform.c src/detect.c src/report.c \
               src/simd.c src/pmu.c src/latency.c
 
-.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report score
+.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report score \
+        opt opt3 ofast lto perf-asan opt-native platform-check
 
 # Default: build all
 all: tests
@@ -65,16 +78,42 @@ regression-record:
 # 0-100 score with letter grade.
 report:
 	@echo "=== generating HTML report ==="
-	@python3.12 report_html.py
+	@python3 report_html.py
 	@echo ""
 	@echo "=== score summary ==="
-	@python3.12 report_score.py | head -10
+	@python3 report_score.py | head -10
 
 # Print score summary only (no report)
 score:
-	@python3.12 report_score.py | head -10
+	@python3 report_score.py | head -10
+
+# platform-check: a build-host diagnostic — prints detected arch / SIMD / PMU
+# without compiling anything. Useful to verify what the toolchain supports.
+platform-check:
+	@echo "=== build host ==="
+	@$(HOST_CC) -dumpmachine
+	@echo "=== a tiny test binary that uses the platform layer (non-interactive) ==="
+	@printf '%s\n' \
+		'#include "src/common.h"' \
+		'#include "src/platform.h"' \
+		'#include "src/util.h"' \
+		'int main(void) {' \
+		'    platform_set_non_interactive(true);' \
+		'    init_platform_layer();' \
+		'    const SIMDInfo *s = get_simd_info();' \
+		'    const PMUCapabilities *p = platform_pmu_probe();' \
+		'    printf("arch=%s simd=\"%s\" vwidth=%d\\n",' \
+		'           arch_names[current_arch], s->simd_flags, s->vector_width);' \
+		'    printf("pmu: available=%d paranoia=%d hw=%d self=%d\\n",' \
+		'           p->available, p->paranoia, p->can_profile_hw, p->can_profile_self);' \
+		'    return 0;' \
+		'}' > /tmp/_pc.c
+	@$(HOST_CC) $(CFLAGS) -I. /tmp/_pc.c src/util.c src/platform.c src/common.c src/detect.c src/simd.c src/report.c -o /tmp/_pc 2>&1 | head -20
+	@/tmp/_pc 2>&1 | head -10
+	@rm -f /tmp/_pc /tmp/_pc.c
 
 # lint: static sanity checks — CFLAGS warning hardening + Python compile + shellcheck
+# Uses portable -O2 + -Werror, no -march, so it works on any build host.
 lint:
 	@echo "--- C: recompile with -Werror on key warnings ---"
 	$(MAKE) clean tests CFLAGS="-O2 -Wall -std=c11 -pthread -Werror -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers"
@@ -121,21 +160,44 @@ clean-reports:
 # Clean everything
 distclean: clean clean-reports
 
-# Build with aggressive optimisation (mirrors `make CFLAGS="..."` but keeps -O2 default).
-# These targets compare well against the default -O2 build for the PERF_NOTES.md study.
-opt:     CFLAGS += -O3 -march=native -DNDEBUG -fomit-frame-pointer
+# ========================================================================
+# Optimised builds
+#
+# `make opt` adds -O3 -DNDEBUG but NOT -march=native. The platform layer
+# (src/platform.c) will still detect and use the best SIMD at runtime.
+# Use `make opt-native` only when you are *sure* you won't run the binary
+# on a different CPU than the build host (i.e. you understand and accept
+# the cross-machine risks documented in PERF_NOTES.md).
+# ========================================================================
+
+# Safe optimised build — no -march, runtime SIMD detection picks the best.
+opt:     CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer
 opt:     tests
 
-opt3:    CFLAGS += -O3 -march=native -DNDEBUG -fomit-frame-pointer
+# Alias of opt (kept for backward compatibility)
+opt3:    CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer
 opt3:    tests
 
-ofast:   CFLAGS += -Ofast -march=native -DNDEBUG -fomit-frame-pointer -ffast-math
+# ofast is opt + -ffast-math. Still portable.
+ofast:   CFLAGS += -Ofast -DNDEBUG -fomit-frame-pointer -ffast-math
 ofast:   tests
 
-# Link-time-optimisation build
-lto:     CFLAGS += -O3 -march=native -DNDEBUG -flto -fomit-frame-pointer
+# Link-time-optimisation build. Portable.
+lto:     CFLAGS += -O3 -DNDEBUG -flto -fomit-frame-pointer
 lto:     LDFLAGS += -flto
 lto:     tests
+
+# Aggressive native build — DANGEROUS on heterogenous clusters.
+# Will emit a warning unless MARCH_OVERRIDE=1 is set.
+opt-native:
+	@if [ "$(MARCH_OVERRIDE)" != "1" ]; then \
+		echo "WARNING: opt-native adds -march=native. The resulting binary"; \
+		echo "         may use illegal instructions on a different CPU model."; \
+		echo "         Set MARCH_OVERRIDE=1 to confirm you understand this."; \
+		echo "         Use 'make opt' for a portable optimised build."; \
+		exit 1; \
+	fi
+	$(MAKE) tests CFLAGS="$(CFLAGS) -O3 -march=native -DNDEBUG -fomit-frame-pointer"
 
 # ASan build for memory-safety checks (not used in perf analysis but useful)
 perf-asan: CFLAGS += -O1 -g -fsanitize=address -fno-omit-frame-pointer
@@ -152,7 +214,7 @@ SIZE ?= size
 # Build release package
 release: opt
 	@mkdir -p release
-	@cp -r bin Makefile generate_report.py README.md tests.json src/common.h .
+	@cp -r bin Makefile generate_report.py README.md tests.json src/common.h src/platform.h src/util.h .
 	@mv bin/* release/ 2>/dev/null || true
 	@rm -rf bin
 	@tar -czvf memorytest-$(VERSION).tar.gz release/
@@ -164,35 +226,45 @@ release: opt
 help:
 	@echo "Memory Benchmark Suite v$(VERSION)"
 	@echo ""
-	@echo "Targets:"
-	@echo "  all         - Build all test binaries (default)"
-	@echo "  tests       - Build all test binaries"
-	@echo "  memory      - Build memory/cache subsystem tests only"
-	@echo "  cpu         - Build CPU performance tests only"
-	@echo "  clean       - Remove built binaries"
+	@echo "Build targets (all use -O2 portable CFLAGS by default; SIMD picked at runtime):"
+	@echo "  all           - Build all test binaries (default)"
+	@echo "  tests         - Build all test binaries"
+	@echo "  memory        - Build memory/cache subsystem tests only"
+	@echo "  cpu           - Build CPU performance tests only"
+	@echo "  opt           - Build with -O3 -DNDEBUG (still portable, runtime SIMD)"
+	@echo "  opt3          - Alias of opt"
+	@echo "  ofast         - Build with -Ofast -ffast-math (portable)"
+	@echo "  lto           - Build with -O3 -flto (portable)"
+	@echo "  opt-native    - Build with -O3 -march=native (REQUIRES MARCH_OVERRIDE=1)"
+	@echo "  perf-asan     - Build with -O1 -fsanitize=address"
+	@echo ""
+	@echo "Diagnostics / verification:"
+	@echo "  platform-check - Print detected arch/SIMD/PMU for the build host"
+	@echo ""
+	@echo "Cleaning:"
+	@echo "  clean         - Remove built binaries"
 	@echo "  clean-reports - Remove generated reports"
-	@echo "  distclean   - Remove all generated files"
-	@echo "  release     - Create release package (uses opt flags)"
-	@echo "  opt         - Build with -O3 -march=native -DNDEBUG -fomit-frame-pointer"
-	@echo "  opt3        - Alias of opt"
-	@echo "  ofast       - Build with -Ofast -march=native -ffast-math"
-	@echo "  lto         - Build with -O3 -march=native -DNDEBUG -flto"
-	@echo "  size        - Show text/data/bss per binary"
-	@echo "  perf-asan   - Build with -O1 -g -fsanitize=address"
-	@echo "  help        - Show this help"
+	@echo "  distclean     - Remove all generated files"
+	@echo "  release       - Create release package (uses opt flags)"
+	@echo ""
+	@echo "Test layers:"
+	@echo "  smoke         - Layer 1: run 7 binaries, verify reports produced"
+	@echo "  sanity        - Layer 2: assert each metric within plausible range"
+	@echo "  test          - smoke + sanity"
+	@echo "  regression    - Layer 3: compare to history.jsonl baseline"
+	@echo "  report        - Generate HTML report from markdown sources"
+	@echo "  score         - Print score summary only"
+	@echo "  lint          - Static checks (C -Werror, py_compile, bash -n)"
 	@echo ""
 	@echo "Test categories:"
 	@echo "  Memory/Cache:  cache_hierarchy, memory_bandwidth, inter_core"
 	@echo "  CPU:            cpu_alu, cpu_float, cpu_branch, cpu_multi"
 	@echo ""
-	@echo "Usage:"
-	@echo "  make              # Build everything"
-	@echo "  make memory       # Build memory tests only"
-	@echo "  make cpu          # Build CPU tests only"
-	@echo "  make clean        # Clean build directory"
-	@echo ""
-	@echo "Or use the Python report generator for more control:"
-	@echo "  python3 generate_report.py --list"
-	@echo "  python3 generate_report.py --memory"
-	@echo "  python3 generate_report.py --cpu"
-	@echo "  python3 generate_report.py --all"
+	@echo "Cross-platform notes:"
+	@echo "  - The binary detects arch / SIMD / cache / memory / freq / PMU"
+	@echo "    at runtime (see src/platform.c). It will run on x86_64, arm64,"
+	@echo "    riscv64, ppc64 without recompilation."
+	@echo "  - On TTY, detection failures prompt the user (with defaults shown)."
+	@echo "    On non-TTY (CI, smoke tests), safe defaults are used."
+	@echo "  - Use MARCH_OVERRIDE=1 make opt-native ONLY if you are sure the"
+	@echo "    build and run hosts share the same CPU model."

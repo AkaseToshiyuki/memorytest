@@ -10,6 +10,7 @@
  */
 
 #include "common.h"
+#include "util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -211,7 +212,11 @@ static void test_simd_fma(void *arg) {
     vst1q_f64(buf, v_acc);
     g_simd_result = buf[0] + buf[1];
 }
-#elif defined(HAVE_SSE_INTRINSICS)
+#elif defined(HAVE_AVX2_FMA_INTRINSICS)
+/* AVX2 + FMA path: full 128-bit double FMA via _mm_fmadd_pd.
+ * Only enabled when the binary was compiled with both -mavx2 and -mfma.
+ * Falls back to the scalar path (HAVE_SSE2_INTRINSICS) when those flags
+ * are absent, so a portable -O2 build still compiles. */
 static void test_simd_fadd(void *arg) {
     (void)arg;
     __m128d v_sum = _mm_setzero_pd();
@@ -255,6 +260,112 @@ static void test_simd_fma(void *arg) {
     __m128d v_b   = _mm_set1_pd(0.5);
     for (long i = 0; i < ITERATIONS; i += 2) {
         v_acc = _mm_fmadd_pd(v_acc, v_a, v_b);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_acc);
+    g_simd_result = buf[0] + buf[1];
+}
+#elif defined(HAVE_AVX_INTRINSICS)
+/* AVX-only path: can use 128-bit SSE intrinsics from <immintrin.h> but
+ * no FMA. */
+static void test_simd_fadd(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    __m128d v_half = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d v_i = _mm_set1_pd((double)i);
+        v_sum = _mm_add_pd(v_sum, _mm_mul_pd(v_i, v_half));
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fmul(void *arg) {
+    (void)arg;
+    __m128d v_prod = _mm_set1_pd(1.0);
+    __m128d v_step = _mm_set1_pd(0.99999);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_prod = _mm_mul_pd(v_prod, v_step);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_prod);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_dot(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d a = _mm_set1_pd((double)i);
+        __m128d b = _mm_set1_pd((double)(i + 1));
+        __m128d p = _mm_mul_pd(a, b);
+        v_sum = _mm_add_pd(v_sum, p);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+/* FMA without FMA ISA: fall back to mul+add (slower but correct). */
+static void test_simd_fma(void *arg) {
+    (void)arg;
+    __m128d v_acc = _mm_setzero_pd();
+    __m128d v_a   = _mm_set1_pd(1.00001);
+    __m128d v_b   = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_acc = _mm_add_pd(v_acc, _mm_mul_pd(v_a, v_b));
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_acc);
+    g_simd_result = buf[0] + buf[1];
+}
+#elif defined(HAVE_SSE2_INTRINSICS)
+/* SSE2 baseline: x86_64 always has SSE2. The C compiler can be told to
+ * emit SSE2 code via -msse2 (default on x86_64). <emmintrin.h> provides
+ * the 128-bit integer/float intrinsics that work on any x86_64. */
+#include <emmintrin.h>
+static void test_simd_fadd(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    __m128d v_half = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d v_i = _mm_set1_pd((double)i);
+        v_sum = _mm_add_pd(v_sum, _mm_mul_pd(v_i, v_half));
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_fmul(void *arg) {
+    (void)arg;
+    __m128d v_prod = _mm_set1_pd(1.0);
+    __m128d v_step = _mm_set1_pd(0.99999);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_prod = _mm_mul_pd(v_prod, v_step);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_prod);
+    g_simd_result = buf[0] + buf[1];
+}
+static void test_simd_dot(void *arg) {
+    (void)arg;
+    __m128d v_sum = _mm_setzero_pd();
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        __m128d a = _mm_set1_pd((double)i);
+        __m128d b = _mm_set1_pd((double)(i + 1));
+        __m128d p = _mm_mul_pd(a, b);
+        v_sum = _mm_add_pd(v_sum, p);
+    }
+    double buf[2];
+    _mm_storeu_pd(buf, v_sum);
+    g_simd_result = buf[0] + buf[1];
+}
+/* FMA without FMA: fall back to mul+add. */
+static void test_simd_fma(void *arg) {
+    (void)arg;
+    __m128d v_acc = _mm_setzero_pd();
+    __m128d v_a   = _mm_set1_pd(1.00001);
+    __m128d v_b   = _mm_set1_pd(0.5);
+    for (long i = 0; i < ITERATIONS; i += 2) {
+        v_acc = _mm_add_pd(v_acc, _mm_mul_pd(v_a, v_b));
     }
     double buf[2];
     _mm_storeu_pd(buf, v_acc);
@@ -416,7 +527,7 @@ void run_cpu_float_test(void) {
 }
 
 int main(int argc, char *argv[]) {
-    request_sudo_password();
+    init_platform_layer();
     initialize_cache_config();
     initialize_system_config();
     pmu_init_cache_counters();

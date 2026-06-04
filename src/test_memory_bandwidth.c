@@ -8,6 +8,7 @@
  */
 
 #include "common.h"
+#include "util.h"
 #include <string.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -381,7 +382,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-    request_sudo_password();
+    init_platform_layer();
     size_t size = 256 * MB;
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;  /* Default: use all available cores */

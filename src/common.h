@@ -18,13 +18,47 @@
 #include <stdbool.h>
 #include <linux/perf_event.h>
 
-/* SIMD/Vector intrinsics (for test_cpu_float SIMD tests) */
+/* SIMD/Vector intrinsics.
+ *
+ * CRITICAL: don't include <immintrin.h> unconditionally — its SSE/AVX
+ * intrinsics require specific -march/-mavx2/-mfma flags to inline.
+ * For a portable -O2 build, we only include the headers for ISA extensions
+ * that the *compiler* was told to target (the user can set -march= or
+ * -mavx2/-mfma/-msse4.2 via the CFLAGS). For ISA extensions that are
+ * *implicit* on the platform (NEON on AArch64), we include unconditionally
+ * because the architecture guarantees them.
+ *
+ * At runtime, the platform layer (platform.c) probes what the CPU actually
+ * supports so we can fall back when compile-time flags over- or under-promise.
+ */
 #if defined(__aarch64__) || defined(__arm__)
   #include <arm_neon.h>
   #define HAVE_NEON_INTRINSICS 1
+  /* SVE headers are not universally available; only include if explicitly
+   * requested via -DHAVE_SVE_INTRINSICS. */
+  #if defined(HAVE_SVE_INTRINSICS)
+    #include <arm_sve.h>
+  #endif
 #elif defined(__x86_64__) || defined(__i386__)
-  #include <immintrin.h>
-  #define HAVE_SSE_INTRINSICS 1
+  /* Only enable SSE2 baseline by default — always available on x86_64. */
+  #define HAVE_SSE2_INTRINSICS 1
+  /* Higher intrinsics require explicit -march / -m flags.
+   * The user opts in via CFLAGS="-msse4.2 -mavx -mavx2 -mfma". */
+  #if defined(__SSE4_2__)
+    #include <immintrin.h>
+    #define HAVE_SSE42_INTRINSICS 1
+  #endif
+  #if defined(__AVX__) && defined(__SSE4_2__)
+    /* AVX is enabled in addition to SSE4.2 */
+    #define HAVE_AVX_INTRINSICS 1
+  #endif
+  #if defined(__AVX2__) && defined(__FMA__)
+    /* Full AVX2 + FMA — the usual "modern x86" target. */
+    #define HAVE_AVX2_FMA_INTRINSICS 1
+  #endif
+  #if defined(__AVX512F__)
+    #define HAVE_AVX512_INTRINSICS 1
+  #endif
 #endif
 
 #define NS_PER_SEC 1000000000ULL

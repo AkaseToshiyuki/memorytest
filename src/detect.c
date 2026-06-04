@@ -4,7 +4,8 @@
  * Split from monolithic common.c (2026-06-02).
  */
 #include "common.h"
-#include <stddef.h>
+#include "platform.h"
+#include "stddef.h"
 #include <stdarg.h>
 #include <string.h>
 #include <signal.h>
@@ -353,46 +354,24 @@ int detect_cache_sizes(void) {
 }
 
 static void prompt_cache_config_from_user(void) {
-    char input[256];
-
-    printf("\n");
-    printf("========================================\n");
-    printf("  Cache detection failed - Manual input required\n");
-    printf("========================================\n");
-    printf("Please enter your CPU cache configuration:\n");
-    printf("(Check /proc/cpuinfo or CPU specs if unsure)\n\n");
-
-    printf("L1 Data cache size (e.g., 32K, 64K): ");
-    fflush(stdout);
-    if (scanf("%255s", input) == 1) {
-        global_cache_config.l1d_size = parse_size(input);
-    } else {
-        printf("Invalid input, using default 32K\n");
-        global_cache_config.l1d_size = 32 * KB;
+    /* Delegate to the platform layer. The platform layer:
+     *   - on TTY: prompts with sensible defaults
+     *   - on non-TTY: returns defaults immediately (no blocking) */
+    fprintf(stderr, "\n[Cache] Some cache levels were not auto-detected.\n");
+    if (global_cache_config.l1d_size == 0) {
+        int kb = platform_prompt_int("  L1d cache size in KB", 32, 4, 1024);
+        global_cache_config.l1d_size = (size_t)kb * 1024;
     }
-
-    printf("L2 cache size (e.g., 256K, 512K, 1M): ");
-    fflush(stdout);
-    if (scanf("%255s", input) == 1) {
-        global_cache_config.l2_size = parse_size(input);
-    } else {
-        printf("Invalid input, using default 512K\n");
-        global_cache_config.l2_size = 512 * KB;
+    if (global_cache_config.l2_size == 0) {
+        int kb = platform_prompt_int("  L2 cache size in KB", 512, 64, 16384);
+        global_cache_config.l2_size = (size_t)kb * 1024;
     }
-
-    printf("L3 cache size (e.g., 1M, 4M, 8M, 0 for none): ");
-    fflush(stdout);
-    if (scanf("%255s", input) == 1) {
-        global_cache_config.l3_size = parse_size(input);
-    } else {
-        printf("Invalid input, using default 4M\n");
-        global_cache_config.l3_size = 4 * MB;
+    if (global_cache_config.l3_size == 0) {
+        int kb = platform_prompt_int("  L3 cache size in KB (0 if none)", 0, 0, 1024 * 1024);
+        global_cache_config.l3_size = (size_t)kb * 1024;
     }
-
     global_cache_config.l1i_size = global_cache_config.l1d_size;
     global_cache_config.detected = 1;
-
-    printf("\nConfiguration will be used for this run\n\n");
 }
 
 void initialize_cache_config(void) {
@@ -771,32 +750,9 @@ static int detect_cpu_freq_lscpu(void) {
 }
 
 static int prompt_cpu_freq_from_user(void) {
-    char input[64];
-
-    printf("\n");
-    printf("========================================\n");
-    printf("  CPU frequency detection failed\n");
-    printf("========================================\n");
-    printf("Please enter your CPU max frequency (in MHz):\n");
-    printf("(Check CPU specs or task manager)\n\n");
-    printf("CPU Frequency (MHz) [default: 3000]: ");
-    fflush(stdout);
-
-    if (fgets(input, sizeof(input), stdin) != NULL) {
-        /* Remove newline */
-        input[strcspn(input, "\n")] = 0;
-
-        /* If empty, use default 3000 */
-        if (strlen(input) == 0) {
-            return 3000;
-        }
-
-        int freq = atoi(input);
-        if (freq > 0 && freq <= 10000) {
-            return freq;
-        }
-    }
-    return 3000;  /* Default if invalid input */
+    /* Delegate to the platform layer (TTY prompt or non-TTY default). */
+    fprintf(stderr, "\n[CPU] All automatic frequency detection methods failed.\n");
+    return platform_prompt_int("  CPU frequency in MHz", 3000, 100, 10000);
 }
 
 static int detect_cpu_freq_pmu(void) {

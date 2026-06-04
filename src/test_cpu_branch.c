@@ -10,6 +10,7 @@
  */
 
 #include "common.h"
+#include "util.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -331,7 +332,7 @@ void run_cpu_branch_test(void) {
 }
 
 int main(int argc, char *argv[]) {
-    request_sudo_password();
+    init_platform_layer();
     initialize_cache_config();
     initialize_system_config();
     pmu_init_cache_counters();

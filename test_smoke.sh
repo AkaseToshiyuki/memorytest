@@ -15,10 +15,17 @@ BIN="$REPO_ROOT/bin"
 REPORTS="$REPO_ROOT/reports"
 PASS=0
 FAIL=0
-# Per-binary timeout. Most finish in <5s, but test_inter_core (24x24 CAS matrix)
-# takes ~75-90s on this 24-core ARM64 host; the include build+run overhead means
-# the lower bound is ~90s in practice.
-TIMEOUT_SEC=120
+# Per-binary timeout, scaled to the host's CPU count so big machines (e.g.
+# 96-core EPYC, 128-core Ampere) get enough wall time for the 24x24 CAS matrix
+# in test_inter_core. The base of 90s covers a 24-core ARM; we add 8s per
+# extra core pair (8 cores per pair of measurement threads).
+NCPU=$(nproc 2>/dev/null || echo 1)
+EXTRA=$(( (NCPU - 24) * 8 ))
+[ $EXTRA -lt 0 ] && EXTRA=0
+TIMEOUT_SEC=$(( 90 + EXTRA ))
+# Floor at 90s, cap at 600s.
+[ $TIMEOUT_SEC -lt 90 ] && TIMEOUT_SEC=90
+[ $TIMEOUT_SEC -gt 600 ] && TIMEOUT_SEC=600
 
 mkdir -p "$REPORTS"
 

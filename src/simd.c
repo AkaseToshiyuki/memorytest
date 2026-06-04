@@ -4,8 +4,7 @@
  * Split from monolithic common.c (2026-06-02).
  */
 #include "common.h"
-#include <stddef.h>
-#include <string.h>
+#include "platform.h"
 
 /* ========== SIMD/Vectorization Detection ========== */
 static SIMDInfo simd_info = {{0}, 0};
@@ -158,10 +157,8 @@ static void detect_simd_capabilities(void) {
 #endif
 }
 
-/* Get SIMD info - initializes on first call */
+/* Get SIMD info - delegates to the platform layer (which performs actual
+ * runtime detection). The platform layer owns the canonical SIMDInfo. */
 const SIMDInfo* get_simd_info(void) {
-    if (simd_info.simd_flags[0] == '\0') {
-        detect_simd_capabilities();
-    }
-    return &simd_info;
+    return platform_simd_detect();
 }
