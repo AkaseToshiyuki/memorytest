@@ -313,14 +313,25 @@ def _svg_line_chart(points: list, width: int = 600, height: int = 200,
 
 def _svg_bar_chart(points: list, width: int = 600, height: int = 200,
                     xlabel: str = "", ylabel: str = "", title: str = "",
-                    colors: list = None) -> str:
-    """Inline SVG bar chart for small categorical data (e.g. Read/Write/Copy)."""
+                    colors: list = None, zero_marker: bool = False) -> str:
+    """Inline SVG bar chart for small categorical data (e.g. Read/Write/Copy).
+
+    `points` is a list of (label, value) tuples. Values <= 0 are skipped
+    from the bar but the x-axis label is still drawn. If `zero_marker` is
+    True, zero/very-small values render as a short grey stub so the
+    reader can see "this bar exists but has no measurable height".
+    """
     if not points:
         return "<p>(no data)</p>"
+    # ymax from real (> 0) values; sub-1 values need extra precision
     ys = [p[1] for p in points if p[1] is not None and p[1] > 0]
     if not ys:
         return "<p>(no valid data points)</p>"
     ymax = max(ys) * 1.15
+    # Choose decimal places: 2 for sub-10, 1 for sub-100, 0 for >=100
+    if ymax < 10: yfmt = ".2f"
+    elif ymax < 100: yfmt = ".1f"
+    else: yfmt = ".0f"
     if colors is None: colors = ["steelblue", "coral", "green", "orange", "purple"]
     pad_l, pad_r, pad_t, pad_b = 60, 20, 30, 50
     plot_w = width - pad_l - pad_r
@@ -331,21 +342,32 @@ def _svg_bar_chart(points: list, width: int = 600, height: int = 200,
     bars = []
     x_labels = []
     for i, (label, v) in enumerate(points):
-        if v is None or v <= 0: continue
-        x = pad_l + (i + 0.5) * (plot_w / n) - bar_w / 2
+        cx = pad_l + (i + 0.5) * (plot_w / n)
+        # Always emit the x-axis label, even for zero bars
+        x_labels.append(f'<text x="{cx:.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" font-size="10" fill="#666">{html.escape(label)}</text>')
+        if v is None or v <= 0:
+            # Skip the bar entirely if no zero_marker; otherwise draw a stub
+            if zero_marker:
+                stub_h = 6   # 6px grey stub
+                x = cx - bar_w / 2
+                y = pad_t + plot_h - stub_h
+                bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{stub_h}" fill="#bbb"/>')
+                bars.append(f'<text x="{cx:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="10" fill="#999">0</text>')
+            continue
+        x = cx - bar_w / 2
         h = (v / ymax) * plot_h
         y = pad_t + plot_h - h
         c = colors[i % len(colors)]
         bars.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="{c}"/>')
-        bars.append(f'<text x="{x + bar_w/2:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="10" fill="#333">{v:.0f}</text>')
-        x_labels.append(f'<text x="{pad_l + (i + 0.5) * (plot_w / n):.1f}" y="{pad_t + plot_h + 18}" text-anchor="middle" font-size="10" fill="#666">{html.escape(label)}</text>')
-    # Y-axis gridlines + labels
+        # Data label: match y precision so 0.99 isn't displayed as "1"
+        bars.append(f'<text x="{cx:.1f}" y="{y - 3:.1f}" text-anchor="middle" font-size="10" fill="#333">{v:{yfmt}}</text>')
+    # Y-axis gridlines + labels (5 ticks: 0, 25%, 50%, 75%, 100% of ymax)
     y_ticks = [ymax * f for f in (0, 0.25, 0.5, 0.75, 1.0)]
     y_labels = []
     for t in y_ticks:
         y = pad_t + (1 - t / ymax) * plot_h
         y_labels.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{pad_l + plot_w}" y2="{y:.1f}" stroke="#eee" stroke-width="1"/>')
-        y_labels.append(f'<text x="{pad_l - 5}" y="{y + 3:.1f}" text-anchor="end" font-size="10" fill="#666">{t:.0f}</text>')
+        y_labels.append(f'<text x="{pad_l - 5}" y="{y + 3:.1f}" text-anchor="end" font-size="10" fill="#666">{t:{yfmt}}</text>')
     title_html = f'<text x="{width/2}" y="20" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">{html.escape(title)}</text>' if title else ""
     return f'''<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg" style="display:block;margin:10px 0">
   {title_html}
@@ -499,6 +521,82 @@ def _collect_bw_chart_data() -> list:
         if m:
             try: out.append((op, float(m.group(1))))
             except ValueError: pass
+    return out
+
+
+def _collect_branch_chart_data() -> list:
+    """Collect (pattern, ns_per_branch) points for the branch ns/bar chart.
+
+    Reads the canonical "Pattern | ns/branch" table from `cpu_branch_report.md`.
+    Patterns with ns/branch = 0.00 indicate the compiler statically proved
+    the branch condition is tautological; they are still emitted (with a
+    `*` suffix in the label) so the bar chart shows the lower bound.
+    """
+    p = REPORTS / "cpu_branch_report.md"
+    if not p.exists(): return []
+    text = p.read_text()
+    tbl = _find_data_table_after(text, "Pattern")
+    if not tbl: return []
+    headers, rows = tbl
+    pat_col = 0
+    ns_col = None
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if hl == "pattern": pat_col = i
+        if "ns/branch" in hl: ns_col = i
+    if ns_col is None: return []
+    out = []
+    for row in rows:
+        if pat_col >= len(row) or ns_col >= len(row): continue
+        try: v = float(row[ns_col].replace(",", ""))
+        except ValueError: continue
+        label = row[pat_col].strip()
+        # Keep zero values as 0 (zero_marker=True will render them as a stub)
+        out.append((label, v))
+    return out
+
+
+def _collect_branch_kpis() -> list:
+    """Compute KPI cards for the CPU Branch section.
+
+    Distinguishes patterns with real branches (ns > 0) from those the
+    compiler statically folded (ns == 0). Returns (label, value, unit).
+    """
+    p = REPORTS / "cpu_branch_report.md"
+    if not p.exists(): return []
+    text = p.read_text()
+    tbl = _find_data_table_after(text, "Pattern")
+    if not tbl: return []
+    headers, rows = tbl
+    pat_col, ns_col = 0, None
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if hl == "pattern": pat_col = i
+        if "ns/branch" in hl: ns_col = i
+    if ns_col is None: return []
+
+    real_ns, real_names, zero_names = [], [], []
+    for row in rows:
+        if pat_col >= len(row) or ns_col >= len(row): continue
+        try: v = float(row[ns_col].replace(",", ""))
+        except ValueError: continue
+        name = row[pat_col].strip()
+        if v <= 0:
+            zero_names.append(name)
+        else:
+            real_ns.append(v)
+            real_names.append(name)
+
+    out = []
+    if real_ns:
+        fastest = min(real_ns); slowest = max(real_ns)
+        avg = sum(real_ns) / len(real_ns)
+        out.append(("Fastest",       f"{fastest:.2f}", "ns/branch"))
+        out.append(("Slowest",       f"{slowest:.2f}", "ns/branch"))
+        out.append(("Real-branch avg", f"{avg:.2f}",   "ns/branch"))
+        out.append(("Real branches",  f"{len(real_ns)}", f"of {len(real_ns) + len(zero_names)}"))
+    else:
+        out.append(("Patterns measured", "0", "(all folded)"))
     return out
 
 
@@ -797,8 +895,23 @@ def build_html(score_dict: dict | None) -> str:
         parts.append('<p class="no-data">cpu_multi_core_report.md not found</p>')
     parts.append('</div>')
 
-    # --- CPU Branch (table only) ---
+    # --- CPU Branch (KPI cards + bar chart + table + interpretation) ---
     parts.append('<div class="card"><h2>CPU Branch</h2>')
+    # Header paragraph: what this test measures + caveat about compiler folding
+    parts.append(
+        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+        'Each row measures wall-clock cost per branch across distinct branch patterns: '
+        '<i>Predictable</i> (always/never taken) saturates the predictor, '
+        '<i>Unpredictable</i> (random 50%) is the worst case, '
+        '<i>Pattern</i> toggles test the pattern-history table, '
+        '<i>Adaptive</i> tests hysteresis recovery. '
+        'Rows with <code>0.00</code> ns/branch marked with <code>*</code> indicate '
+        'the compiler statically proved the condition tautological and emitted '
+        'no branch instruction (lower bound, not a predictor measurement). '
+        'The Mispred Rate column requires unrestricted <code>perf_event_open</code> '
+        '(N/A on this system — see <code>perf_event_paranoid</code> in Notes).'
+        '</p>'
+    )
     p = REPORTS / "cpu_branch_report.md"
     if p.exists():
         text = p.read_text()
@@ -808,8 +921,45 @@ def build_html(score_dict: dict | None) -> str:
         tbl = _find_data_table_after(text, "Pattern")
         if not tbl:
             tbl = _find_data_table_after(text, "Operation")
+
+        # KPI cards
+        kpis = _collect_branch_kpis()
+        if kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in kpis
+            )
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+
+        # Bar chart of ns/branch per pattern (zero_marker draws a grey
+        # stub for patterns the compiler folded, so they're visible).
+        branch_pts = _collect_branch_chart_data()
+        if branch_pts:
+            parts.append(_svg_bar_chart(branch_pts, width=720, height=220,
+                                        xlabel="Branch pattern",
+                                        ylabel="ns / branch",
+                                        title="Branch cost per pattern (lower = better; grey stub = no branch emitted)",
+                                        zero_marker=True))
+
+        # Data table (existing)
         if tbl:
             parts.append(_table_html(*tbl))
+
+        # Interpretation paragraph (auto-derived from the data)
+        if kpis and len(kpis) >= 3:
+            real_avg = float(kpis[2][1])
+            note = (
+                f'Average cost on patterns with real branches is <b>{real_avg:.2f} ns/branch</b>. '
+                f'On a {3000} MHz CPU, this is ~{real_avg * 3:.1f} cycles per branch. '
+            )
+            if real_avg < 1.0:
+                note += 'The predictor is performing well — most branches resolve in &lt;1 cycle on average.'
+            elif real_avg < 2.0:
+                note += 'Predictor performance is reasonable; some miss penalty is visible.'
+            else:
+                note += 'High miss penalty — consider whether the workload has data-dependent control flow.'
+            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
     else:
         parts.append('<p class="no-data">cpu_branch_report.md not found</p>')
     parts.append('</div>')
