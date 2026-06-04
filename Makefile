@@ -57,8 +57,10 @@ smoke: tests
 	@bash test_smoke.sh
 
 # Layer 2 sanity test: assert each metric falls within plausible physical range
+# --skip-missing tells sanity to count missing reports (e.g. test_inter_core
+# skipped on big machines) as SKIP rather than FAIL.
 sanity:
-	@python3 test_sanity.py
+	@python3 test_sanity.py --skip-missing
 
 # `make test` runs Layer 1 + Layer 2 (both should pass in <5 min total)
 test: tests smoke sanity

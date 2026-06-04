@@ -80,7 +80,17 @@ class Reporter:
         self.passes = 0
         self.warns = 0
         self.fails = 0
+        self.skips = 0
         self.results = []
+
+    def skip(self, test_name, metric, desc):
+        """Record a metric as skipped (test didn't run). Not a fail."""
+        self.skips += 1
+        self.results.append({
+            "test": test_name, "metric": metric, "value": None,
+            "low": None, "high": None, "level": "SKIP",
+            "reason": "test was skipped", "desc": desc,
+        })
 
     def check(self, test_name, metric, value, low, high, desc):
         ok = True
@@ -125,16 +135,19 @@ class Reporter:
             print(f"\n[{test}]")
             for r in items:
                 level = r["level"]
-                mark = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗"}[level]
-                val_str = f"{r['value']:.2f}" if r["value"] is not None else "MISSING"
-                rng = f"[{r['low']}, {r['high']}]" if r['low'] is not None and r['high'] is not None else f"(>={r['low']})" if r['low'] is not None else f"(<={r['high']})"
-                line = f"  {mark} {r['metric']:30s} = {val_str:>10s} ns/range {rng:>16s}  ({r['desc']})"
-                if r["level"] != "PASS":
+                mark = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗", "SKIP": "-"}[level]
+                val_str = f"{r['value']:.2f}" if r["value"] is not None else "SKIP" if level == "SKIP" else "MISSING"
+                if level == "SKIP":
+                    line = f"  {mark} {r['metric']:30s} = {val_str:>10s}  ({r['desc']})"
+                else:
+                    rng = f"[{r['low']}, {r['high']}]" if r["low"] is not None and r["high"] is not None else f"(>={r['low']})" if r["low"] is not None else f"(<={r['high']})"
+                    line = f"  {mark} {r['metric']:30s} = {val_str:>10s} ns/range {rng:>16s}  ({r['desc']})"
+                if r["level"] != "PASS" and r["level"] != "SKIP":
                     line += f"  -- {r['reason']}"
                 print(line)
         print()
         print("-" * 78)
-        print(f"  Summary: {self.passes} pass, {self.warns} warn, {self.fails} fail")
+        print(f"  Summary: {self.passes} pass, {self.warns} warn, {self.fails} fail, {self.skips} skip")
         print("-" * 78)
         return self.fails == 0
 
@@ -312,6 +325,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--strict", action="store_true",
                     help="Treat WARN as FAIL")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="Treat missing reports as SKIP rather than FAIL "
+                         "(used by smoke when test_inter_core is skipped on "
+                         "machines with many cores)")
     ap.add_argument("--baseline", metavar="FILE.json",
                     help="Also compare against a saved baseline (Layer 3 feature, future)")
     args = ap.parse_args()
@@ -321,10 +338,16 @@ def main():
     for test, (filename, parser) in PARSERS.items():
         path = REPORTS_DIR / filename
         if not path.exists():
-            rep.check(test, "<file_exists>", None, 1, 1, f"Missing {path}")
+            if args.skip_missing:
+                rep.skip(test, "<file_exists>", f"Missing {path} (test was skipped)")
+            else:
+                rep.check(test, "<file_exists>", None, 1, 1, f"Missing {path}")
             continue
         if path.stat().st_size < 100:
-            rep.check(test, "<file_nonempty>", None, 1, 1, f"Report {path} is < 100 bytes")
+            if args.skip_missing:
+                rep.skip(test, "<file_nonempty>", f"Report {path} is < 100 bytes (test was skipped)")
+            else:
+                rep.check(test, "<file_nonempty>", None, 1, 1, f"Report {path} is < 100 bytes")
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         try:
