@@ -19,7 +19,9 @@
 
 #define ITERATIONS 100000000
 #define WARMUP_ITERATIONS 1000000
-#define MAX_THREADS 64
+/* MAX_THREADS: per-stack-array limit. See test_memory_bandwidth.c for
+ * the rationale on the value 256. */
+#define MAX_THREADS 256
 #define MEM_TEST_SIZE (64 * 1024 * 1024)  /* 64MB for memory bandwidth test */
 
 /* ========== 线程参数 ========== */
@@ -225,6 +227,13 @@ void run_cpu_multi_core_test(void) {
 
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int max_threads = (int)num_cpus;
+    if (max_threads < 1) max_threads = 1;
+    if (max_threads > MAX_THREADS) {
+        fprintf(stderr, "[multi] %d cores detected, but MAX_THREADS=%d. "
+                        "Clamping to %d threads.\n",
+                max_threads, MAX_THREADS, MAX_THREADS);
+        max_threads = MAX_THREADS;
+    }
     int channels = get_memory_channels();
     int freq = get_cpu_freq_mhz();
 

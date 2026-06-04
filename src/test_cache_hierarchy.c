@@ -14,7 +14,9 @@
 #include <string.h>
 #include <pthread.h>
 
-#define MAX_THREADS 64
+/* MAX_THREADS: per-stack-array limit. See test_memory_bandwidth.c for
+ * the rationale on the value 256. */
+#define MAX_THREADS 256
 
 typedef struct {
     int thread_id;
@@ -567,6 +569,13 @@ void run_cache_hierarchy_test(void) {
 
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;
+    if (threads < 1) threads = 1;
+    if (threads > MAX_THREADS) {
+        fprintf(stderr, "[cache] %d cores detected, but MAX_THREADS=%d. "
+                        "Clamping to %d threads.\n",
+                threads, MAX_THREADS, MAX_THREADS);
+        threads = MAX_THREADS;
+    }
     int channels = get_memory_channels();
 
     /* Get detected cache sizes */

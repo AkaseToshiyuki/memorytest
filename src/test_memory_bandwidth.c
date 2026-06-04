@@ -13,7 +13,12 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
-#define MAX_THREADS 64
+/* MAX_THREADS: the per-stack-array limit for pthread_t, args, results.
+ * Chosen large enough to cover current and foreseeable server CPUs
+ * (256 cores covers Ampere Altra / EPYC 9004 / future Apple silicon).
+ * The actual number of threads used is clamped to this in main() to
+ * prevent stack buffer overflows on machines with more cores. */
+#define MAX_THREADS 256
 
 /* 线程参数 */
 typedef struct {
@@ -386,6 +391,13 @@ int main(int argc, char *argv[]) {
     size_t size = 256 * MB;
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;  /* Default: use all available cores */
+    if (threads < 1) threads = 1;
+    if (threads > MAX_THREADS) {
+        fprintf(stderr, "[mem] %d cores detected, but MAX_THREADS=%d. "
+                        "Clamping to %d threads (use -t N to override).\n",
+                threads, MAX_THREADS, MAX_THREADS);
+        threads = MAX_THREADS;
+    }
 
     /* 用户可以通过 -t 参数覆盖 */
 
