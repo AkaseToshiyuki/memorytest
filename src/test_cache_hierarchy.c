@@ -204,11 +204,11 @@ static double measure_latency(void *ptr, size_t size, int samples) {
                 memory_fence();
             }
 
-            uint64_t *next = start_ptr;
+            volatile uint64_t *next = (volatile uint64_t *)start_ptr;
             uint64_t start = rdtsc_ns();
 
             for (size_t i = 0; i < chain_len; i++) {
-                next = (uint64_t *)*next;   /* THE serial dependency chain */
+                next = (volatile uint64_t *)*next;   /* THE serial dependency chain */
             }
 
             compiler_barrier();
