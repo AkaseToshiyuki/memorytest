@@ -646,6 +646,7 @@ def _collect_intercore_kpis() -> list:
     # row "| 0 | - | 32.2 | 32.2 | ... |" etc. We want all data rows.
     import re
     matrix_rows = []
+    seen_indices = set()  # guard: stop at second table (latency then throughput)
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("|"): continue
@@ -653,11 +654,18 @@ def _collect_intercore_kpis() -> list:
         # Split off the leading row label, parse the rest as floats.
         parts = [c.strip() for c in line.strip("|").split("|")]
         if not parts: continue
-        try: int(parts[0])  # first col should be the row index
+        try: row_idx = int(parts[0])  # first col should be the row index
         except ValueError: continue
+        if row_idx in seen_indices:
+            # Duplicate row index → second table (throughput). Stop.
+            break
+        seen_indices.add(row_idx)
         row_vals = []
         for c in parts[1:]:
             if c in ("-", ""): row_vals.append(None); continue
+            # Handle "VALUE [P25-P75]" format by extracting the median
+            if "[" in c:
+                c = c.split("[")[0].strip()
             try: row_vals.append(float(c))
             except ValueError: row_vals.append(None)
         if row_vals: matrix_rows.append(row_vals)
