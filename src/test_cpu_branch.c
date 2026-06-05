@@ -113,25 +113,30 @@ static void test_increasing(void *arg) {
     (void)arg;
     uint64_t result = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
-        if (i < i + 1) {  /* 总是true，但地址不可预测 */
+        /* volatile prevents the compiler from folding i < i+1 to true */
+        volatile uint64_t a = i;
+        if (a < a + 1) {  /* always true, but invisible to the optimiser */
             result += i;
         }
     }
     g_result = result;
 }
 
-/* 测试8: 函数调用返回 (间接分支) */
+/* 测试8: 间接分支 (computed goto) */
 static void test_indirect(void *arg) {
     (void)arg;
-    static void *targets[] = {&&l1, &&l2, &&l3, &&l4, &&l1, &&l2, &&l3, &&l4};
+    static void *targets[] = {&&l1, &&l2, &&l3, &&l4};
     uint64_t result = 0;
-    int idx = 0;
 
-    goto l1;
-l1: result += 1; idx = (idx + 1) & 3; goto *targets[idx];
-l2: result += 2; idx = (idx + 1) & 3; goto *targets[idx];
-l3: result += 3; idx = (idx + 1) & 3; goto *targets[idx];
-l4: result += 4; idx = (idx + 1) & 3; goto *targets[idx];
+    for (uint64_t i = 0; i < ITERATIONS; i++) {
+        int idx = i & 3;
+        goto *targets[idx];
+    l1: result += 1; goto next;
+    l2: result += 2; goto next;
+    l3: result += 3; goto next;
+    l4: result += 4; goto next;
+    next:;
+    }
 
     g_result = result;
     (void)arg;
@@ -198,19 +203,23 @@ void run_cpu_branch_test(void) {
         /* 再次预热 */
         tests[i].func(NULL);
 
-        /* Try PMU measurement */
+        /* PMU + wall-clock in a single run */
         int use_pmu = 0;
         memset(&pr, 0, sizeof(pr));
+        uint64_t start, end;
         if (pmu_available) {
+            start = get_time_ns();
             if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                end = get_time_ns();
                 use_pmu = 1;
                 tests[i].use_pmu = 1;
             }
         }
-
-        uint64_t start = get_time_ns();
-        tests[i].func(NULL);
-        uint64_t end = get_time_ns();
+        if (!use_pmu) {
+            start = get_time_ns();
+            tests[i].func(NULL);
+            end = get_time_ns();
+        }
 
         uint64_t elapsed = end - start;
         double time_ms = (double)elapsed / 1000000.0;
@@ -269,15 +278,19 @@ void run_cpu_branch_test(void) {
         for (int i = 0; i < num_tests; i++) {
             PerfResult pr = {0};
             int use_pmu = 0;
+            uint64_t start, end;
             if (pmu_available) {
+                start = get_time_ns();
                 if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                    end = get_time_ns();
                     use_pmu = 1;
                 }
             }
-
-            uint64_t start = get_time_ns();
-            tests[i].func(NULL);
-            uint64_t end = get_time_ns();
+            if (!use_pmu) {
+                start = get_time_ns();
+                tests[i].func(NULL);
+                end = get_time_ns();
+            }
 
             uint64_t elapsed = end - start;
             double time_ms = (double)elapsed / 1000000.0;

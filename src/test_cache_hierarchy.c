@@ -143,58 +143,6 @@ static double measure_latency(void *ptr, size_t size, int samples) {
     return result;
 }
 
-/* ========== 指针追逐延迟测量 - 真正随机的内存访问 ========== */
-static double measure_pointer_chase_latency(void *ptr, size_t size, int iterations) {
-    volatile uint64_t *p = (volatile uint64_t *)ptr;
-    size_t words = size / sizeof(uint64_t);
-
-    if (words < 16) return 0;
-
-    /* 构建链表: 每个元素指向另一个随机位置 */
-    size_t *indices = malloc(words * sizeof(size_t));
-    if (!indices) return 0;
-
-    /* 用确定性的方式构建链表，避免随机数生成开销 */
-    for (size_t i = 0; i < words; i++) {
-        /* 质数stride确保遍历覆盖整个数组 */
-        indices[i] = (i * 17 + 1) % words;
-    }
-
-    /* 预热: 沿着链表走一遍，确保所有数据从内存加载到缓存 */
-    size_t idx = 0;
-    for (size_t i = 0; i < words; i++) {
-        idx = indices[idx];
-        volatile uint64_t val = p[idx];  /* 真正读取 */
-        (void)val;
-    }
-
-    /* 测量: 多次指针追逐 */
-    const int INNER_LOOP = 64;
-    double total_lat = 0;
-    int valid_samples = 0;
-
-    for (int iter = 0; iter < iterations; iter++) {
-        idx = iter % words;  /* 从不同起点开始 */
-
-        uint64_t start = rdtsc_ns();
-        for (int i = 0; i < INNER_LOOP; i++) {
-            idx = indices[idx];
-            volatile uint64_t val = p[idx];  /* 真正读取 */
-            (void)val;
-        }
-        uint64_t end = get_time_ns();
-
-        double lat = (double)(end - start) / INNER_LOOP;
-        if (lat > 0.1 && lat < 10000.0) {
-            total_lat += lat;
-            valid_samples++;
-        }
-    }
-
-    free(indices);
-    return valid_samples > 0 ? total_lat / valid_samples : 0;
-}
-
 /* ========== 单线程写延迟测量 - 批量方式 ========== */
 static double measure_write_latency(void *ptr, size_t size, int samples) {
     volatile uint64_t *p = (volatile uint64_t *)ptr;
@@ -901,6 +849,9 @@ void run_cache_hierarchy_test(void) {
     printf("%-14s | %-14s | %-14s | %-14s\n",
            "--------------", "--------------", "--------------", "--------------");
 
+    /* Store results to reuse in report (avoid double measurement) */
+    double saved_read_bw[5] = {0}, saved_write_bw[5] = {0}, saved_copy_bw[5] = {0};
+
     for (int i = 0; i < num_bw; i++) {
         size_t size = bw_sizes[i];
         void *ptr = malloc(size);
@@ -916,6 +867,10 @@ void run_cache_hierarchy_test(void) {
         double read_bw = multi_bandwidth(ptr, size, threads, 100, multi_seq_read);
         double write_bw = multi_bandwidth(ptr, size, threads, 100, multi_seq_write);
         double copy_bw = multi_copy_bandwidth(ptr, ptr2, size, threads, 100);
+
+        saved_read_bw[i] = read_bw;
+        saved_write_bw[i] = write_bw;
+        saved_copy_bw[i] = copy_bw;
 
         printf("%-14s | %-14.2f | %-14.2f | %-14.2f\n",
                bw_names[i], read_bw, write_bw, copy_bw);
@@ -978,25 +933,8 @@ void run_cache_hierarchy_test(void) {
         report_write(report, "|------|-------------|---------------|------------|\n");
 
         for (int i = 0; i < num_bw; i++) {
-            size_t size = bw_sizes[i];
-            void *ptr = malloc(size);
-            void *ptr2 = malloc(size);
-            if (!ptr || !ptr2) {
-                free(ptr);
-                free(ptr2);
-                continue;
-            }
-            memset(ptr, 0, size);
-            memset(ptr2, 0, size);
-
-            double read_bw = multi_bandwidth(ptr, size, threads, 100, multi_seq_read);
-            double write_bw = multi_bandwidth(ptr, size, threads, 100, multi_seq_write);
-            double copy_bw = multi_copy_bandwidth(ptr, ptr2, size, threads, 100);
-
             report_write(report, "| %s | %.2f | %.2f | %.2f |\n",
-                        bw_names[i], read_bw, write_bw, copy_bw);
-            free(ptr);
-            free(ptr2);
+                        bw_names[i], saved_read_bw[i], saved_write_bw[i], saved_copy_bw[i]);
         }
 
         report_section(report, "Notes");

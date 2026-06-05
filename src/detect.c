@@ -952,37 +952,30 @@ static int detect_cpu_freq_bogomips(void) {
 }
 
 static int detect_cpu_freq_pmu(void) {
-    /* ARM PMU-based frequency detection using perf_event_open syscall */
-    /* Measures actual CPU frequency by counting cycles over a time interval */
+    /* CPU frequency detection via perf_event_open PMU.
+     * Measures actual CPU cycles over a time interval.
+     * Uses shared sys_perf_event_open() from pmu.c (cross-platform). */
     static int fd = -1;
 
     if (fd < 0) {
-        /* perf_event_open syscall number: 241 on ARM64 */
-        struct perf_event_attr {
-            uint32_t type;
-            uint32_t size;
-            uint64_t config;
-            uint64_t disabled;
-            uint64_t exclude_kernel;
-            uint64_t exclude_hv;
-        } attr = {
-            .type = 0,  /* PERF_TYPE_HARDWARE */
-            .size = sizeof(struct perf_event_attr),
-            .config = 0,  /* PERF_COUNT_HW_CPU_CYCLES */
-            .disabled = 0,
-            .exclude_kernel = 0,
-            .exclude_hv = 1
-        };
+        struct perf_event_attr attr;
+        memset(&attr, 0, sizeof(attr));
+        attr.size = sizeof(attr);
+        attr.type = PERF_TYPE_HARDWARE;
+        attr.config = PERF_COUNT_HW_CPU_CYCLES;
+        attr.disabled = 0;
+        attr.exclude_kernel = 0;
+        attr.exclude_hv = 1;
 
-        fd = syscall(241, &attr, 0, -1, -1, 0);  /* __NR_perf_event_open */
+        fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
         if (fd < 0) {
             return 0;
         }
     }
 
     /* Reset and enable counter */
-    ioctl(fd, 0, 0);  /* PERF_EVENT_IOC_RESET */
-    ioctl(fd, 1, 0);  /* PERF_EVENT_IOC_ENABLE */
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 
     /* Measure cycles over time interval */
     struct timespec ts_start, ts_end;
@@ -1335,6 +1328,15 @@ static int detect_dram_speed_lscpu(int *out_mt_s, char *out_std, size_t std_len)
             else if (strstr(line, "DDR4")) is_ddr4 = 1;
             else if (strstr(line, "DDR3")) is_ddr3 = 1;
             else if (strstr(line, "DDR")) is_ddr = 1;
+        }
+        /* Parse MHz from lines like "CPU max MHz: 2400.0000" */
+        if (mhz == 0 && strstr(line, "MHz")) {
+            const char *colon = strchr(line, ':');
+            if (colon) {
+                double val;
+                if (sscanf(colon + 1, "%lf", &val) == 1 && val >= 100.0 && val <= 10000.0)
+                    mhz = (int)(val + 0.5);
+            }
         }
     }
     pclose(fp);

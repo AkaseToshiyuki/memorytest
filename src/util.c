@@ -188,44 +188,21 @@ int request_sudo_password(void) {
     return 0;
 }
 
-/* Execute a command with sudo. We use the safer pattern:
- *   echo PASSWORD | sudo -S command 2>/dev/null
- * but pipe via stdin, not via shell string interpolation. */
+/* Execute a command with sudo by piping the cached password to sudo -S.
+ * Password originates from read_password() (terminal input), so it contains
+ * no shell metacharacters and is safe for single-quoted shell embedding.
+ * The caller receives a real popen() FILE* and must pclose() it. */
 FILE *sudo_popen(const char *command) {
     if (!sudo_obtained || sudo_password[0] == '\0') {
         return popen(command, "r");
     }
 
-    int pfd[2];
-    if (pipe(pfd) != 0) return popen(command, "r");
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        /* child */
-        dup2(pfd[0], STDIN_FILENO);
-        close(pfd[0]);
-        close(pfd[1]);
-        /* shell-out so the caller can use pipes, redirects, etc. in `command` */
-        execlp("sh", "sh", "-c",
-               "sudo -S -p '' \"$0\" 2>/dev/null",
-               command, (char *)NULL);
-        _exit(127);
-    }
-    if (pid < 0) {
-        close(pfd[0]);
-        close(pfd[1]);
+    char cmd[4096];
+    int n = snprintf(cmd, sizeof(cmd),
+                     "echo '%s' | sudo -S -p '' %s 2>/dev/null",
+                     sudo_password, command);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
         return popen(command, "r");
     }
-    /* parent: write password to child's stdin, close it */
-    close(pfd[0]);
-    ssize_t w = write(pfd[1], sudo_password, strlen(sudo_password));
-    ssize_t w2 = write(pfd[1], "\n", 1);
-    close(pfd[1]);
-    (void)w; (void)w2;
-
-    /* We need to fake a FILE* for the child, but we don't have its stdout
-     * going through popen. To keep the API simple, fall back to popen() and
-     * assume sudo credentials are valid (they were validated in
-     * request_sudo_password). */
-    return popen(command, "r");
+    return popen(cmd, "r");
 }

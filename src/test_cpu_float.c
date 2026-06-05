@@ -442,19 +442,23 @@ void run_cpu_float_test(void) {
         /* 再次预热 */
         tests[i].func(NULL);
 
-        /* Try PMU measurement */
+        /* PMU + wall-clock in a single run */
         int use_pmu = 0;
         memset(&pr, 0, sizeof(pr));
+        uint64_t start, end;
         if (pmu_available) {
+            start = get_time_ns();
             if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                end = get_time_ns();
                 use_pmu = 1;
                 tests[i].has_pmu = 1;
             }
         }
-
-        uint64_t start = get_time_ns();
-        tests[i].func(NULL);
-        uint64_t end = get_time_ns();
+        if (!use_pmu) {
+            start = get_time_ns();
+            tests[i].func(NULL);
+            end = get_time_ns();
+        }
 
         uint64_t elapsed = end - start;
         /* SIMD tests process 2 doubles per loop iteration, so multiply by 2 */
@@ -496,15 +500,19 @@ void run_cpu_float_test(void) {
         for (int i = 0; i < num_tests; i++) {
             PerfResult pr = {0};
             int use_pmu = 0;
+            uint64_t start, end;
             if (pmu_available) {
+                start = get_time_ns();
                 if (perf_measure(tests[i].func, NULL, &pr) == 0 && pr.instructions > 0) {
+                    end = get_time_ns();
                     use_pmu = 1;
                 }
             }
-
-            uint64_t start = get_time_ns();
-            tests[i].func(NULL);
-            uint64_t end = get_time_ns();
+            if (!use_pmu) {
+                start = get_time_ns();
+                tests[i].func(NULL);
+                end = get_time_ns();
+            }
 
             uint64_t elapsed = end - start;
             double time_ms = (double)elapsed / 1000000.0;

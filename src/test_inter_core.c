@@ -533,8 +533,26 @@ void run_inter_core_latency_test(void) {
      * Time the dispatch window to compute Mops/s. Total successful CAS
      * across both workers = 2 × g_bw_iterations (each worker does
      * g_bw_iterations successful CAS on the peer's flag; the peer's
-     * spin on the now-zero flag doesn't count because it failed CAS). */
-    printf("=== CAS Throughput (Mops/s) ===\n");
+     * spin on the now-zero flag doesn't count because it failed CAS).
+     *
+     * Calibrate g_bw_iterations on a single pair first so all pairs
+     * use the same iteration count — avoids inconsistent scaling. */
+    {
+        int bw_cap = (n > 64) ? 200000 : 1000000;
+        int cal_pair_i = 0, cal_pair_j = (n > 1) ? 1 : 0;
+        while (g_bw_iterations < bw_cap) {
+            uint64_t t0 = get_time_ns();
+            dispatch_pair(cal_pair_i, cal_pair_j, WORKER_BUSY_BANDWIDTH);
+            uint64_t t1 = get_time_ns();
+            if ((t1 - t0) >= 50000000UL) break;
+            g_bw_iterations *= 2;
+            fprintf(stderr, "[inter_core] BW auto-scale → %d iters "
+                    "(cal pair %d→%d took %.1fms)\n",
+                    g_bw_iterations, cal_pair_i, cal_pair_j, (t1 - t0) / 1e6);
+        }
+    }
+    printf("=== CAS Throughput (Mops/s) [%d iterations per pair] ===\n",
+           g_bw_iterations);
     printf("Measuring %d x %d = %d core pairs (single pass)...\n\n", n, n, n*n);
 
     for (int i = 0; i < n; i++) {
@@ -543,23 +561,9 @@ void run_inter_core_latency_test(void) {
             if (i == j) {
                 printf("%5s", "-");
             } else {
-                /* Time the dispatch_pair. dispatch_pair itself initializes
-                 * flag[i]=flag[j]=1 (bandwidth mode) and signals both
-                 * workers. We sandwich get_time_ns() around it. */
                 uint64_t t0 = get_time_ns();
                 dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
                 uint64_t t1 = get_time_ns();
-                /* Adaptive scaling: if < 50ms, double iters for remaining
-                 * pairs so they hit a stable measurement window. On large
-                 * machines (nproc>64) cap lower to keep pair duration
-                 * bounded (cross-socket CAS is much slower). */
-                int bw_cap = (n > 64) ? 200000 : 1000000;
-                if ((t1 - t0) < 50000000UL && g_bw_iterations < bw_cap) {
-                    g_bw_iterations *= 2;
-                    fprintf(stderr, "[inter_core] BW auto-scale → %d iters "
-                            "(pair %d→%d took %.1fms)\n",
-                            g_bw_iterations, i, j, (t1 - t0) / 1e6);
-                }
                 double dur_s = (double)(t1 - t0) / 1e9;
                 double mops = (double)(g_bw_iterations * 2) / dur_s / 1e6;
                 M->bw_mops[i*n+j] = mops;

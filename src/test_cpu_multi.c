@@ -332,8 +332,15 @@ void run_cpu_multi_core_test(void) {
     if (mem_buffer) {
         memset(mem_buffer, 1, MEM_TEST_SIZE * 2);
 
-        int mem_thread_counts[] = {1, 2, 4, 8, 16, max_threads};
-        int num_mem_thread_counts = sizeof(mem_thread_counts) / sizeof(mem_thread_counts[0]);
+        int mem_thread_counts[6];
+        int num_mem_thread_counts = 0;
+        int base_mem_counts[] = {1, 2, 4, 8, 16};
+        for (int b = 0; b < 5; b++) {
+            if (base_mem_counts[b] <= max_threads)
+                mem_thread_counts[num_mem_thread_counts++] = base_mem_counts[b];
+        }
+        if (max_threads > 16)
+            mem_thread_counts[num_mem_thread_counts++] = max_threads;
 
         /* 预热 */
         run_mem_bw_benchmark(1, mem_buffer);
@@ -348,12 +355,14 @@ void run_cpu_multi_core_test(void) {
             double bytes_per_sec = (MEM_TEST_SIZE * threads) / (time_ms / 1000.0);
             double bw_gbs = bytes_per_sec / (1024.0 * 1024.0 * 1024.0);
 
-            double saturation = (bw_gbs / theoretical_bw) * 100.0;
+            double saturation = (theoretical_bw > 0.0)
+                ? (bw_gbs / theoretical_bw) * 100.0 : 0.0;
             if (saturation > 100.0) saturation = 100.0;
+            double efficiency = (theoretical_bw > 0.0)
+                ? (bw_gbs / theoretical_bw / threads) * 100.0 : 0.0;
 
             printf("%-10d | %-12.2f | %-12.1f | %-15.1f%% | %-12.1f%%\n",
-                   threads, bw_gbs, theoretical_bw, saturation,
-                   (bw_gbs / theoretical_bw / threads) * 100.0);
+                   threads, bw_gbs, theoretical_bw, saturation, efficiency);
         }
 
         free(mem_buffer);

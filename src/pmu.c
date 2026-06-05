@@ -49,7 +49,7 @@ static PerfCounters perf_counters = {-1, -1, -1, -1, -1, -1};
 static int perf_counters_initialized = 0;
 
 /* ========== Cross-platform perf_event_open syscall ========== */
-static long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags) {
+long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid, int cpu, int group_fd, unsigned long flags) {
 #if defined(__x86_64__)
     return syscall(298, hw_event, pid, cpu, group_fd, flags);
 #elif defined(__aarch64__)

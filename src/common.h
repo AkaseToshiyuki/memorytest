@@ -229,6 +229,10 @@ void perf_print_result(const PerfResult *r, int show_pmu);
 
 /* PMU-based cache latency measurement (lives in pmu.c, used by latency.c) */
 uint64_t pmu_measure_cache_latency(void *ptr, int level);
+/* Cross-platform perf_event_open syscall wrapper (lives in pmu.c) */
+long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
+                         int cpu, int group_fd, unsigned long flags);
+
 /* PMU helper functions (lives in pmu.c, used by pmu_measure_cache_latency) */
 void pmu_reset_counters(void);
 void pmu_disable_counters(void);

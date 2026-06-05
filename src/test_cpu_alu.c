@@ -239,21 +239,24 @@ void run_cpu_alu_test(void) {
         /* 再次预热 */
         tests[i].func(arg);
 
-        /* Try PMU measurement first */
+        /* PMU + wall-clock in a single run */
         PerfResult pr = {0};
         int use_pmu = 0;
+        uint64_t start, end;
 
         if (pmu_available) {
+            start = get_time_ns();
             if (perf_measure(tests[i].func, arg, &pr) == 0 && pr.instructions > 0) {
+                end = get_time_ns();
                 use_pmu = 1;
                 tests[i].has_pmu = 1;
             }
         }
-
-        /* Timing measurement */
-        uint64_t start = get_time_ns();
-        tests[i].func(arg);
-        uint64_t end = get_time_ns();
+        if (!use_pmu) {
+            start = get_time_ns();
+            tests[i].func(arg);
+            end = get_time_ns();
+        }
 
         uint64_t elapsed = end - start;
         double time_ms = (double)elapsed / 1000000.0;
@@ -310,15 +313,19 @@ void run_cpu_alu_test(void) {
 
             PerfResult pr = {0};
             int use_pmu = 0;
+            uint64_t start, end;
             if (pmu_available) {
+                start = get_time_ns();
                 if (perf_measure(tests[i].func, arg, &pr) == 0 && pr.instructions > 0) {
+                    end = get_time_ns();
                     use_pmu = 1;
                 }
             }
-
-            uint64_t start = get_time_ns();
-            tests[i].func(arg);
-            uint64_t end = get_time_ns();
+            if (!use_pmu) {
+                start = get_time_ns();
+                tests[i].func(arg);
+                end = get_time_ns();
+            }
 
             uint64_t elapsed = end - start;
             double time_ms = (double)elapsed / 1000000.0;
