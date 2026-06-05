@@ -67,33 +67,30 @@ static double measure_latency(void *ptr, size_t size, int samples) {
     double *latencies = malloc(num_batches * sizeof(double));
     if (!latencies) return 0;
 
-    /* 深度预热 - 确保所有数据在缓存中 */
-    for (size_t i = 0; i < words; i += 64) {
-        volatile uint64_t val = p[i];
-        (void)val;
-    }
-    /* 再预热一次 */
-    for (size_t i = 0; i < words; i += 64) {
-        volatile uint64_t val = p[i];
-        (void)val;
+    /* Prefetch only when the working set fits within total on-chip cache.
+     * For DRAM-sized buffers, prefetch chains hide real memory latency
+     * (each access hits L2 from the previous prefetch). */
+    int working_set_kb = (int)(size / 1024);
+    size_t total_cache_kb = (global_cache_config.l1d_size
+                           + global_cache_config.l2_size
+                           + global_cache_config.l3_total_size) / 1024;
+    int use_prefetch = (working_set_kb > 0 && working_set_kb <= (int)total_cache_kb);
+
+    /* Pre-warm: only for cache-fitting buffers.  For DRAM buffers,
+     * pre-warming fills L3 with a tail chunk and artificially lowers
+     * measured latency via L3 hits. */
+    if (use_prefetch) {
+        for (size_t i = 0; i < words; i += 64) {
+            volatile uint64_t val = p[i];
+            (void)val;
+        }
+        for (size_t i = 0; i < words; i += 64) {
+            volatile uint64_t val = p[i];
+            (void)val;
+        }
     }
 
     int count = 0;
-
-    /* Batch measurement - uses rdtsc_ns (lower overhead than get_time_ns).
-     *
-     * Prefetch logic: only prefetch when the working set exceeds L1, otherwise
-     * HW prefetch will pull the entire working set into L1 and we'd measure
-     * L1 hits even for "RAM-sized" buffers (observed 0.1 ns instead of 50-100 ns).
-     * For L1-sized tests (<= 32KB on most CPUs), skip prefetch and let the
-     * natural L1 hit latency show. */
-    int working_set_kb = (int)(size / 1024);
-    /* Prefetch only when buffer EXCEEDS detected L1D, not a hardcoded 64KB.
-     * When buffer is < L1D, skip prefetch so we measure real L1 hit latency
-     * (prefetching would mask misses for L1-resident buffers, especially on
-     * machines with smaller L1D like 32KB Zen2/Zen3). */
-    size_t l1_kb = global_cache_config.l1d_size / 1024;
-    int use_prefetch = (l1_kb > 0 && working_set_kb > (int)l1_kb);
 
     for (int b = 0; b < num_batches && count < num_batches; b++) {
         /* Pseudo-random access - LCG to avoid stride patterns that HW prefetches */
