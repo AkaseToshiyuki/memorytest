@@ -32,13 +32,29 @@ static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
     if (words < 8) words = 8;
 
     int working_set_kb = (int)(size / 1024);
-    size_t l1_kb = global_cache_config.l1d_size / 1024;
-    int use_prefetch = (l1_kb > 0 && working_set_kb > (int)l1_kb);
 
-    /* Pre-warm: access all words to ensure in cache */
-    for (size_t i = 0; i < words; i++) {
-        volatile uint64_t val = p[i];
-        (void)val;
+    /* Total on-chip cache: L1D + L2 + total L3 (all CCDs).  Prefetching
+     * only helps when the working set fits within the aggregate cache; for
+     * DRAM-sized buffers the prefetch chain hides the real memory latency
+     * (every access after the first hits L2 from the previous prefetch,
+     * averaging ~6ns instead of ~80ns). */
+    size_t total_cache_kb = (global_cache_config.l1d_size
+                           + global_cache_config.l2_size
+                           + global_cache_config.l3_total_size) / 1024;
+
+    /* Prefetch only when the working set fits entirely within on-chip cache.
+     * For DRAM-sized buffers (> total cache) we must NOT prefetch — we
+     * need uncached misses to measure real DRAM latency. */
+    int use_prefetch = (working_set_kb > 0 && working_set_kb <= (int)total_cache_kb);
+
+    /* Pre-warm: only for cache-fitting buffers.  For DRAM-sized buffers,
+     * pre-warming would fill L3 with a tail chunk and artificially lower
+     * the measured latency via L3 hits. */
+    if (use_prefetch) {
+        for (size_t i = 0; i < words; i++) {
+            volatile uint64_t val = p[i];
+            (void)val;
+        }
     }
 
     /* Measurement array - use median of multiple measurements */
