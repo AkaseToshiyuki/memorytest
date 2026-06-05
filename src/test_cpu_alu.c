@@ -18,7 +18,6 @@
 
 /* ========== Thread-safe result storage ========== */
 static volatile uint64_t g_result = 0;
-static volatile uint64_t g_counter = 0;
 
 /* ========== 跨平台整数运算测试 ==========
  *
@@ -78,7 +77,6 @@ static void test_div(void *arg) {
         quotient = quotient / divisor + 1;
     }
     g_result = quotient;
-    (void)g_counter;
 }
 
 /* Bitwise AND: real AND. Result is bounded by the smallest set bit in any
@@ -367,8 +365,6 @@ void run_cpu_alu_test(void) {
 
 int main(int argc, char *argv[]) {
     init_platform_layer();
-    initialize_cache_config();
-    initialize_system_config();
     pmu_init_cache_counters();
     print_system_info();
     run_cpu_alu_test();

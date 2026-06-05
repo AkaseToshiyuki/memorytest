@@ -48,6 +48,7 @@ static inline void clobber(volatile void *p) {
 static int compare_double(const void *a, const void *b) {
     double va = *(const double *)a;
     double vb = *(const double *)b;
+    if (va != va) return (vb != vb) ? 0 : 1;
     if (va < vb) return -1;
     if (va > vb) return 1;
     return 0;
@@ -380,13 +381,6 @@ typedef struct {
 static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
                                      size_t l1_size, size_t l2_size, size_t l3_size,
                                      int threads) {
-    /* Helper to add result (legacy — no longer used by the new adaptive
-     * scan below, kept for backward compat with any callers). */
-    #define ADD_RESULT(sz, nm, level, rd, wr, bw_val, anal) do { \
-        (void)(sz); (void)(nm); (void)(level); (void)(rd); \
-        (void)(wr); (void)(bw_val); (void)(anal); \
-    } while(0)
-
     /* ============================================================
      * Cache-prior adaptive scan. Uses sysfs-detected L1/L2/L3 as priors
      * and places 15 log-spaced points in [size*0.5, size*2] around each
@@ -958,8 +952,6 @@ void run_cache_hierarchy_test(void) {
 
 int main(int argc, char *argv[]) {
     init_platform_layer();
-    initialize_cache_config();
-    initialize_system_config();
     pmu_init_cache_counters();
     print_system_info();
     run_cache_hierarchy_test();

@@ -346,8 +346,6 @@ void run_cpu_branch_test(void) {
 
 int main(int argc, char *argv[]) {
     init_platform_layer();
-    initialize_cache_config();
-    initialize_system_config();
     pmu_init_cache_counters();
     print_system_info();
     run_cpu_branch_test();

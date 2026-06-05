@@ -32,7 +32,8 @@ static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
     if (words < 8) words = 8;
 
     int working_set_kb = (int)(size / 1024);
-    int use_prefetch = (working_set_kb > 64);  /* L1D = 64KB on this host */
+    size_t l1_kb = global_cache_config.l1d_size / 1024;
+    int use_prefetch = (l1_kb > 0 && working_set_kb > (int)l1_kb);
 
     /* Pre-warm: access all words to ensure in cache */
     for (size_t i = 0; i < words; i++) {

@@ -757,8 +757,6 @@ int main(int argc, char *argv[]) {
     }
 
     init_platform_layer();
-    initialize_cache_config();
-    initialize_system_config();
     pmu_init_cache_counters();
 
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
