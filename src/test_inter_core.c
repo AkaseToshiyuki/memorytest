@@ -550,9 +550,11 @@ void run_inter_core_latency_test(void) {
                 dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
                 uint64_t t1 = get_time_ns();
                 /* Adaptive scaling: if < 50ms, double iters for remaining
-                 * pairs so they hit a stable measurement window. Cap at
-                 * 10× default to avoid runaway on tiny clusters. */
-                if ((t1 - t0) < 50000000UL && g_bw_iterations < 1000000) {
+                 * pairs so they hit a stable measurement window. On large
+                 * machines (nproc>64) cap lower to keep pair duration
+                 * bounded (cross-socket CAS is much slower). */
+                int bw_cap = (n > 64) ? 200000 : 1000000;
+                if ((t1 - t0) < 50000000UL && g_bw_iterations < bw_cap) {
                     g_bw_iterations *= 2;
                     fprintf(stderr, "[inter_core] BW auto-scale → %d iters "
                             "(pair %d→%d took %.1fms)\n",

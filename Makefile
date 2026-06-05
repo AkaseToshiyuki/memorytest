@@ -82,8 +82,9 @@ interactive-sudo: tests
 sanity:
 	@python3 test_sanity.py --skip-missing
 
-# `make test` runs Layer 1 + Layer 2 (both should pass in <5 min total)
-test: tests smoke sanity
+# `make test` runs all 3 layers: smoke (binaries run) → sanity (physical range) → regression (history baseline)
+# This is the ONLY recommended test target. Individual layers exist for debugging.
+test: tests smoke sanity regression
 
 # Layer 3 regression: record current metrics, compare to median of last 3 runs
 # Exits 1 if any metric deviates >50% from baseline.
@@ -270,11 +271,15 @@ help:
 	@echo "  distclean     - Remove all generated files"
 	@echo "  release       - Create release package (uses opt flags)"
 	@echo ""
-	@echo "Test layers:"
+	@echo "Test (all 3 layers, mandatory):"
+	@echo "  test          - smoke + sanity + regression (full suite)"
+	@echo ""
+	@echo "Individual layers (for debugging only; prefer 'make test'):"
 	@echo "  smoke         - Layer 1: run 7 binaries, verify reports produced"
 	@echo "  sanity        - Layer 2: assert each metric within plausible range"
-	@echo "  test          - smoke + sanity"
 	@echo "  regression    - Layer 3: compare to history.jsonl baseline"
+	@echo ""
+	@echo "Post-test:"
 	@echo "  report        - Generate HTML report from markdown sources"
 	@echo "  score         - Print score summary only"
 	@echo "  lint          - Static checks (C -Werror, py_compile, bash -n)"
