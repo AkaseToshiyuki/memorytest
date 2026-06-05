@@ -168,7 +168,11 @@ void report_write_system_info(ReportContext *ctx) {
             } else {
                 report_write(ctx, "| L3 Cache | %zu KB |\n", global_cache_config.l3_size / KB);
             }
-            report_write(ctx, "| Memory Channels | %d |\n", global_system_config.memory_channels);
+            if (global_system_config.memory_channels > 0) {
+                report_write(ctx, "| Memory Channels | %d |\n", global_system_config.memory_channels);
+            } else {
+                report_write(ctx, "| Memory Channels | N/A (unable to auto-detect) |\n");
+            }
             report_write(ctx, "| Memory Total | %.2f GB |\n", (double)pages * page_size / (1024.0 * MB));
             report_write(ctx, "| Memory Available | %.2f GB |\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
             report_write(ctx, "| Page Size | %ld bytes |\n", page_size);
@@ -180,7 +184,11 @@ void report_write_system_info(ReportContext *ctx) {
             report_write(ctx, "  CPU Model       : %s\n", global_system_config.cpu_model);
             report_write(ctx, "  CPU Cores       : %ld\n", num_cpus);
             report_write(ctx, "  CPU Frequency   : %d MHz\n", global_system_config.cpu_freq_mhz);
-            report_write(ctx, "  Memory Channels : %d\n", global_system_config.memory_channels);
+            if (global_system_config.memory_channels > 0) {
+                report_write(ctx, "  Memory Channels : %d\n", global_system_config.memory_channels);
+            } else {
+                report_write(ctx, "  Memory Channels : N/A\n");
+            }
             report_write(ctx, "  Memory Total    : %.2f GB\n", (double)pages * page_size / (1024.0 * MB));
             report_write(ctx, "  Memory Available: %.2f GB\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
             report_write(ctx, "  Page Size       : %ld bytes\n", page_size);

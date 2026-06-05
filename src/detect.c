@@ -1191,6 +1191,13 @@ void initialize_system_config(void) {
     int channels = detect_memory_channels();
     if (channels > 0) {
         global_system_config.memory_channels = channels;
+    } else if (!platform_is_tty()) {
+        /* Non-interactive: leave as 0 (unknown). The report will show
+         * "N/A" instead of a misleading zero. We don't force stdin
+         * because there's no human to answer. */
+        global_system_config.memory_channels = 0;
+        fprintf(stderr, "[Memory] Channel count unknown (non-interactive); "
+                "report will show N/A\n");
     } else {
         /* Cannot detect, prompt user for memory channels */
         char input[64];

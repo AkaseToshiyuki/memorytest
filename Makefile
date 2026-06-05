@@ -100,7 +100,7 @@ regression-record:
 # 0-100 score with letter grade.
 report:
 	@echo "=== generating HTML report ==="
-	@python3 report_html.py
+	@/usr/bin/python3 report_html.py
 	@echo ""
 	@echo "=== score summary ==="
 	@python3 report_score.py | head -10

@@ -399,7 +399,7 @@ def _collect_cache_chart_data() -> list:
     p = REPORTS / "cache_hierarchy_report.md"
     if not p.exists(): return []
     text = p.read_text()
-    tbl = _find_data_table(text)
+    tbl = _find_data_table_after(text, "RdLat(ns)")
     if not tbl: return []
     headers, rows = tbl
     rd_col = None
