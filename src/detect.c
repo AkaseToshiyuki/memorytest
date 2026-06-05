@@ -688,6 +688,79 @@ static void detect_cpu_model(char *model, size_t len) {
         }
     }
 
+    /* ARM-specific: try to decode CPU implementer + CPU part into a friendly
+     * name like "ARM Cortex-A76". The Linux kernel gives us hex codes:
+     *   implementer 0x41 = ARM
+     *   part 0xd01 = Cortex-A76, 0xd03 = Cortex-A77, 0xd05 = Cortex-A78,
+     *   0xd07 = Cortex-A77 (alt), 0xd09 = Cortex-A710, 0xd0a = Cortex-A715,
+     *   0xd0b = Cortex-A510, 0xd0c = Cortex-X1, 0xd0e = Cortex-X3, ...
+     *   0xc00 = Neoverse-N1, 0xd40 = Neoverse-V1, ...
+     * This is more informative than the generic "ARM64 Processor" fallback.
+     * We try this BEFORE the generic "processor : N" line check below,
+     * because "processor" matches on every core (24+ matches) and would
+     * short-circuit the more specific ARM implementer lookup. */
+    {
+        rewind(f);
+        int part = -1;  /* Vendor-independent core part number */
+        while (fgets(line, sizeof(line), f)) {
+            /* Note: we deliberately ignore "CPU implementer" because the
+             * same core (e.g. Cortex-A76 = part 0xd01) is reported with
+             * different implementer codes depending on who manufactured
+             * the SoC (ARM Ltd = 0x41, HiSilicon = 0x48, etc.). What we
+             * care about is the core microarchitecture, not the vendor. */
+            if (strncmp(line, "CPU part", 8) == 0) {
+                char *colon = strchr(line, ':');
+                if (colon) {
+                    char *p = colon + 1;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+                    part = (int)strtoul(p, NULL, 16);
+                }
+            }
+        }
+        /* The CPU part number is identical across vendors (any vendor
+         * implementing a Cortex-A76 reports part=0xd01). The implementer
+         * is just the *vendor* of the implementation:
+         *   0x41 = ARM Ltd, 0x48 = HiSilicon, 0x51 = Qualcomm, 0x4e = NVidia, ...
+         * We deliberately ignore implementer and trust the part number
+         * because the core microarchitecture is what we care about for
+         * identifying the core. */
+        if (part > 0) {
+            const char *core_name = "Unknown-ARM-core";
+            switch (part) {
+                case 0xd01: core_name = "Cortex-A76"; break;
+                case 0xd02: core_name = "Cortex-A76 (alt)"; break;
+                case 0xd03: core_name = "Cortex-A77"; break;
+                case 0xd04: core_name = "Cortex-A77 (alt)"; break;
+                case 0xd05: core_name = "Cortex-A78"; break;
+                case 0xd07: core_name = "Cortex-A77"; break;
+                case 0xd08: core_name = "Cortex-A78C"; break;
+                case 0xd09: core_name = "Cortex-A710"; break;
+                case 0xd0a: core_name = "Cortex-A715"; break;
+                case 0xd0b: core_name = "Cortex-A510"; break;
+                case 0xd0c: core_name = "Cortex-X1"; break;
+                case 0xd0d: core_name = "Cortex-X1C"; break;
+                case 0xd0e: core_name = "Cortex-X3"; break;
+                case 0xd0f: core_name = "Cortex-X4"; break;
+                case 0xd40: core_name = "Neoverse-V1"; break;
+                case 0xd41: core_name = "Cortex-A78 (alt)"; break;
+                case 0xd44: core_name = "Cortex-X2"; break;
+                case 0xd46: core_name = "Cortex-X3"; break;
+                case 0xd47: core_name = "Cortex-X3"; break;
+                case 0xd48: core_name = "Cortex-X4"; break;
+                case 0xd49: core_name = "Cortex-X925"; break;
+                case 0xd4a: core_name = "Cortex-X5"; break;
+                case 0xd80: core_name = "Cortex-A520"; break;
+                case 0xd81: core_name = "Cortex-A720"; break;
+                case 0xc00: core_name = "Neoverse-N1"; break;
+                case 0xc01: core_name = "Neoverse-N2"; break;
+                default:    core_name = "ARM-core"; break;
+            }
+            snprintf(model, len, "ARM %s", core_name);
+            found_model = 1;
+        }
+    }
+
     /* If still not found, try Processor (some ARM) */
     if (!found_model) {
         rewind(f);
@@ -856,11 +929,21 @@ static int detect_cpu_freq_bogomips(void) {
      * With HZ=100, this is BogoMIPS = loops_per_jiffy / 50000, and
      *   CPU_Hz = loops_per_jiffy × 50000 × 2 = MHz × 10 / 1.
      * The factor 2 is because BogoMIPS measures one half-cycle of a
-     * delay-loop (2 iterations per cycle). Multiply by 10 to get MHz. */
+     * delay-loop (2 iterations per cycle). Multiply by 10 to get MHz.
+     *
+     * NOTE: this is the LAST-RESORT fallback. It runs only after
+     * unprivileged probes (sysfs, cpuinfo, sysctl, lscpu, PMU) AND
+     * sudo-enabled probes (cpupower, dmidecode, sudo sysfs) have all
+     * failed. The result is approximate (±20%) — printed with a clear
+     * WARNING so the user knows it's a guess, not a measurement. */
     int freq_mhz = (int)(bogomips * 10.0 + 0.5);
     if (freq_mhz >= 100 && freq_mhz <= 10000) {
-        printf("[CPU] Detected frequency: %d MHz via BogoMIPS heuristic (%.2f BogoMIPS × 10)\n",
-               freq_mhz, bogomips);
+        fprintf(stderr,
+                "[CPU] WARNING: BogoMIPS heuristic is a LAST-RESORT FALLBACK.\n"
+                "              Result is approximate (%.2f BogoMIPS × 10 ≈ %d MHz, ±20%%).\n"
+                "              For accurate CPU frequency, re-run with sudo enabled\n"
+                "              (cpupower / dmidecode / /sys/.../cpuinfo_max_freq).\n",
+                bogomips, freq_mhz);
         return freq_mhz;
     }
     /* BogoMIPS out of plausible CPU-frequency range — could be a kernel
@@ -1002,29 +1085,57 @@ static int detect_cpu_freq_sudo(void) {
 int detect_cpu_freq(void) {
     int freq;
 
-    /* Try multiple detection methods in order of reliability */
+    /* Try multiple detection methods in order of reliability.
+     *
+     * Order rationale:
+     *   1-4. Unprivileged probes (no sudo needed). These are the
+     *        preferred source — they're either a direct kernel export
+     *        (sysfs, /proc/cpuinfo) or a calibrated tool reading it
+     *        (lscpu, sysctl).
+     *   5.   ARM PMU cycle counting. Measures actual cycles over a
+     *        wall-clock interval, very accurate on ARM. Doesn't need
+     *        sudo (perf_event_open with paranoid=4 still works for
+     *        self-counting on most kernels).
+     *   6.   Sudo-enabled probes (cpupower / dmidecode / sudo sysfs).
+     *        These can read privileged files (e.g. dmidecode needs
+     *        root for SMBIOS). Placed AFTER PMU because PMU is faster
+     *        and works without sudo. Placed BEFORE BogoMIPS because
+     *        BogoMIPS is only a heuristic — we'd rather ask the user
+     *        for sudo than fall back to a guess.
+     *   7.   BogoMIPS heuristic. LAST RESORT. The result is
+     *        approximate (±20%) and is marked with a WARNING in
+     *        detect_cpu_freq_bogomips() so the user knows it's a
+     *        guess, not a measurement. */
+
+    /* 1. Direct sysfs read (cpufreq) */
     freq = detect_cpu_freq_sysfs();
     if (freq > 0) return freq;
 
+    /* 2. /proc/cpuinfo "cpu MHz" */
     freq = detect_cpu_freq_cpuinfo();
     if (freq > 0) return freq;
 
+    /* 3. sysctl (BSD/macOS or Linux sysctl fallback) */
     freq = detect_cpu_freq_sysctl();
     if (freq > 0) return freq;
 
+    /* 4. lscpu (popen) */
     freq = detect_cpu_freq_lscpu();
     if (freq > 0) return freq;
 
-    /* Try ARM PMU-based detection (works without sudo) */
+    /* 5. ARM PMU cycle counting */
     freq = detect_cpu_freq_pmu();
     if (freq > 0) return freq;
 
-    /* Try BogoMIPS heuristic (ARM only, no /proc/cpuinfo "cpu MHz" line) */
-    freq = detect_cpu_freq_bogomips();
+    /* 6. Sudo-enabled probes (only if user has provided a password).
+     *    This is non-blocking: if no sudo password was obtained at
+     *    init_platform_layer(), detect_cpu_freq_sudo() returns 0
+     *    immediately. */
+    freq = detect_cpu_freq_sudo();
     if (freq > 0) return freq;
 
-    /* Try sudo-enabled methods for privileged access */
-    freq = detect_cpu_freq_sudo();
+    /* 7. BogoMIPS heuristic — LAST RESORT, with ±20% warning */
+    freq = detect_cpu_freq_bogomips();
     if (freq > 0) return freq;
 
     return 0;  /* All methods failed */

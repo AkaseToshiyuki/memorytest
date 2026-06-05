@@ -206,37 +206,85 @@ def _col_index(headers: list[str], *candidates: str) -> int | None:
 
 
 def _find_data_table_after(text: str, header_keyword: str) -> tuple[list[str], list[list[str]]] | None:
-    """Find the first markdown table whose header row contains `header_keyword`.
+    """Find the first markdown table whose header row contains `header_keyword`,
+    OR the first markdown table that appears after a heading matching
+    `## <header_keyword>` (or `### <header_keyword>`). The heading is
+    treated as a section anchor; the table is the one immediately after
+    it.
 
-    Used to skip past the System Configuration (Item/Value) table and pick
-    up the data table that follows.
+    Implementation: two passes.
+      Pass 1 — direct: walk lines; if a line is a table header (has `|`,
+                contains header_keyword, and is followed by a delim line),
+                parse and return that table.
+      Pass 2 — anchored: walk lines; record the index of the first line
+                that exactly matches `## <header_keyword>` (or `### ...`);
+                then return the first table that appears after that index.
     """
     import re
     lines = text.splitlines()
     delim_re = re.compile(r"^[\s\-:|]+\|?$")
-    for i, line in enumerate(lines):
-        if "|" not in line or header_keyword.lower() not in line.lower():
-            continue
+
+    def _parse_table_at(i: int):
+        """Parse a markdown table starting at line i (header row). Returns
+        (headers, rows) or None if i doesn't look like a table header or
+        the table is empty."""
         if i + 1 >= len(lines) or not delim_re.match(lines[i + 1]):
-            continue
-        # Parse header
-        cells = [c.strip().rstrip("*").strip() for c in line.split("|")]
-        if cells and not cells[0]: cells = cells[1:]
-        if cells and not cells[-1]: cells = cells[:-1]
+            return None
+        cells = [c.strip().rstrip("*").strip() for c in lines[i].split("|")]
+        if cells and not cells[0]:
+            cells = cells[1:]
+        if cells and not cells[-1]:
+            cells = cells[:-1]
         headers = cells
         rows = []
         j = i + 2
         while j < len(lines):
             rline = lines[j]
-            if not rline.strip() or "|" not in rline: break
-            if delim_re.match(rline): break
+            if not rline.strip() or "|" not in rline:
+                break
+            if delim_re.match(rline):
+                break
             rcells = [c.strip() for c in rline.split("|")]
-            if rcells and not rcells[0]: rcells = rcells[1:]
-            if rcells and not rcells[-1]: rcells = rcells[:-1]
+            if rcells and not rcells[0]:
+                rcells = rcells[1:]
+            if rcells and not rcells[-1]:
+                rcells = rcells[:-1]
             rows.append(rcells)
             j += 1
-        if rows:
-            return headers, rows
+        if not rows:
+            return None
+        return headers, rows
+
+    kw_lower = header_keyword.lower()
+
+    # Pass 1: direct match — table header line itself contains the keyword.
+    for i, line in enumerate(lines):
+        if "|" in line and kw_lower in line.lower():
+            tbl = _parse_table_at(i)
+            if tbl is not None:
+                return tbl
+
+    # Pass 2: anchored match — `## <header_keyword>` heading, then next table.
+    anchor_idx = -1
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped.startswith("#"):
+            continue
+        # match `#+` then space then header_keyword then EOL
+        if not re.match(r"^#+\s", stripped):
+            continue
+        # Compare body (after the leading #s + whitespace) case-insensitively.
+        body = re.sub(r"^#+\s*", "", stripped).strip().rstrip(":").strip()
+        if body.lower() == kw_lower:
+            anchor_idx = i
+            break
+    if anchor_idx >= 0:
+        for i in range(anchor_idx + 1, len(lines)):
+            if "|" in lines[i]:
+                tbl = _parse_table_at(i)
+                if tbl is not None:
+                    return tbl
+
     return None
 
 
@@ -255,28 +303,55 @@ def _row_label(row: list[str]) -> str:
 
 def parse_cache_hierarchy(text: str) -> dict:
     out = {}
-    # The first markdown table in cache_hierarchy_report.md is the System
-    # Configuration (Item/Value) table; the actual cache data table follows
-    # it, so skip_first must be True.
-    tbl = _find_data_table(text, skip_first=True)
+    # The cache_hierarchy_report.md contains several tables. We want the one
+    # under the "Cache Hierarchy Scan" heading — that one has columns
+    # | Size | RdLat(ns) | WrLat(ns) | BW(MB/s) | Expected | Analysis |.
+    # The first table (System Configuration) and the second ("Cache Boundary
+    # Detection" transitions) are not what we want. Use the anchor-based
+    # finder so we always land on the right table.
+    tbl = _find_data_table_after(text, "Cache Hierarchy Scan")
     if not tbl: return out
     headers, rows = tbl
-    rd_col = _col_index(headers, "rdlat", "read latency", "latency")
+    # Header is "RdLat(ns)"; match case-insensitively.
+    rd_col = _col_index(headers, "rdlat", "rdlat(ns)", "read latency", "latency")
     if rd_col is None: rd_col = 1
-    targets = {
-        "l1d_latency_ns": ["16KB", "32KB"],
-        "l2_latency_ns":  ["256KB", "512KB"],
-        "l3_latency_ns":  ["12MB", "24MB"],
-        "ram_latency_ns": ["48MB", "64MB", "256MB"],
-    }
+    # Match by size in KB: pick the row whose size is in [lo, hi] KB. This
+    # is more robust than string-matching "16KB" / "32KB" because the size
+    # column often reads "32.0KB" or "16.5KB" with a decimal.
+    # L1D ~ 32KB, L2 ~ 512KB, L3 ~ 32MB = 32768 KB, RAM >= 64MB = 65536 KB.
+    targets = [
+        ("l1d_latency_ns",  16,    64),     # 16-64 KB
+        ("l2_latency_ns",   128,   1024),   # 128KB - 1MB
+        ("l3_latency_ns",   4096,  65536),  # 4MB - 64MB
+        ("ram_latency_ns",  65537, 1048576),# 64MB - 1GB
+    ]
+    def _size_to_kb(label: str) -> float | None:
+        """Parse '32.0KB', '1.5MB', '2.0GB' into KB. Returns None on failure."""
+        import re
+        m = re.match(r"^\s*([0-9]*\.?[0-9]+)\s*([KMGT]?B)\s*$", label, re.I)
+        if not m:
+            return None
+        v = float(m.group(1))
+        unit = m.group(2).upper()
+        if unit == "KB": return v
+        if unit == "MB": return v * 1024
+        if unit == "GB": return v * 1024 * 1024
+        if unit == "TB": return v * 1024 * 1024 * 1024
+        if unit == "B":  return v / 1024
+        return None
     for row in rows:
         lbl = _row_label(row)
-        for key, candidates in targets.items():
-            if key in out: continue
-            if any(c in lbl for c in candidates):
-                v = _safe_float(row[rd_col])
-                if v is not None and 0.1 < v < 1000:
-                    out[key] = v
+        size_kb = _size_to_kb(lbl)
+        if size_kb is None:
+            continue
+        v = _safe_float(row[rd_col] if rd_col < len(row) else None)
+        if v is None or not (0.1 < v < 1000):
+            continue
+        for key, lo, hi in targets:
+            if key in out:
+                continue
+            if lo <= size_kb <= hi:
+                out[key] = v
                 break
     return out
 

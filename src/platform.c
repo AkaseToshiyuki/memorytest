@@ -614,6 +614,22 @@ void platform_init(void) {
     platform_simd_detect();
     platform_is_tty();  /* cache the result */
     platform_pmu_probe();
+
+    /* If we're on a TTY, eagerly offer the user a chance to enter a sudo
+     * password for hardware detection. On non-TTY (CI, smoke tests) this
+     * is a no-op — the user can re-run with `make test-interactive` or
+     * `sudo -E make test` to get sudo-based probes.
+     *
+     * The reason we prompt *once* at init, rather than lazily on the
+     * first sudo probe, is so the user sees the prompt BEFORE the
+     * benchmark starts grinding. The 90-second ALU run is a long time
+     * to wait for a question that could have been answered up-front. */
+    if (platform_is_tty() && !g_non_interactive && !g_no_sudo) {
+        extern int request_sudo_password(void);
+        /* Non-blocking: request_sudo_password prints the prompt and
+         * waits for input. It's a no-op on non-TTY (returns -1). */
+        (void)request_sudo_password();
+    }
 }
 
 void platform_shutdown(void) {

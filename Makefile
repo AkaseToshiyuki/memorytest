@@ -56,6 +56,26 @@ cpu: $(addprefix $(BUILD_DIR)/, $(CPU_TESTS))
 smoke: tests
 	@bash test_smoke.sh
 
+# Interactive run: stdin is a real TTY so the platform layer can prompt
+# for sudo / unknown values. Use when auto-detection failed and you want
+# the benchmark to ask you for the missing data instead of reporting 0.
+#
+# Two modes:
+#   make interactive         # run as current user; binary may prompt
+#                            # for sudo password (if /dev/null is the
+#                            # stdin, no prompt fires)
+#   make interactive-sudo    # run each binary with `sudo -E` so the
+#                            # platform layer can use privileged probes
+#                            # (cpupower / dmidecode / /sys/.../cpuinfo_max_freq)
+#
+# IMPORTANT: these targets must be run in a real terminal (not from CI),
+# otherwise platform_is_tty() returns false and the prompts are skipped.
+interactive: tests
+	@bash bin/run_interactive.sh
+
+interactive-sudo: tests
+	@bash bin/run_interactive.sh --sudo
+
 # Layer 2 sanity test: assert each metric falls within plausible physical range
 # --skip-missing tells sanity to count missing reports (e.g. test_inter_core
 # skipped on big machines) as SKIP rather than FAIL.
