@@ -81,6 +81,8 @@ typedef struct {
     int memory_channels;
     int cpu_freq_mhz;
     char cpu_model[128];
+    int cpu_cores;              /* Logical cores (HT/SMT counted); 0 = unknown */
+    int cpu_cores_physical;     /* Physical cores; 0 = unknown (SMT distinguishable) */
     int detected;
     /* DRAM speed (in MT/s, e.g. 3200 for DDR4-3200) and standard. These are
      * read from sysfs / dmidecode / lscpu at runtime; 0 = unknown. Used to
