@@ -1355,7 +1355,7 @@ def _ensure_charts() -> None:
     inter-core heatmap, multi-core scaling). They are produced by
     `generate_report.py`'s `create_*` functions. The C binaries also
     write markdown reports and a JSON, but they do NOT regenerate these
-    PNGs (the C side used to call a now-missing `reports/inter_core_heatmap.py`).
+    PNGs (the C side no longer calls a separate heatmap script).
     So before the HTML pipeline runs, we call the create_* helpers to
     refresh the PNGs from the freshly-written markdown/JSON reports.
 

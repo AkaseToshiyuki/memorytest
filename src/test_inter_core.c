@@ -731,8 +731,8 @@ void run_inter_core_latency_test(void) {
     free(bw_array);
     /* Workers are infinite loops; they'll exit on process exit. */
 
-    printf("\nGenerating heatmap...\n");
-    system("cd reports && python3 inter_core_heatmap.py 2>/dev/null");
+    printf("\\n[DONE] Inter-core latency test complete.\\n");
+    printf("  Heatmap: run 'make report' to generate reports/charts/inter_core_heatmap.png\\n");
 }
 
 int main(int argc, char *argv[]) {

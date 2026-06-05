@@ -235,15 +235,16 @@ SIZE ?= size
 
 # Build release package
 release: opt
-	@mkdir -p release
-	@cp -r bin Makefile generate_report.py README.md tests.json src/common.h src/platform.h src/util.h .
-	@mv bin/* release/ 2>/dev/null || true
-	@rm -rf bin
-	@tar -czvf memorytest-$(VERSION).tar.gz release/
-	@zip -r memorytest-$(VERSION).zip release/
-	@echo "Release packages created:"
-	@ls -la memorytest-$(VERSION).tar.gz memorytest-$(VERSION).zip
+	@mkdir -p release/bin release/src
+	@cp bin/* release/bin/
+	@cp Makefile generate_report.py report_html.py report_score.py README.md tests.json release/
+	@cp test_smoke.sh test_sanity.py test_regression.py release/
+	@cp src/common.h src/platform.h src/util.h release/src/
+	@cp tests.json release/
+	@tar -czf memorytest-$(VERSION).tar.gz -C . release
 	@rm -rf release/
+	@echo "Release package: memorytest-$(VERSION).tar.gz"
+	@ls -lh memorytest-$(VERSION).tar.gz
 
 help:
 	@echo "Memory Benchmark Suite v$(VERSION)"
