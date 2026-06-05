@@ -124,7 +124,13 @@ void report_write_system_info(ReportContext *ctx) {
                 report_write(ctx, "    \"cache_l2_kb_total\": %zu,\n",
                              (global_cache_config.l2_size / KB) * (size_t)cpu_cores_phys);
             }
-            report_write(ctx, "    \"cache_l3_kb\": %zu\n", global_cache_config.l3_size / KB);
+            report_write(ctx, "    \"cache_l3_kb\": %zu", global_cache_config.l3_size / KB);
+            if (global_cache_config.l3_ccd_count > 1) {
+                report_write(ctx, ",\n    \"cache_l3_per_ccd_kb\": %zu", global_cache_config.l3_size / KB);
+                report_write(ctx, ",\n    \"cache_l3_ccd_count\": %d", global_cache_config.l3_ccd_count);
+                report_write(ctx, ",\n    \"cache_l3_total_kb\": %zu", global_cache_config.l3_total_size / KB);
+            }
+            report_write(ctx, "\n");
             report_write(ctx, "  },\n");
             break;
         case REPORT_FORMAT_MARKDOWN:
@@ -164,7 +170,14 @@ void report_write_system_info(ReportContext *ctx) {
                 report_write(ctx, "| L2 Cache | %zu KB |\n", global_cache_config.l2_size / KB);
             }
             if (global_cache_config.l3_size > 0) {
-                report_write(ctx, "| L3 Cache | %zu KB (shared) |\n", global_cache_config.l3_size / KB);
+                if (global_cache_config.l3_ccd_count > 1) {
+                    report_write(ctx, "| L3 Cache | %zu KB per CCD × %d CCDs = %zu KB total |\n",
+                                 global_cache_config.l3_size / KB,
+                                 global_cache_config.l3_ccd_count,
+                                 global_cache_config.l3_total_size / KB);
+                } else {
+                    report_write(ctx, "| L3 Cache | %zu KB (shared) |\n", global_cache_config.l3_size / KB);
+                }
             } else {
                 report_write(ctx, "| L3 Cache | %zu KB |\n", global_cache_config.l3_size / KB);
             }
@@ -194,7 +207,14 @@ void report_write_system_info(ReportContext *ctx) {
             report_write(ctx, "  Page Size       : %ld bytes\n", page_size);
             report_write(ctx, "  L1 Cache        : %zu KB\n", global_cache_config.l1d_size / KB);
             report_write(ctx, "  L2 Cache        : %zu KB\n", global_cache_config.l2_size / KB);
-            report_write(ctx, "  L3 Cache        : %zu KB\n\n", global_cache_config.l3_size / KB);
+            if (global_cache_config.l3_ccd_count > 1) {
+                report_write(ctx, "  L3 Cache        : %zu KB per CCD × %d CCDs = %zu KB total\n\n",
+                             global_cache_config.l3_size / KB,
+                             global_cache_config.l3_ccd_count,
+                             global_cache_config.l3_total_size / KB);
+            } else {
+                report_write(ctx, "  L3 Cache        : %zu KB\n\n", global_cache_config.l3_size / KB);
+            }
     }
 }
 

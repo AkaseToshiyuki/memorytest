@@ -442,18 +442,25 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
                 /* No L3: skip the L3 segment, just bridge to RAM later */
                 ;
         }
-        /* Segment 4: L3 → RAM. If L3 exists, [L3*2, min(2GB, L3*32)];
-         * else [L2*2, min(2GB, 4GB)]. */
+        /* Segment 4: L3 → RAM. hi must be >= max(2× total_L3, 4GB) so
+         * the scan reaches real DRAM. On multi-CCD designs (EPYC: 256 MB
+         * total L3 across 8 CCDs), the old l3_size*32 with a 2GB cap
+         * only reached 1 GB —  barely 4× per-CCD L3, and most accesses
+         * still landed in the aggregate LLC. 4 GB ensures we're well into
+         * DRAM even on servers with 256-512 MB L3. */
         if (num_results < max_results) {
             size_t lo = has_l3 ? l3_size * 2 : l2_size * 2;
-            size_t hi = has_l3 ? (l3_size * 32) : (4 * GB);
-            if (hi > 2 * GB) hi = 2 * GB;
+            size_t total_l3 = global_cache_config.l3_total_size;
+            if (total_l3 == 0) total_l3 = l3_size;
+            size_t hi = has_l3 ? (total_l3 * 2) : (4 * GB);
+            if (hi < 4 * GB) hi = 4 * GB;
             if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
         }
     } else {
-        /* No priors: fall back to coarse 1MB→2GB @ 1.20x. ~85 points. */
+        /* No priors: fall back to coarse 1MB→4GB @ 1.20x. ~85 points.
+         * Upper bound is 4GB to ensure DRAM reach on large-LLC systems. */
         size_t size = 1 * MB;
-        while (size <= 2 * GB && num_results < max_results) {
+        while (size <= 4 * GB && num_results < max_results) {
             char name[32];
             if (size < 1*MB) snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
             else if (size < 1*GB) snprintf(name, sizeof(name), "%.1fMB", (double)size / MB);
@@ -553,8 +560,15 @@ void run_cache_hierarchy_test(void) {
     printf("  CPU Cores: %ld\n", num_cpus);
     printf("  Threads: %d (auto-scaled to CPU count)\n", threads);
     printf("  Memory: %d-channel memory\n", channels);
-    printf("  Detected Cache: L1=%zuKB, L2=%zuKB, L3=%zuKB\n\n",
-           l1_size / KB, l2_size / KB, l3_size / KB);
+    if (global_cache_config.l3_ccd_count > 1) {
+        printf("  Detected Cache: L1=%zuKB, L2=%zuKB, L3=%zuKB per CCD × %d CCDs = %zuKB total\n\n",
+               l1_size / KB, l2_size / KB, l3_size / KB,
+               global_cache_config.l3_ccd_count,
+               global_cache_config.l3_total_size / KB);
+    } else {
+        printf("  Detected Cache: L1=%zuKB, L2=%zuKB, L3=%zuKB\n\n",
+               l1_size / KB, l2_size / KB, l3_size / KB);
+    }
 
     /* Run cache hierarchy scan */
     CacheTestResult results[MAX_CACHE_TEST_SIZES];
@@ -602,12 +616,25 @@ void run_cache_hierarchy_test(void) {
          *     would miss these. */
         double threshold = (num_hits == 0) ? 2.0 : 1.3;
         if (ratio >= threshold) {
-            hits[num_hits].size = results[i-1].size;
-            hits[num_hits].lat_before = results[i-2].rd_lat;
-            hits[num_hits].lat_after = results[i].rd_lat;
-            hits[num_hits].ratio = ratio;
-            num_hits++;
-            i += 1;
+            /* Confirm: the elevated latency must PERSIST. Single-point
+             * spikes (e.g. 571MB: 20.93ns → 661MB: 12.60ns → back down)
+             * are measurement noise, not real cache boundaries. The NEXT
+             * point must also be elevated vs the pre-jump baseline. */
+            int confirmed = 1;
+            if (i + 1 < num_results && results[i+1].rd_lat > 0) {
+                double confirm_ratio = results[i+1].rd_lat / results[i-2].rd_lat;
+                if (confirm_ratio < threshold * 0.85) {
+                    confirmed = 0;  /* spike — latency fell back immediately */
+                }
+            }
+            if (confirmed) {
+                hits[num_hits].size = results[i-1].size;
+                hits[num_hits].lat_before = results[i-2].rd_lat;
+                hits[num_hits].lat_after = results[i].rd_lat;
+                hits[num_hits].ratio = ratio;
+                num_hits++;
+                i += 1;
+            }
         }
     }
 
@@ -825,16 +852,21 @@ void run_cache_hierarchy_test(void) {
         num_bw++;
     }
 
-    /* RAM sizes - must be significantly larger than L3 */
-    size_t ram_size = (l3_size > 0) ? (l3_size * 4) : (64 * MB);
-    if (ram_size < 64 * MB) ram_size = 64 * MB;
+    /* RAM sizes - must be significantly larger than total L3 (across all
+     * CCDs on chiplet designs), not just per-CCD L3. */
+    size_t total_l3_bw = global_cache_config.l3_total_size;
+    if (total_l3_bw == 0) total_l3_bw = l3_size;
+    size_t ram_size = (total_l3_bw > 0) ? (total_l3_bw * 2) : (64 * MB);
+    if (ram_size < 128 * MB) ram_size = 128 * MB;
     bw_sizes[num_bw] = ram_size;
     snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "RAM(%.0fMB)", (double)ram_size/MB);
     num_bw++;
 
-    if (l3_size < 256 * MB) {
-        bw_sizes[num_bw] = 256 * MB;
-        snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "RAM(256MB)");
+    /* Add a second, larger RAM point for multi-CCD systems */
+    if (total_l3_bw < 256 * MB || ram_size < 512 * MB) {
+        size_t ram2_size = (ram_size > 512 * MB) ? ram_size * 2 : 512 * MB;
+        bw_sizes[num_bw] = ram2_size;
+        snprintf(bw_names[num_bw], sizeof(bw_names[num_bw]), "RAM(%.0fMB)", (double)ram2_size/MB);
         num_bw++;
     }
 

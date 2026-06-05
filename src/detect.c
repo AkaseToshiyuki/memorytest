@@ -189,6 +189,8 @@ static int detect_arm_cache_registers(void) {
     global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
     global_cache_config.l2_size = l2;  /* 0 if not detected, user will be prompted */
     global_cache_config.l3_size = l3;  /* 0 if not detected, user will be prompted */
+    global_cache_config.l3_total_size = l3;  /* ARM: unified L3, no chiplet designs */
+    global_cache_config.l3_ccd_count = (l3 > 0) ? 1 : 0;
     global_cache_config.detected = 1;
 
     return 0;
@@ -232,6 +234,12 @@ static int detect_x86_cache_cpuid(void) {
         global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
         global_cache_config.l2_size = l2;
         global_cache_config.l3_size = l3;
+        /* CPUID reports total per-package L3 (unified for that package).
+         * On multi-socket systems, CPUID leaf 4 only reports the local
+         * package's L3; total system L3 is still just the per-package
+         * value for latency purposes (a core can't hit remote L3). */
+        global_cache_config.l3_total_size = l3;
+        global_cache_config.l3_ccd_count = (l3 > 0) ? 1 : 0;
         global_cache_config.detected = 1;
         return 0;
     }
@@ -307,6 +315,117 @@ static const char* read_sysfs_cache_type(int index) {
     return "";
 }
 
+/* Count set bits in a comma-separated hex CPU map (e.g. "00000000,000000ff").
+ * Used to parse the shared_cpu_map file from sysfs cpu cache index entries. */
+static int count_cpus_in_shared_map(const char *map_str) {
+    int count = 0;
+    const char *p = map_str;
+    while (*p) {
+        if (*p == ',' || *p == '\n' || *p == ' ' || *p == '\r') {
+            p++;
+            continue;
+        }
+        char *end;
+        unsigned long chunk = strtoul(p, &end, 16);
+        if (end == p) break;
+        count += __builtin_popcountl(chunk);
+        p = end;
+    }
+    return count;
+}
+
+/* Determine number of L3 domains (CCDs on chiplet designs) by reading
+ * shared_cpu_map for cpu0's L3. Each unique shared_cpu_map == one L3 domain.
+ * Returns the number of domains, or 1 if unable to determine. */
+static int detect_l3_domain_count(size_t per_ccd_l3) {
+    char map_path[256];
+    char map[256];
+
+    /* Read shared_cpu_map for cpu0's L3 */
+    snprintf(map_path, sizeof(map_path),
+             "/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_map");
+    FILE *f = fopen(map_path, "r");
+    if (!f) {
+        /* Try index2 (some systems report L3 at index2) */
+        for (int idx = 0; idx < 10; idx++) {
+            if (read_sysfs_cache_level(idx) == 3) {
+                snprintf(map_path, sizeof(map_path),
+                         "/sys/devices/system/cpu/cpu0/cache/index%d/shared_cpu_map", idx);
+                f = fopen(map_path, "r");
+                if (f) break;
+            }
+        }
+    }
+    if (!f) return 1;  /* can't read, assume unified */
+
+    if (!fgets(map, sizeof(map), f)) {
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+
+    int cpus_per_domain = count_cpus_in_shared_map(map);
+    if (cpus_per_domain <= 0) return 1;
+
+    long total_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    if (total_cpus <= 0) return 1;
+
+    /* cpus_per_domain counts logical CPUs (with HT/SMT). total_cpus is also
+     * logical. The division gives the number of L3 domains (CCDs on EPYC). */
+    int domains = (int)(total_cpus / cpus_per_domain);
+    if (domains < 1) domains = 1;
+
+    /* Cross-validate: check that cpuN (first CPU of the last domain) reports
+     * the same per-CCD L3 size. If not, L3 is truly unified. */
+    if (domains > 1 && per_ccd_l3 > 0) {
+        /* Find a CPU likely in a different domain */
+        int remote_cpu = cpus_per_domain * (domains - 1);
+        if (remote_cpu >= total_cpus) remote_cpu = (int)(total_cpus - 1);
+
+        /* Read L3 size for that remote CPU */
+        size_t remote_l3 = 0;
+        for (int idx = 0; idx < 10; idx++) {
+            int level = 0;
+            char lvl_path[256];
+            snprintf(lvl_path, sizeof(lvl_path),
+                     "/sys/devices/system/cpu/cpu%d/cache/index%d/level", remote_cpu, idx);
+            f = fopen(lvl_path, "r");
+            if (f) {
+                char buf[16];
+                if (fgets(buf, sizeof(buf), f)) level = atoi(buf);
+                fclose(f);
+            }
+            if (level == 3) {
+                char sz_path[256];
+                snprintf(sz_path, sizeof(sz_path),
+                         "/sys/devices/system/cpu/cpu%d/cache/index%d/size", remote_cpu, idx);
+                f = fopen(sz_path, "r");
+                if (f) {
+                    char buf[64];
+                    if (fgets(buf, sizeof(buf), f)) {
+                        char *end;
+                        unsigned long val = strtoul(buf, &end, 10);
+                        if (end) {
+                            if (*end == 'K' || *end == 'k') remote_l3 = val * 1024;
+                            else if (*end == 'M' || *end == 'm') remote_l3 = val * 1024 * 1024;
+                        }
+                    }
+                    fclose(f);
+                }
+                break;
+            }
+        }
+
+        /* If remote L3 is the same size as local, each domain has its own L3.
+         * If different or 0, L3 might be fully shared (unified). */
+        if (remote_l3 == 0 || remote_l3 != per_ccd_l3) {
+            return 1;  /* unified or uncertain */
+        }
+    }
+
+    return domains;
+}
+
 static int detect_cache_via_sysfs(void) {
     size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
 
@@ -336,10 +455,33 @@ static int detect_cache_via_sysfs(void) {
         global_cache_config.l1i_size = (l1i > 0) ? l1i : l1d;
         global_cache_config.l2_size = l2;  /* 0 if not detected */
         global_cache_config.l3_size = l3;  /* 0 if not detected */
+
+        /* Detect total L3 across CCDs on multi-chiplet designs (e.g. AMD EPYC).
+         * On unified-L3 systems, total = per-CCD = l3. On multi-CCD systems
+         * like EPYC where each CCD has its own L3, total = l3 × num_ccds. */
+        if (l3 > 0) {
+            int ccd_count = detect_l3_domain_count(l3);
+            global_cache_config.l3_ccd_count = ccd_count;
+            global_cache_config.l3_total_size = l3 * (size_t)ccd_count;
+        } else {
+            global_cache_config.l3_ccd_count = 0;
+            global_cache_config.l3_total_size = 0;
+        }
+
         global_cache_config.detected = 1;
-        printf("[sysfs] L1D: %zu KB, L1I: %zu KB, L2: %zu KB, L3: %zu KB\n",
-               l1d / 1024, global_cache_config.l1i_size / 1024,
-               l2 / 1024, l3 / 1024);
+
+        if (l3 > 0 && global_cache_config.l3_ccd_count > 1) {
+            printf("[sysfs] L1D: %zu KB, L1I: %zu KB, L2: %zu KB, "
+                   "L3: %zu KB per CCD × %d CCDs = %zu KB total\n",
+                   l1d / 1024, global_cache_config.l1i_size / 1024,
+                   l2 / 1024, l3 / 1024,
+                   global_cache_config.l3_ccd_count,
+                   global_cache_config.l3_total_size / 1024);
+        } else {
+            printf("[sysfs] L1D: %zu KB, L1I: %zu KB, L2: %zu KB, L3: %zu KB\n",
+                   l1d / 1024, global_cache_config.l1i_size / 1024,
+                   l2 / 1024, l3 / 1024);
+        }
         if (l2 == 0) printf("[sysfs] L2 not detected, will prompt user\n");
         if (l3 == 0) printf("[sysfs] L3 not detected, will prompt user\n");
         return 0;
@@ -389,8 +531,11 @@ static void prompt_cache_config_from_user(void) {
             global_cache_config.l1d_size = 64 * 1024;
         if (global_cache_config.l2_size == 0)
             global_cache_config.l2_size = 512 * 1024;
-        if (global_cache_config.l3_size == 0)
+        if (global_cache_config.l3_size == 0) {
             global_cache_config.l3_size = 2 * 1024 * 1024;
+            global_cache_config.l3_total_size = 2 * 1024 * 1024;
+            global_cache_config.l3_ccd_count = 1;
+        }
         global_cache_config.l1i_size = global_cache_config.l1d_size;
         global_cache_config.detected = 1;
         return;
@@ -407,6 +552,8 @@ static void prompt_cache_config_from_user(void) {
     if (global_cache_config.l3_size == 0) {
         int kb = platform_prompt_int("  L3 cache size in KB (0 if none)", 2048, 0, 1024 * 1024);
         global_cache_config.l3_size = (size_t)kb * 1024;
+        global_cache_config.l3_total_size = global_cache_config.l3_size;
+        global_cache_config.l3_ccd_count = (global_cache_config.l3_size > 0) ? 1 : 0;
     }
     global_cache_config.l1i_size = global_cache_config.l1d_size;
     global_cache_config.detected = 1;
@@ -461,7 +608,14 @@ void print_system_info(void) {
     printf("  L1D: %zu KB\n", global_cache_config.l1d_size / KB);
     printf("  L1I: %zu KB\n", global_cache_config.l1i_size / KB);
     printf("  L2:  %zu KB\n", global_cache_config.l2_size / KB);
-    printf("  L3:  %zu KB\n\n", global_cache_config.l3_size / KB);
+    if (global_cache_config.l3_ccd_count > 1 && global_cache_config.l3_total_size > 0) {
+        printf("  L3:  %zu KB per CCD × %d CCDs = %zu KB total\n\n",
+               global_cache_config.l3_size / KB,
+               global_cache_config.l3_ccd_count,
+               global_cache_config.l3_total_size / KB);
+    } else {
+        printf("  L3:  %zu KB\n\n", global_cache_config.l3_size / KB);
+    }
 
     /* NUMA Topology */
     int numa_nodes[8];

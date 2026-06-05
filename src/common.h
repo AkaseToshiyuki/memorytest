@@ -73,7 +73,9 @@ typedef struct {
     size_t l1d_size;
     size_t l1i_size;
     size_t l2_size;
-    size_t l3_size;
+    size_t l3_size;          /* per-CCD (or unified) L3 as reported by sysfs */
+    size_t l3_total_size;    /* total L3 across all CCDs/NUMA nodes; 0 = same as l3_size (unified) */
+    int l3_ccd_count;        /* number of L3 domains (CCDs), 1 = unified; 0 = unknown */
     int detected;
 } CacheConfig;
 

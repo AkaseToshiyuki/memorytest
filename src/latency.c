@@ -50,11 +50,13 @@ static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
         uint64_t idx;
 
         if (sequential) {
-            /* Sequential access: stride-1. Prefetch only for L2+ working sets. */
+            /* Sequential access: stride-1. Prefetch only for L2+ working sets.
+             * Use modulo instead of bitwise AND — words may not be a power of 2
+             * for arbitrary malloc'ed buffer sizes. */
             start = rdtsc_ns();
             for (size_t i = 0; i < 64; i++) {
-                idx = i & (words - 1);
-                if (use_prefetch) prefetch_l2(&p[(i + 8) & (words - 1)]);
+                idx = i % words;
+                if (use_prefetch) prefetch_l2(&p[(i + 8) % words]);
                 compiler_barrier();
                 volatile uint64_t val = p[idx];
                 (void)val;
@@ -62,13 +64,22 @@ static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
             compiler_barrier();
             end = rdtsc_ns();
         } else {
-            /* Random access: use prime stride to avoid predictability.
-             * Prefetch only for L2+ working sets. */
+            /* Random access: use LCG pseudo-random sequence to defeat
+             * hardware prefetchers. The old (i*17+1) stride was only 136
+             * bytes apart — easily detected by modern stride prefetchers
+             * (which track strides up to 2KB). An LCG with large multipliers
+             * produces indices that look uniformly random, forcing real
+             * cache misses on large buffers. */
+            static const uint64_t lcg_a = 6364136223846793005ULL;
+            static const uint64_t lcg_c = 1442695040888963407ULL;
+            uint64_t lcg_state = 1 + (uint64_t)m * 17;
             start = rdtsc_ns();
             for (size_t i = 0; i < 64; i++) {
-                idx = ((i * 17) + 1) & (words - 1);
+                lcg_state = lcg_a * lcg_state + lcg_c;
+                idx = lcg_state % words;
                 if (use_prefetch) {
-                    size_t next_idx = (((i + 1) * 17) + 1) & (words - 1);
+                    uint64_t next_lcg = lcg_a * lcg_state + lcg_c;
+                    size_t next_idx = next_lcg % words;
                     prefetch_l2(&p[next_idx]);
                 }
                 compiler_barrier();
