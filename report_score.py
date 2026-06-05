@@ -60,9 +60,8 @@ METRICS = [
     MetricSpec("read_mbps",   "higher", 20000.0, 1.0, "Memory read bandwidth",   "bandwidth"),
     MetricSpec("write_mbps",  "higher", 10000.0, 1.0, "Memory write bandwidth",  "bandwidth"),
     MetricSpec("copy_mbps",   "higher", 15000.0, 1.0, "Memory copy bandwidth",   "bandwidth"),
-    # Inter-core latency (lower = better, intra-socket)
-    MetricSpec("cas_avg_ns",  "lower", 20.0, 0.5, "Avg intra-socket CAS",     "inter_core"),
-    MetricSpec("cas_min_ns",  "lower", 8.0, 0.5,  "Min intra-socket CAS",     "inter_core"),
+    # Inter-core latency (lower = better, intra-socket median of one-hop pairs)
+    MetricSpec("cas_median_ns", "lower", 20.0, 1.0, "Median intra-socket CAS", "inter_core"),
     # ALU IPC (higher = better, but chained volatile sinks depress it; ~0.1-0.2 is realistic
     # because each iteration has a RAW dependency on the previous sum. We use 0.2 as the
     # "good" baseline for ALU with anti-opt volatile sinks — the theoretical peak (no dep
@@ -409,7 +408,7 @@ def parse_inter_core(text: str) -> dict:
     adjacent to that row's self-sentinel. We compute the average and
     minimum across all 24 row minima and return `cas_avg_ns` / `cas_min_ns`.
     """
-    tbl = _find_data_table_after(text, "Core")
+    tbl = _find_data_table_after(text, "**Core**")
     if not tbl: return {}
     headers, rows = tbl
     # The first header cell is the row-label sentinel (e.g. "**Core**")
@@ -433,7 +432,12 @@ def parse_inter_core(text: str) -> dict:
         for k in (sentinel_col - 1, sentinel_col + 1):
             if 1 <= k <= n_cols:
                 try:
-                    v = float(row[k])
+                    cell = row[k]
+                    # Format: "32.3 [32.3-32.3]" — extract median
+                    space_idx = cell.find(" ")
+                    if space_idx > 0:
+                        cell = cell[:space_idx]
+                    v = float(cell)
                     if 1 < v < 5000:
                         candidates.append(v)
                 except (ValueError, IndexError):
@@ -442,8 +446,7 @@ def parse_inter_core(text: str) -> dict:
             one_hop.append(min(candidates))
     if one_hop:
         return {
-            "cas_avg_ns": sum(one_hop) / len(one_hop),
-            "cas_min_ns": min(one_hop),
+            "cas_median_ns": sum(one_hop) / len(one_hop),
         }
     return {}
 

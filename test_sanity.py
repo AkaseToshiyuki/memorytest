@@ -244,6 +244,10 @@ def parse_inter_core(text):
         for col in header_keys[1:]:
             v = r.get(col, "-")
             try:
+                # Format: "32.3 [32.3-32.3]" — extract the median
+                space_idx = v.find(" ")
+                if space_idx > 0:
+                    v = v[:space_idx]
                 vals.append(float(v))
             except ValueError:
                 pass
