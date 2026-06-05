@@ -187,7 +187,7 @@ static inline void prefetch_l2(const void *p) {
 
 static inline void clflush(const void *p) {
 #if defined(__x86_64__) || defined(__i386__)
-    __asm__ __volatile__("clflush [%0]" :: "r"(p) : "memory");
+    __asm__ __volatile__("clflush (%0)" :: "r"(p) : "memory");
 #elif defined(__aarch64__)
     /* DC CIVAC - Data Cache line Clean and Invalidate by VA to Point of Coherence.
      * On ARM64 this both flushes and invalidates, more aggressive than x86 clflush. */
