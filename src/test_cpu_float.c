@@ -24,11 +24,11 @@ static volatile double g_result_d = 0.0;
 
 /* ========== 浮点运算测试 ========== */
 
-/* 单精度加法测试 */
+/* 单精度加法测试 — use long counter to avoid double→float conversion per iter */
 static void test_float_add(void *arg) {
     (void)arg;
     float result = 0.0f;
-    for (double i = 0; i < ITERATIONS; i++) {
+    for (long i = 0; i < ITERATIONS; i++) {
         result += (float)i * 0.5f;
     }
     g_result_f = result;
@@ -38,7 +38,7 @@ static void test_float_add(void *arg) {
 static void test_float_mul(void *arg) {
     (void)arg;
     float result = 1.0f;
-    for (double i = 1; i < ITERATIONS; i++) {
+    for (long i = 1; i < ITERATIONS; i++) {
         result *= (float)i * 0.00001f;
         if (result < 0.0001f) result = 1.0f;
     }
@@ -50,7 +50,7 @@ static void test_float_div(void *arg) {
     (void)arg;
     float result = 1.0f;
     volatile float dividend = 1000000.0f;
-    for (double i = 1; i < ITERATIONS; i++) {
+    for (long i = 1; i < ITERATIONS; i++) {
         result = dividend / (float)i;
     }
     g_result_f = result;
@@ -60,7 +60,7 @@ static void test_float_div(void *arg) {
 static void test_float_sqrt(void *arg) {
     (void)arg;
     float result = 0.0f;
-    for (double i = 1; i < ITERATIONS; i++) {
+    for (long i = 1; i < ITERATIONS; i++) {
         result = sqrtf((float)i);
     }
     g_result_f = result;
@@ -70,8 +70,8 @@ static void test_float_sqrt(void *arg) {
 static void test_double_add(void *arg) {
     (void)arg;
     double result = 0.0;
-    for (double i = 0; i < ITERATIONS; i++) {
-        result += i * 0.5;
+    for (long i = 0; i < ITERATIONS; i++) {
+        result += (double)i * 0.5;
     }
     g_result_d = result;
 }
@@ -80,8 +80,8 @@ static void test_double_add(void *arg) {
 static void test_double_mul(void *arg) {
     (void)arg;
     double result = 1.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result *= i * 0.00001;
+    for (long i = 1; i < ITERATIONS; i++) {
+        result *= (double)i * 0.00001;
         if (result < 0.0001) result = 1.0;
     }
     g_result_d = result;
@@ -92,8 +92,8 @@ static void test_double_div(void *arg) {
     (void)arg;
     double result = 1.0;
     volatile double dividend = 1000000.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result = dividend / i;
+    for (long i = 1; i < ITERATIONS; i++) {
+        result = dividend / (double)i;
     }
     g_result_d = result;
 }
@@ -102,8 +102,8 @@ static void test_double_div(void *arg) {
 static void test_double_sqrt(void *arg) {
     (void)arg;
     double result = 0.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result = sqrt(i);
+    for (long i = 1; i < ITERATIONS; i++) {
+        result = sqrt((double)i);
     }
     g_result_d = result;
 }
@@ -112,8 +112,8 @@ static void test_double_sqrt(void *arg) {
 static void test_double_sin(void *arg) {
     (void)arg;
     double result = 0.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result += sin(i * 0.00001);
+    for (long i = 1; i < ITERATIONS; i++) {
+        result += sin((double)i * 0.00001);
     }
     g_result_d = result;
 }
@@ -122,8 +122,8 @@ static void test_double_sin(void *arg) {
 static void test_double_log(void *arg) {
     (void)arg;
     double result = 0.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result += log(i);
+    for (long i = 1; i < ITERATIONS; i++) {
+        result += log((double)i);
     }
     g_result_d = result;
 }
@@ -132,7 +132,7 @@ static void test_double_log(void *arg) {
 static void test_double_pow(void *arg) {
     (void)arg;
     double result = 1.0;
-    for (double i = 1; i < ITERATIONS; i++) {
+    for (long i = 1; i < ITERATIONS; i++) {
         result = pow(result, 0.5);  /* sqrt via pow */
         if (result < 0.1) result = 2.0;
     }
@@ -143,8 +143,8 @@ static void test_double_pow(void *arg) {
 static void test_float_mixed(void *arg) {
     (void)arg;
     double result = 0.0;
-    for (double i = 1; i < ITERATIONS; i++) {
-        result += i * 0.5;
+    for (long i = 1; i < ITERATIONS; i++) {
+        result += (double)i * 0.5;
         result *= 1.00001;
         result = sqrt(result);
         if (result > 1000.0) result = 1.0;

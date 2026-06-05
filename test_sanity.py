@@ -76,7 +76,7 @@ RANGES = {
     },
     # cpu_multi: scaling efficiency at N threads
     "cpu_multi": {
-        "Mul_efficiency_at_8_threads_pct": (50.0, 100.0, "Mul scaling efficiency at 8 threads"),
+        "Mod_efficiency_at_8_threads_pct": (50.0, 100.0, "Mod scaling efficiency at 8 threads"),
     },
 }
 
@@ -313,13 +313,13 @@ def parse_cpu_branch(text):
 def parse_cpu_multi(text):
     """Returns scaling efficiency of integer Mul at 8 threads (%).
     Tables look like: | Op | Type | Threads | Time(ms) | Speedup | Efficiency | Status |"""
-    out = {"Mul_efficiency_at_8_threads_pct": None}
+    out = {"Mod_efficiency_at_8_threads_pct": None}
     for line in text.split("\n"):
-        # Match: | Mul | ALU | 8 | 60.27 | 7.68x | 96.0% | optimal |
-        m = re.match(r"\|\s*Mul\s*\|\s*ALU\s*\|\s*8\s*\|.*?\|\s*([\d.]+)%\s*\|", line)
+        # Match: | Mod | ALU | 8 | 60.27 | 7.68x | 96.0% | optimal |
+        m = re.match(r"\|\s*Mod\s*\|\s*ALU\s*\|\s*8\s*\|.*?\|\s*([\d.]+)%\s*\|", line)
         if m:
             try:
-                out["Mul_efficiency_at_8_threads_pct"] = float(m.group(1))
+                out["Mod_efficiency_at_8_threads_pct"] = float(m.group(1))
             except ValueError:
                 pass
     return out

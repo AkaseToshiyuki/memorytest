@@ -55,7 +55,9 @@ static void *thread_alu_add(void *arg) {
     return NULL;
 }
 
-static void *thread_alu_mul(void *arg) {
+/* Naming note: the dominant op is x86_64/ARM64 'div' (mod = remainder of div).
+ * The % 1000000007 is a REAL modulo measurement, not just anti-opt noise. */
+static void *thread_alu_mod(void *arg) {
     ThreadArgs *t = (ThreadArgs *)arg;
     uint64_t per_thread = ITERATIONS / t->num_threads;
     uint64_t start = t->thread_id * per_thread;
@@ -140,20 +142,24 @@ typedef struct {
 
 static MultiCoreTest tests[] = {
     {"Add",         "ALU",    thread_alu_add,      0},
-    {"Mul",         "ALU",    thread_alu_mul,      0},
+    {"Mod",         "ALU",    thread_alu_mod,      0},
     {"double Add",  "FPU",    thread_double_add,   0},
     {"double Mul",  "FPU",    thread_double_mul,    0},
 };
 
-/* 估计理论内存带宽 (GB/s) */
-static double estimate_theoretical_bw(void) {
-    int channels = get_memory_channels();
-    int freq = get_cpu_freq_mhz();
-
-    /* 简化的DDR带宽估计: channels * freq * 8 bytes (DDR8) */
-    /* 实际带宽 = 理论带宽 * 0.85 (效率因子) */
-    double bw_per_channel = freq * 8.0 * 0.85;  /* GB/s */
-    return channels * bw_per_channel;
+/* Get theoretical memory bandwidth (GB/s) from runtime DRAM speed detection.
+ * Uses global_system_config.dram_speed_mt_s (detected via dmidecode/lscpu/sysfs
+ * in initialize_dram_speed()). Returns 0 if DRAM speed is unknown (non-fatal:
+ * the report shows "N/A" rather than a false estimate). */
+static double get_theoretical_bw_gbps(void) {
+    if (global_system_config.dram_speed_mt_s <= 0 ||
+        global_system_config.memory_channels <= 0) {
+        return 0.0;  /* unknown */
+    }
+    /* bandwidth_per_channel (GB/s) = MT/s × 8 bytes × 0.85 efficiency factor */
+    double bw_per_channel =
+        (double)global_system_config.dram_speed_mt_s * 8.0 * 0.85 / 1000.0;
+    return (double)global_system_config.memory_channels * bw_per_channel;
 }
 
 static double run_multi_core_benchmark(void *(*func)(void *), int num_threads, int use_pthread_barrier) {
@@ -242,10 +248,15 @@ void run_cpu_multi_core_test(void) {
     printf("CPU Frequency: %d MHz\n", freq);
     printf("Iterations: %d per core\n\n", ITERATIONS);
 
-    /* 估计理论带宽 */
-    double theoretical_bw = estimate_theoretical_bw();
-    printf("Estimated Memory Bandwidth: %.1f GB/s (%.1f GB/s per channel)\n\n",
-           theoretical_bw, theoretical_bw / channels);
+    /* Estimate theoretical bandwidth from DRAM speed detection */
+    double theoretical_bw = get_theoretical_bw_gbps();
+    if (theoretical_bw > 0.0) {
+        printf("Estimated Memory Bandwidth: %.1f GB/s (DRAM %d MT/s × %d channels)\n\n",
+               theoretical_bw, global_system_config.dram_speed_mt_s,
+               global_system_config.memory_channels);
+    } else {
+        printf("Estimated Memory Bandwidth: N/A (DRAM speed unknown)\n\n");
+    }
 
     int num_tests = sizeof(tests) / sizeof(tests[0]);
     int pmu_available = (perf_init_counters() == 0);

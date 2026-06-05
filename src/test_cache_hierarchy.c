@@ -176,7 +176,7 @@ static double measure_pointer_chase_latency(void *ptr, size_t size, int iteratio
     for (int iter = 0; iter < iterations; iter++) {
         idx = iter % words;  /* 从不同起点开始 */
 
-        uint64_t start = get_time_ns();
+        uint64_t start = rdtsc_ns();
         for (int i = 0; i < INNER_LOOP; i++) {
             idx = indices[idx];
             volatile uint64_t val = p[idx];  /* 真正读取 */
@@ -251,29 +251,6 @@ static double measure_write_latency(void *ptr, size_t size, int samples) {
     return result;
 }
 
-/* ========== 单线程顺序读带宽 ========== */
-static void *single_seq_read(void *arg) {
-    ThreadArgs *args = (ThreadArgs *)arg;
-    volatile uint64_t *p = (volatile uint64_t *)args->ptr;
-    size_t words = args->size / sizeof(uint64_t);
-
-    uint64_t start = get_time_ns();
-    thread_sum = 0;
-
-    for (int iter = 0; iter < args->iterations; iter++) {
-        for (size_t i = 0; i < words; i++) {
-            thread_sum += p[i];
-        }
-    }
-
-    uint64_t end = get_time_ns();
-    uint64_t total = (uint64_t)args->iterations * args->size;
-    args->result = ((double)total / (1024 * 1024)) / ((double)(end - start) / NS_PER_SEC);
-    (void)thread_sum;
-
-    return NULL;
-}
-
 /* ========== 多线程顺序读带宽 ========== */
 static void *multi_seq_read(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
@@ -299,6 +276,10 @@ static void *multi_seq_read(void *arg) {
 }
 
 /* ========== 多线程顺序写带宽 ========== */
+/* stride=8 elements (8×8=64 bytes = 1 cache line) — consistent with the
+ * read bandwidth measurement which reads one uint64_t per cache line when
+ * HW prefetch brings the next line. Each write touches a full cache line
+ * (write-allocate), so we count 64 bytes per access. */
 static void *multi_seq_write(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
     size_t per_thread = args->size / args->num_threads;
@@ -313,13 +294,14 @@ static void *multi_seq_write(void *arg) {
     uint64_t start = get_time_ns();
 
     for (int iter = 0; iter < args->iterations; iter++) {
-        for (size_t i = 0; i < words; i += 16) {
+        for (size_t i = 0; i < words; i += 8) {
             p[i] = iter + i;
         }
     }
 
     uint64_t end = get_time_ns();
-    uint64_t total = (uint64_t)args->iterations * (words / 16) * sizeof(uint64_t);
+    /* Each access writes one 64-byte cache line (write-allocate). */
+    uint64_t total = (uint64_t)args->iterations * (words / 8) * 64;
     args->result = ((double)total / (1024 * 1024)) / ((double)(end - start) / NS_PER_SEC);
 
     return NULL;
@@ -393,16 +375,6 @@ static double multi_copy_bandwidth(void *src, void *dst, size_t size, int thread
     }
 
     return total;
-}
-
-/* 单线程带宽 */
-static double single_bandwidth(void *ptr, size_t size, int iterations) {
-    pthread_t tid;
-    ThreadArgs args = {0, 1, ptr, size, iterations, 0};
-    single_seq_read(&args);
-    pthread_create(&tid, NULL, single_seq_read, &args);
-    pthread_join(tid, NULL);
-    return args.result;
 }
 
 /* 多线程带宽 */

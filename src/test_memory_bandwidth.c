@@ -9,6 +9,7 @@
 
 #include "common.h"
 #include "util.h"
+#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -103,33 +104,57 @@ static void *copy_thread_func(void *arg) {
     return NULL;
 }
 
-/* 随机读延迟线程 */
+/* Simple qsort comparator for doubles (used by random latency thread) */
+static int compare_double(const void *a, const void *b) {
+    double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
+/* 随机读延迟线程 — batched to avoid timer overhead dominating the measurement.
+ * get_time_ns() costs 20-50 ns per call. Reading one cache line and timing
+ * individually would produce ~40-80% noise. Instead we read BATCH_SIZE lines,
+ * time the whole batch, and divide. This is how measure_latency() in
+ * test_cache_hierarchy.c does it. */
 static void *random_read_latency_thread(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
     size_t per_thread_size = args->size / args->num_threads;
     volatile uint64_t *p = (volatile uint64_t *)((char *)args->ptr + args->thread_id * per_thread_size);
     size_t words = per_thread_size / sizeof(uint64_t);
 
-    uint64_t total_lat = 0;
-    int count = 0;
+    const int BATCH_SIZE = 1024;
+    int num_batches = args->iterations;
+    double *lats = malloc((size_t)num_batches * sizeof(double));
+    if (!lats) { args->latency = 0; return NULL; }
 
-    for (int iter = 0; iter < args->iterations; iter++) {
-        for (size_t i = 0; i < words; i += 16) {
-            uint64_t start = get_time_ns();
-            volatile uint64_t val = p[i];
-            uint64_t end = get_time_ns();
-            uint64_t lat = end - start;
-            if (lat < 5000 && lat > 0) {
-                total_lat += lat;
-                count++;
-            }
-            (void)val;
+    int count = 0;
+    static const uint64_t a = 6364136223846793005ULL;
+    static const uint64_t c = 1442695040888963407ULL;
+
+    for (int b = 0; b < num_batches && count < num_batches; b++) {
+        uint64_t lcg_state = b * 17 + 1;
+        uint64_t start = get_time_ns();
+        volatile uint64_t sum = 0;
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            lcg_state = a * lcg_state + c;
+            size_t idx = lcg_state % words;
+            sum += p[idx];
+        }
+        uint64_t end = get_time_ns();
+        (void)sum;
+        double batch_lat = (double)(end - start) / BATCH_SIZE;
+        if (batch_lat > 0.1 && batch_lat < 10000.0) {
+            lats[count++] = batch_lat;
         }
     }
 
-    thread_result = (count > 0) ? (double)total_lat / count : 0;
-    args->latency = thread_result;
-
+    /* Median of batch averages */
+    if (count > 0) {
+        qsort(lats, (size_t)count, sizeof(double), compare_double);
+        args->latency = lats[count / 2];
+    } else {
+        args->latency = 0;
+    }
+    free(lats);
     return NULL;
 }
 
