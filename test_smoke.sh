@@ -73,6 +73,12 @@ for binary in "${!TESTS[@]}"; do
     output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
     exit_code=$?
 
+    # Print diagnostics on non-zero exit
+    if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
+        echo "  --> last 10 lines of output (exit=$exit_code):"
+        echo "$output" | tail -n 10 | sed 's/^/      /'
+    fi
+
     # 124 = timeout
     if [ $exit_code -eq 124 ]; then
         printf "  ✗ %-25s TIMEOUT after %ds\n" "$binary" "$THIS_TIMEOUT"
@@ -98,6 +104,10 @@ for binary in "${!TESTS[@]}"; do
     size=$(stat -c %s "$report_file" 2>/dev/null || echo 0)
     if [ "$size" -lt 200 ]; then
         printf "  ✗ %-25s exit=%d  report %d bytes (too small)\n" "$binary" "$exit_code" "$size"
+        if [ "$size" -lt 100 ]; then
+            echo "  --> output summary (report < 100 bytes):"
+            echo "$output" | tail -n 10 | sed 's/^/      /'
+        fi
         FAIL=$((FAIL+1))
         continue
     fi

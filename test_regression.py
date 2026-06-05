@@ -11,7 +11,7 @@ Usage:
     python3 test_regression.py --baseline 1   # compare to most recent
     python3 test_regression.py --baseline 5   # compare to median of last 5
     python3 test_regression.py --record-only  # just record, skip compare
-    python3 test_regression.py --warn-pct 30 --fail-pct 60  # custom thresholds
+    python3 test_regression.py --warn-pct 15 --fail-pct 30  # built-in defaults shown explicitly
 
 Exit code 0 if all within tolerance, 1 if any metric fails the fail-pct.
 """
@@ -341,8 +341,8 @@ def compare(current: dict, history: list, n_baseline: int, warn_pct: float, fail
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--baseline", type=int, default=3, help="Number of recent runs to use as baseline (default 3, median)")
-    ap.add_argument("--warn-pct", type=float, default=25.0, help="Warn threshold %% deviation (default 25)")
-    ap.add_argument("--fail-pct", type=float, default=50.0, help="Fail threshold %% deviation (default 50)")
+    ap.add_argument("--warn-pct", type=float, default=15.0, help="Warn threshold %% deviation (default 15)")
+    ap.add_argument("--fail-pct", type=float, default=30.0, help="Fail threshold %% deviation (default 30)")
     ap.add_argument("--record-only", action="store_true", help="Just record current metrics, skip compare")
     ap.add_argument("--list", action="store_true", help="List history records and exit")
     args = ap.parse_args()

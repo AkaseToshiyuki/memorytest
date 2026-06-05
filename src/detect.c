@@ -376,8 +376,28 @@ static void prompt_cache_config_from_user(void) {
      *   - on TTY: prompts with sensible defaults
      *   - on non-TTY: returns defaults immediately (no blocking) */
     fprintf(stderr, "\n[Cache] Some cache levels were not auto-detected.\n");
+
+    /* Non-TTY fallback: use conservative but reasonable defaults. These
+     * are only a last resort — sysfs detection runs first and is unaffected.
+     * L1D=64KB matches most modern CPUs (Intel/AMD Zen, ARM Cortex-A7x).
+     * L2=512KB and L3=2MB are common mid-range values. */
+    if (!platform_is_tty()) {
+        fprintf(stderr, "[Cache] WARNING: non-TTY environment, using guessed defaults.\n"
+                        "              L1D=64KB, L2=512KB, L3=2MB.\n"
+                        "              Run interactively for accurate detection.\n");
+        if (global_cache_config.l1d_size == 0)
+            global_cache_config.l1d_size = 64 * 1024;
+        if (global_cache_config.l2_size == 0)
+            global_cache_config.l2_size = 512 * 1024;
+        if (global_cache_config.l3_size == 0)
+            global_cache_config.l3_size = 2 * 1024 * 1024;
+        global_cache_config.l1i_size = global_cache_config.l1d_size;
+        global_cache_config.detected = 1;
+        return;
+    }
+
     if (global_cache_config.l1d_size == 0) {
-        int kb = platform_prompt_int("  L1d cache size in KB", 32, 4, 1024);
+        int kb = platform_prompt_int("  L1d cache size in KB", 64, 4, 1024);
         global_cache_config.l1d_size = (size_t)kb * 1024;
     }
     if (global_cache_config.l2_size == 0) {
@@ -385,7 +405,7 @@ static void prompt_cache_config_from_user(void) {
         global_cache_config.l2_size = (size_t)kb * 1024;
     }
     if (global_cache_config.l3_size == 0) {
-        int kb = platform_prompt_int("  L3 cache size in KB (0 if none)", 0, 0, 1024 * 1024);
+        int kb = platform_prompt_int("  L3 cache size in KB (0 if none)", 2048, 0, 1024 * 1024);
         global_cache_config.l3_size = (size_t)kb * 1024;
     }
     global_cache_config.l1i_size = global_cache_config.l1d_size;
@@ -1373,7 +1393,21 @@ static void prompt_dram_speed_from_user(void) {
     fprintf(stderr, "  Common values: DDR3-1600/1866, DDR4-2400/2666/3200/3600/4000,\n");
     fprintf(stderr, "                  DDR5-4800/5200/5600/6000/6400,\n");
     fprintf(stderr, "                  LPDDR4-3200/4266, LPDDR5-5500/6400\n\n");
-    int mt_s = platform_prompt_int("  DRAM speed in MT/s (0 if unknown)", 0, 0, 100000);
+
+    /* Non-TTY fallback: use a conservative mid-range default (DDR4-2666).
+     * This is only a last resort — dmidecode/lscpu/sysfs run first and are
+     * unaffected. DDR4-2666 = 2666 MT/s = 1333 MHz (DDR transfers twice per
+     * clock). Most systems from 2018-2024 fall in the DDR4-2400 to DDR4-3200
+     * range, so 2666 is a reasonable mid-point. */
+    if (!platform_is_tty()) {
+        fprintf(stderr, "[DRAM] WARNING: non-TTY environment, using guessed default DDR4-2666 (2666 MT/s).\n"
+                        "              Run interactively for accurate detection.\n");
+        global_system_config.dram_speed_mt_s = 2666;
+        snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "DDR4");
+        return;
+    }
+
+    int mt_s = platform_prompt_int("  DRAM speed in MT/s (0 if unknown)", 2666, 0, 100000);
     if (mt_s > 0) {
         global_system_config.dram_speed_mt_s = mt_s;
         /* Pick standard from speed range (best guess; user can correct via
