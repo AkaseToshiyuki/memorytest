@@ -481,7 +481,11 @@ static double idx(const matrix_t *m, int i, int j, double *base) {
 void run_inter_core_latency_test(void) {
     print_header("INTER-CORE MEMORY ACCESS LATENCY TEST");
 
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    /* Use physical cores when HT/SMT is detected. Testing HT siblings
+     * doubles the matrix (N² → 4N² for same physical topology) and
+     * adds noise since siblings share execution units and caches. */
+    int physical = global_system_config.cpu_cores_physical;
+    long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cpus < 2) {
         printf("Not enough cores for inter-core test (need at least 2)\n");
         return;
@@ -498,7 +502,8 @@ void run_inter_core_latency_test(void) {
         return;
     }
 
-    printf("Detected %d CPU cores (worker pool size: %d)\n", n, n);
+    printf("Detected %d CPU cores (using %d physical, HT siblings excluded)\n",
+           global_system_config.cpu_cores, n);
     printf("CPU: %s @ %d MHz\n", global_system_config.cpu_model, get_cpu_freq_mhz());
     printf("Clock: CLOCK_MONOTONIC (PMU cycle counter requires sudo on this host)\n");
     printf("Synchronization: CAS busy-wait (atomic compare_exchange)\n\n");
@@ -748,8 +753,8 @@ void run_inter_core_latency_test(void) {
     free(bw_array);
     /* Workers are infinite loops; they'll exit on process exit. */
 
-    printf("\\n[DONE] Inter-core latency test complete.\\n");
-    printf("  Heatmap: run 'make report' to generate reports/charts/inter_core_heatmap.png\\n");
+    printf("\n[DONE] Inter-core latency test complete.\n");
+    printf("  Heatmap: run 'make report' to generate reports/charts/inter_core_heatmap.png\n");
 }
 
 int main(int argc, char *argv[]) {
