@@ -856,7 +856,7 @@ def _render_throughput_heatmap(matrix, output_path):
         for j in range(n):
             if np.isnan(matrix[i, j]):
                 label = "—"
-                color = '#888'
+                color = '#888888'
             else:
                 label = f'{matrix[i, j]:.0f}'
                 color = 'white' if matrix[i, j] < threshold else 'black'
@@ -897,7 +897,7 @@ def _render_heatmap(matrix, output_path):
         for j in range(n):
             if np.isnan(matrix[i, j]):
                 label = "—"
-                color = '#888'
+                color = '#888888'
             else:
                 label = f'{matrix[i, j]:.1f}'
                 color = 'white' if matrix[i, j] > threshold else 'black'

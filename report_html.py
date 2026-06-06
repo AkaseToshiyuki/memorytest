@@ -236,7 +236,7 @@ def _svg_bar(value: float, max_val: float, width: int = 200, height: int = 20,
 
 def _svg_score_gauge(score: float, letter: str) -> str:
     """Render a large circular gauge for the overall score."""
-    color = {"A": "#22c55e", "B": "#84cc16", "C": "#eab308", "D": "#f97316", "F": "#ef4444"}.get(letter, "#888")
+    color = {"A": "#22c55e", "B": "#84cc16", "C": "#eab308", "D": "#f97316", "F": "#ef4444"}.get(letter, "#888888")
     # SVG arc from 0 to score (out of 100), starting at 9 o'clock going clockwise
     angle = (score / 100.0) * 360.0
     rad = (angle - 90) * 3.14159 / 180.0
@@ -911,7 +911,7 @@ def build_html(score_dict: dict | None) -> str:
         cat_html = '<div>'
         for c in score_dict["categories"]:
             cat_color = {"A": "#22c55e", "B": "#84cc16", "C": "#eab308",
-                         "D": "#f97316", "F": "#ef4444"}.get(c["letter"], "#888")
+                         "D": "#f97316", "F": "#ef4444"}.get(c["letter"], "#888888")
             cat_html += f'''<div class="cat-row">
               <span class="name">{html.escape(c["name"])}</span>
               {_svg_bar(c["score"], 100, width=300, color=cat_color)}
@@ -939,7 +939,7 @@ def build_html(score_dict: dict | None) -> str:
                 elif m["score"] >= 60: cls = "score-warn"
                 else: cls = "score-bad"
                 score_html = f'<span class="{cls}">{m["score"]:.1f}/100</span>'
-                color = {"good": "#22c55e", "warn": "#f97316", "bad": "#ef4444"}.get(cls.split("-")[1] if "-" in cls else "good", "#888")
+                color = {"good": "#22c55e", "warn": "#f97316", "bad": "#ef4444"}.get(cls.split("-")[1] if "-" in cls else "good", "#888888")
                 bar = _svg_bar(m["score"], 100, width=300, color=color)
             unit = ""
             if m["value"] is not None:
