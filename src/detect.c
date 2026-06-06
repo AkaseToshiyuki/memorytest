@@ -254,6 +254,7 @@ static size_t read_sysfs_cache_size(int index) {
     char path[256];
     char line[64];
 
+    /* Primary: read the 'size' file (e.g. "64K", "512K"). */
     snprintf(path, sizeof(path),
              "/sys/devices/system/cpu/cpu0/cache/index%d/size", index);
 
@@ -272,6 +273,37 @@ static size_t read_sysfs_cache_size(int index) {
         }
         fclose(f);
     }
+
+    /* Fallback: some ARM SoCs (Snapdragon X Elite) expose cache topology
+     * but omit the 'size' file.  Compute from ways × sets × line_size. */
+    size_t line_size = 0, num_sets = 0, ways = 0;
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/coherency_line_size", index);
+    f = fopen(path, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) line_size = strtoul(line, NULL, 10);
+        fclose(f);
+    }
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/number_of_sets", index);
+    f = fopen(path, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) num_sets = strtoul(line, NULL, 10);
+        fclose(f);
+    }
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cache/index%d/ways_of_associativity", index);
+    f = fopen(path, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) ways = strtoul(line, NULL, 10);
+        fclose(f);
+    }
+
+    if (line_size > 0 && num_sets > 0 && ways > 0)
+        return line_size * num_sets * ways;
 
     return 0;
 }
@@ -431,10 +463,16 @@ static int detect_cache_via_sysfs(void) {
     size_t l1d = 0, l1i = 0, l2 = 0, l3 = 0;
 
     for (int i = 0; i < 10; i++) {
-        size_t size = read_sysfs_cache_size(i);
-        if (size == 0) break;
-
         int level = read_sysfs_cache_level(i);
+        /* No more cache index entries — stop scanning. */
+        if (level == 0) break;
+
+        size_t size = read_sysfs_cache_size(i);
+        /* On some ARM SoCs (e.g. Snapdragon X Elite) the 'size' file
+         * may be missing; fallback logic in read_sysfs_cache_size
+         * tries ways×sets×line_size. If still 0, skip this index. */
+        if (size == 0) continue;
+
         const char *type = read_sysfs_cache_type(i);
 
         if (level == 1) {
