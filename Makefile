@@ -99,12 +99,29 @@ regression-record:
 # and produce the canonical HTML report. The HTML is the single source of truth —
 # open it in any browser, or use the browser's print-to-PDF. Also computes the
 # 0-100 score with letter grade.
-report:
+report: deps
 	@echo "=== generating HTML report ==="
 	@/usr/bin/python3 report_html.py
 	@echo ""
 	@echo "=== score summary ==="
 	@python3 report_score.py | head -10
+
+# Verify Python dependencies needed for chart generation.
+# Does NOT auto-install — prints the command you need.
+deps:
+	@python3 -c "import matplotlib" 2>/dev/null && exit 0; \
+	 echo "=== Missing Python dependencies ==="; \
+	 echo ""; \
+	 echo "  matplotlib is required to generate PNG charts (cache latency,"; \
+	 echo "  bandwidth, inter-core heatmaps, multi-core scaling)."; \
+	 echo "  The HTML report can be generated without it, but charts"; \
+	 echo "  will show placeholders."; \
+	 echo ""; \
+	 echo "  Install:"; \
+	 echo "    pip3 install matplotlib --break-system-packages"; \
+	 echo ""; \
+	 echo "======================================="; \
+	 echo ""
 
 # Print score summary only (no report)
 score:

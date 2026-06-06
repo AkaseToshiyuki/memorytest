@@ -1369,7 +1369,9 @@ def _ensure_charts() -> None:
     """
     try:
         import generate_report as gr
-    except ImportError:
+    except ImportError as e:
+        print(f"# WARN: cannot import generate_report ({e}) — charts will be missing", file=sys.stderr)
+        print("#       Install: pip3 install matplotlib --break-system-packages", file=sys.stderr)
         return
     CHARTS.mkdir(parents=True, exist_ok=True)
     cache_md = REPORTS / "cache_hierarchy_report.md"
