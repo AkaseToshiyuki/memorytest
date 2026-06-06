@@ -834,7 +834,7 @@ def _render_throughput_heatmap(matrix, output_path):
     """Render an NxN throughput matrix (MOPS) — blue-green scale, NaN = grey."""
     import numpy as np
     fig, ax = plt.subplots(figsize=(12, 10))
-    cmap = plt.get_cmap('YlGnBu').copy()
+    cmap = plt.get_cmap('YlGnBu')  # .copy() not available in matplotlib < 3.3
     cmap.set_bad(color='#d0d0d0')
     masked = np.ma.masked_invalid(matrix)
     im = ax.imshow(masked, cmap=cmap, aspect='auto',
@@ -875,7 +875,7 @@ def _render_heatmap(matrix, output_path):
     """Common matplotlib rendering for an NxN latency matrix (NaN = no data)."""
     import numpy as np
     fig, ax = plt.subplots(figsize=(12, 10))
-    cmap = plt.get_cmap('YlOrRd').copy()
+    cmap = plt.get_cmap('YlOrRd')  # .copy() not available in matplotlib < 3.3
     cmap.set_bad(color='#d0d0d0')
     masked = np.ma.masked_invalid(matrix)
     im = ax.imshow(masked, cmap=cmap, aspect='auto',
