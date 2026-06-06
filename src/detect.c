@@ -783,6 +783,18 @@ static int detect_memory_channels_dmidecode(void) {
         return -1;
     }
     pclose(fp);
+    if (count > 0) return count;
+
+    /* Fallback: soldered LPDDR or other memory where Locator/Bank Locator
+     * fields don't contain the word "CHANNEL" (e.g. "Onboard", "Onboard").
+     * Count populated memory devices with size in MB or GB (excludes
+     * flash chips in kB and empty "No Module Installed" slots). */
+    fp = sudo_popen("dmidecode -t memory 2>/dev/null | grep -cE 'Size: [0-9]+ [MG]B'");
+    if (!fp) return -1;
+    if (fscanf(fp, "%d", &count) != 1) { pclose(fp); return -1; }
+    pclose(fp);
+    if (count > 0)
+        fprintf(stderr, "[Memory] Channel keyword not found; fallback: %d populated DIMM(s)\n", count);
     return (count > 0) ? count : -1;
 }
 
