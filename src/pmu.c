@@ -249,33 +249,68 @@ int perf_init_counters(void) {
     perf_counters.l1d_miss_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
 
 #elif defined(__x86_64__)
+    /* Try raw PMU events (type=6) first — they give the most detail but
+     * require perf_event_paranoid ≤ 2. Fall back to PERF_TYPE_HARDWARE
+     * (type=0) when raw events are blocked (paranoid ≥ 3), which at
+     * least gives cycles/instructions/branch-misses. */
+    int use_raw = 1;
+
     attr.type = 6;  /* PERF_TYPE_RAW */
 
     /* CPU cycles */
     attr.config = X86_CPU_CYCLES;
     perf_counters.cycles_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
 
-    /* Instructions retired */
-    attr.config = X86_INST_RETIRED;
-    perf_counters.inst_retired_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+    /* If raw events are blocked, switch to hardware counters */
+    if (perf_counters.cycles_fd < 0) {
+        use_raw = 0;
+        attr.type = 0;  /* PERF_TYPE_HARDWARE */
+        attr.config = 0;  /* PERF_COUNT_HW_CPU_CYCLES */
+        perf_counters.cycles_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+    }
 
-    /* Branch mispredictions */
-    attr.config = X86_BRANCH_MISSPRED;
-    perf_counters.branch_mispred_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+    if (use_raw) {
+        attr.type = 6;
 
-    /* Memory accesses */
-    attr.config = X86_MEM_ACCESS;
-    perf_counters.mem_access_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+        /* Instructions retired */
+        attr.config = X86_INST_RETIRED;
+        perf_counters.inst_retired_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
 
-    /* L1 cache misses */
-    attr.config = X86_L1D_CACHE_REFILL;
-    perf_counters.l1d_miss_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+        /* Branch mispredictions */
+        attr.config = X86_BRANCH_MISSPRED;
+        perf_counters.branch_mispred_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+
+        /* Memory accesses */
+        attr.config = X86_MEM_ACCESS;
+        perf_counters.mem_access_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+
+        /* L1 cache misses */
+        attr.config = X86_L1D_CACHE_REFILL;
+        perf_counters.l1d_miss_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+    } else {
+        /* Hardware counters fallback: fewer events but work at any paranoid level */
+        attr.type = 0;
+
+        attr.config = 1;  /* PERF_COUNT_HW_INSTRUCTIONS */
+        perf_counters.inst_retired_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+
+        attr.config = 4;  /* PERF_COUNT_HW_BRANCH_MISSES */
+        perf_counters.branch_mispred_fd = sys_perf_event_open(&attr, 0, -1, -1, 0);
+
+        /* mem_access and l1d_miss not available via hardware counters */
+    }
 
 #else
     /* Other architectures: not supported with PMU */
     return -1;
 #endif
 
+    /* Verify at least one essential counter opened. cycles_fd or
+     * inst_retired_fd must be valid; without either, PMU is unusable. */
+    if (perf_counters.cycles_fd < 0 && perf_counters.inst_retired_fd < 0) {
+        printf("[PMU] Performance counters not available\n");
+        return -1;
+    }
     return 0;
 }
 
