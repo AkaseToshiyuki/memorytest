@@ -430,16 +430,22 @@ static double multi_copy_bandwidth(void *src, void *dst, size_t size, int thread
         args[i].result = 0;
     }
 
+    int threads_created = 0;
     for (int i = 0; i < threads; i++) {
-        pthread_create(&tids[i], NULL, multi_seq_copy, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, multi_seq_copy, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
         results[i] = args[i].result;
     }
 
     double total = 0;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         total += results[i];
     }
 
@@ -461,16 +467,22 @@ static double multi_bandwidth(void *ptr, size_t size, int threads, int iteration
         args[i].result = 0;
     }
 
+    int threads_created = 0;
     for (int i = 0; i < threads; i++) {
-        pthread_create(&tids[i], NULL, func, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, func, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
         results[i] = args[i].result;
     }
 
     double total = 0;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         total += results[i];
     }
 

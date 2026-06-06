@@ -180,11 +180,17 @@ static double run_multi_core_benchmark(void *(*func)(void *), int num_threads, i
 
     uint64_t start = get_time_ns();
 
+    int threads_created = 0;
     for (int i = 0; i < num_threads; i++) {
-        pthread_create(&tids[i], NULL, func, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, func, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
 
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
     }
 
@@ -213,11 +219,17 @@ static double run_mem_bw_benchmark(int num_threads, void *buffer) {
 
     uint64_t start = get_time_ns();
 
+    int threads_created = 0;
     for (int i = 0; i < num_threads; i++) {
-        pthread_create(&tids[i], NULL, thread_mem_bw_read, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, thread_mem_bw_read, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
 
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
     }
 

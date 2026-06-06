@@ -219,18 +219,24 @@ static double measure_parallel_bandwidth(void *ptr, size_t size, int threads, in
     }
 
     /* 创建线程 */
+    int threads_created = 0;
     for (int i = 0; i < threads; i++) {
-        pthread_create(&tids[i], NULL, thread_func, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, thread_func, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
 
     /* 等待完成 */
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
     }
 
     /* 汇总带宽 */
     double total_bw = 0;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         total_bw += bandwidths[i];
     }
 
@@ -252,21 +258,27 @@ static double measure_parallel_latency(void *ptr, size_t size, int threads, int 
         args[i].latency = 0;
     }
 
+    int threads_created = 0;
     for (int i = 0; i < threads; i++) {
-        pthread_create(&tids[i], NULL, random_read_latency_thread, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, random_read_latency_thread, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
 
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
         latencies[i] = args[i].latency;
     }
 
     /* 返回平均延迟 */
     double total_lat = 0;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         total_lat += latencies[i];
     }
-    return total_lat / threads;
+    return threads_created > 0 ? total_lat / threads_created : 0;
 }
 
 /* 多线程测量写延迟 */
@@ -284,21 +296,27 @@ static double measure_parallel_write_latency(void *ptr, size_t size, int threads
         args[i].latency = 0;
     }
 
+    int threads_created = 0;
     for (int i = 0; i < threads; i++) {
-        pthread_create(&tids[i], NULL, random_write_latency_thread, &args[i]);
+        int ret = pthread_create(&tids[i], NULL, random_write_latency_thread, &args[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Warning: thread %d creation failed: %s\n", i, strerror(ret));
+            break;
+        }
+        threads_created++;
     }
 
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         pthread_join(tids[i], NULL);
         latencies[i] = args[i].latency;
     }
 
     /* 返回平均延迟 */
     double total_lat = 0;
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < threads_created; i++) {
         total_lat += latencies[i];
     }
-    return total_lat / threads;
+    return threads_created > 0 ? total_lat / threads_created : 0;
 }
 
 void run_memory_bandwidth_test(size_t size, int threads) {

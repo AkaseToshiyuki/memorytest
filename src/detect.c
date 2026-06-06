@@ -9,8 +9,6 @@
 #include "stddef.h"
 #include <stdarg.h>
 #include <string.h>
-#include <signal.h>
-#include <setjmp.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -18,36 +16,60 @@
 
 /* ========== ARM Cache Detection ========== */
 #ifdef __aarch64__
-static sigjmp_buf sigill_jmp;
-static volatile sig_atomic_t sigill_occurred;
+/* Try to execute an MRS instruction in a child process.  If the instruction
+ * is illegal (SIGILL), the child dies and the parent sees WIFSIGNALED.
+ * This is race-free and POSIX-compliant — no signal handlers, no setjmp,
+ * no window where a spurious SIGILL could longjmp to a stale jump buffer. */
+static int try_mrs_child(const char *which, uint64_t *val) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
 
-static void sigill_handler(int sig) {
-    sigill_occurred = 1;
-    siglongjmp(sigill_jmp, 1);
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child: close read end, attempt the MRS, write result to pipe. */
+        close(pipefd[0]);
+        uint64_t v = 0;
+        if (strcmp(which, "ctr_el0") == 0)
+            __asm__ volatile("mrs %0, ctr_el0" : "=r"(v));
+        else
+            __asm__ volatile("mrs %0, clidr_el1" : "=r"(v));
+        ssize_t n = write(pipefd[1], &v, sizeof(v));
+        close(pipefd[1]);
+        _exit(n == sizeof(v) ? 0 : 1);
+    }
+
+    /* Parent: close write end, wait for child, check outcome. */
+    close(pipefd[1]);
+
+    int status;
+    if (waitpid(pid, &status, 0) != pid) {
+        close(pipefd[0]);
+        return -1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        /* Child was killed by SIGILL, another signal, or wrote bad data. */
+        close(pipefd[0]);
+        return -1;
+    }
+
+    ssize_t n = read(pipefd[0], val, sizeof(*val));
+    close(pipefd[0]);
+    return (n == sizeof(*val)) ? 0 : -1;
 }
 
 static int try_read_ctr_el0(uint64_t *val) {
-    signal(SIGILL, sigill_handler);
-    sigill_occurred = 0;
-    if (sigsetjmp(sigill_jmp, 1) == 0) {
-        __asm__ volatile("mrs %0, ctr_el0" : "=r"(*val));
-        signal(SIGILL, SIG_DFL);
-        return 0;
-    }
-    signal(SIGILL, SIG_DFL);
-    return -1;
+    return try_mrs_child("ctr_el0", val);
 }
 
 static int try_read_clidr_el1(uint64_t *val) {
-    signal(SIGILL, sigill_handler);
-    sigill_occurred = 0;
-    if (sigsetjmp(sigill_jmp, 1) == 0) {
-        __asm__ volatile("mrs %0, clidr_el1" : "=r"(*val));
-        signal(SIGILL, SIG_DFL);
-        return 0;
-    }
-    signal(SIGILL, SIG_DFL);
-    return -1;
+    return try_mrs_child("clidr_el1", val);
 }
 
 static size_t get_arm_cache_line_size(void) {
