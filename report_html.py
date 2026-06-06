@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """Memorytest HTML report generator (zero dependencies, pure stdlib).
 
 Produces a self-contained HTML file with:

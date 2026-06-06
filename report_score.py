@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """Memorytest scoring system.
 
 Rates each tracked metric on a 0-100 scale based on how the measured value

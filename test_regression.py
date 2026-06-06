@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """Memorytest Layer 3: Regression detection across runs.
 
 Records each test run's metrics to history.jsonl and compares current
