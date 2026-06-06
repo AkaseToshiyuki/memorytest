@@ -78,7 +78,7 @@ make distclean    # Remove binaries and reports
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CPU_TIMEOUT` | `90 + (N-24)*4` | Seconds for CPU-bound tests (auto-scales with core count). Set higher for ARM. |
+| `CPU_TIMEOUT` | `120 + (N-24)*4` | Seconds for CPU-bound tests (auto-scales with core count). Set higher for ARM. |
 | `MEMORYTEST_SUDO_PASSWORD` | *(unset)* | Password for `dmidecode` (memory channels, DRAM speed, CPU frequency). When unset, TTY users are prompted interactively once per session. |
 
 ```bash
@@ -268,7 +268,7 @@ make distclean    # 删除二进制和报告
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `CPU_TIMEOUT` | `90 + (N-24)*4` | CPU 测试时间上限（秒），按核心数自动缩放。ARM 平台建议设置更高。 |
+| `CPU_TIMEOUT` | `120 + (N-24)*4` | CPU 测试时间上限（秒），按核心数自动缩放。ARM 平台建议设置更高。 |
 | `MEMORYTEST_SUDO_PASSWORD` | *(未设置)* | `dmidecode` 密码（内存通道数、DRAM 速度、CPU 频率）。未设置时终端用户每次会话交互式提示一次。 |
 
 ## 自动检测

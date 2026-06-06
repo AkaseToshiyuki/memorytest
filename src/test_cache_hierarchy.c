@@ -669,7 +669,11 @@ void run_cache_hierarchy_test(void) {
     fflush(stdout);
     print_header("CACHE HIERARCHY TEST");
 
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    /* Use physical cores when HT/SMT is detected — same logic as inter_core
+     * and multi_core tests. HT siblings share caches and add noise to
+     * latency measurements without providing additional bandwidth. */
+    int physical = global_system_config.cpu_cores_physical;
+    long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;
     if (threads < 1) threads = 1;
     if (threads > MAX_THREADS) {
