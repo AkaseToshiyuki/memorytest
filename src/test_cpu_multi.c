@@ -231,7 +231,11 @@ static double run_mem_bw_benchmark(int num_threads, void *buffer) {
 void run_cpu_multi_core_test(void) {
     print_header("CPU MULTI-CORE PERFORMANCE TEST");
 
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    /* Use physical cores when HT/SMT is detected — same logic as inter_core test.
+     * Testing HT siblings adds noise (shared execution units / caches) and
+     * the points beyond physical-core count show scaling collapse anyway. */
+    int physical = global_system_config.cpu_cores_physical;
+    long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
     int max_threads = (int)num_cpus;
     if (max_threads < 1) max_threads = 1;
     if (max_threads > MAX_THREADS) {
@@ -272,9 +276,21 @@ void run_cpu_multi_core_test(void) {
         }
     }
 
-    /* 测试不同线程数 */
-    int thread_counts[] = {1, 2, 4, 8, 16, max_threads};
-    int num_thread_counts = sizeof(thread_counts) / sizeof(thread_counts[0]);
+    /* Generate thread counts: powers of 2, then evenly-spaced intermediates
+     * up to max_threads so there is no huge jump (e.g. 16→96). */
+    int thread_counts[16];
+    int num_thread_counts = 0;
+    for (int t = 1; t <= max_threads; t *= 2)
+        thread_counts[num_thread_counts++] = t;
+    if (thread_counts[num_thread_counts - 1] < max_threads) {
+        int last = thread_counts[num_thread_counts - 1];
+        int gap = max_threads - last;
+        int step = gap / 5;
+        if (step < 2) step = 2;
+        for (int t = last + step; t < max_threads; t += step)
+            thread_counts[num_thread_counts++] = t;
+        thread_counts[num_thread_counts++] = max_threads;
+    }
 
     printf("\n=== Multi-Core Scaling ===\n\n");
 
@@ -332,15 +348,19 @@ void run_cpu_multi_core_test(void) {
     if (mem_buffer) {
         memset(mem_buffer, 1, MEM_TEST_SIZE * 2);
 
-        int mem_thread_counts[6];
+        int mem_thread_counts[16];
         int num_mem_thread_counts = 0;
-        int base_mem_counts[] = {1, 2, 4, 8, 16};
-        for (int b = 0; b < 5; b++) {
-            if (base_mem_counts[b] <= max_threads)
-                mem_thread_counts[num_mem_thread_counts++] = base_mem_counts[b];
-        }
-        if (max_threads > 16)
+        for (int t = 1; t <= max_threads; t *= 2)
+            mem_thread_counts[num_mem_thread_counts++] = t;
+        if (mem_thread_counts[num_mem_thread_counts - 1] < max_threads) {
+            int last = mem_thread_counts[num_mem_thread_counts - 1];
+            int gap = max_threads - last;
+            int step = gap / 5;
+            if (step < 2) step = 2;
+            for (int t = last + step; t < max_threads; t += step)
+                mem_thread_counts[num_mem_thread_counts++] = t;
             mem_thread_counts[num_mem_thread_counts++] = max_threads;
+        }
 
         /* 预热 */
         run_mem_bw_benchmark(1, mem_buffer);
