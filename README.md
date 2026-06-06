@@ -34,15 +34,16 @@ That's it. No dependencies beyond a C compiler and Python 3 (stdlib only).
 
 ## Test Architecture
 
-`make test` runs three mandatory layers:
+`make test` runs three mandatory layers plus HTML report generation:
 
 | Layer | What | How |
 |-------|------|-----|
 | **L1 Smoke** | Did every binary run? | `test_smoke.sh` — exit codes, report presence |
 | **L2 Sanity** | Are numbers physically plausible? | `test_sanity.py` — range checks per metric |
 | **L3 Regression** | Did performance change vs history? | `test_regression.py` — ±15% warn, ±30% fail |
+| **Report** | HTML summary with charts/heatmaps | `report_html.py` — auto-generated after all layers pass |
 
-All three must pass. No shortcuts. Detailed architecture: [TEST_LAYERS.md](TEST_LAYERS.md)
+All three layers must pass. Detailed architecture: [TEST_LAYERS.md](TEST_LAYERS.md)
 
 ## Test Binaries
 
@@ -52,7 +53,7 @@ All three must pass. No shortcuts. Detailed architecture: [TEST_LAYERS.md](TEST_
 |--------|----------|
 | `test_cache_hierarchy` | L1D/L2/L3/DRAM latency (pointer-chase), bandwidth per level, boundary detection |
 | `test_memory_bandwidth` | Multi-thread read/write/copy bandwidth to DRAM |
-| `test_inter_core` | Core-to-core CAS latency (N×N matrix), intra/跨 CCD latency |
+| `test_inter_core` | Core-to-core CAS latency + throughput (N×N matrix, heatmaps) |
 
 ### CPU
 
@@ -77,8 +78,8 @@ make distclean    # Remove binaries and reports
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CPU_TIMEOUT` | `60` | Seconds for CPU-bound tests (scales automatically) |
-| `MEMORYTEST_SUDO_PASSWORD` | *(unset)* | Password for `dmidecode` (memory channels, DRAM speed). No sudo needed for basic benchmarks |
+| `CPU_TIMEOUT` | `90 + (N-24)*4` | Seconds for CPU-bound tests (auto-scales with core count). Set higher for ARM. |
+| `MEMORYTEST_SUDO_PASSWORD` | *(unset)* | Password for `dmidecode` (memory channels, DRAM speed, CPU frequency). When unset, TTY users are prompted interactively once per session. |
 
 ```bash
 # Example: give CPU tests more time on slow hardware
@@ -95,11 +96,11 @@ All hardware parameters are detected at runtime — no hardcoded values:
 
 | Parameter | Method |
 |-----------|--------|
-| CPU model, cores, frequency | sysfs, cpuid, lscpu |
+| CPU model, cores, frequency | sysfs, dmidecode (with sudo), lscpu |
 | Cache sizes (L1/L2/L3) | sysfs |
 | L3 per-CCD / total (multi-chiplet) | sysfs + topology |
-| Memory channels | dmidecode (with sudo) or CPU model heuristic |
-| DRAM speed (MT/s) | dmidecode (with sudo) |
+| Memory channels | dmidecode (with sudo), or interactive prompt |
+| DRAM speed (MT/s), standard (DDR4/DDR5) | dmidecode (with sudo), then lscpu, then sysfs |
 | NUMA topology | sysfs |
 
 **Multi-CCD support:** On AMD EPYC/Ryzen with multiple CCDs (e.g. EPYC 7R13: 8 CCDs × 32 MB L3 = 256 MB total), the benchmark correctly accounts for the aggregate L3 when deciding buffer sizes and labelling measurement points. This prevents DRAM measurements from landing inside the LLC on large-cache servers.
@@ -187,7 +188,7 @@ memorytest/
 
 ## Caveats
 
-- **`dmidecode` needs sudo.** Set `MEMORYTEST_SUDO_PASSWORD` for full hardware detection. Without it, memory channels and DRAM speed are estimated.
+- **`dmidecode` needs sudo.** On a real terminal (TTY), the benchmark prompts once and caches the password for 10 minutes across all binaries. In CI, set `MEMORYTEST_SUDO_PASSWORD` or leave it unset (benchmarks still run, but channels/speed will be prompted or shown as N/A).
 - **PMU counters need `perf_event_paranoid ≤ 2`.** Falls back to timing-based estimates gracefully.
 - **Virtualized environments** (cloud VMs, containers) may report cached or noisy latency values — the benchmark assumes bare-metal or near-bare-metal access to CPU caches.
 - **Inter-core test** on large machines (96+ cores) can take 5+ minutes. Set `CPU_TIMEOUT` to scale accordingly.
@@ -223,13 +224,14 @@ make test
 
 ## 测试架构
 
-`make test` 运行三层强制测试：
+`make test` 运行三层强制测试加 HTML 报告：
 
 | 层 | 目标 | 方式 |
 |---|------|------|
 | **L1 冒烟** | 所有二进制是否正常运行？ | `test_smoke.sh` — 检查退出码与报告文件 |
 | **L2 合理性** | 数值是否在物理可行范围内？ | `test_sanity.py` — 逐指标范围校验 |
 | **L3 回归** | 性能相比历史是否变化？ | `test_regression.py` — ±15% 警告，±30% 失败 |
+| **报告** | HTML 汇总含图表与热图 | `report_html.py` — 所有层通过后自动生成 |
 
 三层全部通过才算完成。详见 [TEST_LAYERS.md](TEST_LAYERS.md)
 
@@ -241,7 +243,7 @@ make test
 |--------|----------|
 | `test_cache_hierarchy` | L1D/L2/L3/DRAM 延迟（指针追踪）、各级带宽、边界检测 |
 | `test_memory_bandwidth` | 多线程读写复制带宽 |
-| `test_inter_core` | 核间 CAS 延迟（N×N 矩阵）、跨 CCD 延迟 |
+| `test_inter_core` | 核间 CAS 延迟 + 吞吐量（N×N 矩阵、热图） |
 
 ### CPU
 
@@ -266,8 +268,8 @@ make distclean    # 删除二进制和报告
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `CPU_TIMEOUT` | `60` | CPU 测试时间上限（秒），自动缩放 |
-| `MEMORYTEST_SUDO_PASSWORD` | *(未设置)* | `dmidecode` 密码（内存通道数、DRAM 速度）。基础测试无需 sudo |
+| `CPU_TIMEOUT` | `90 + (N-24)*4` | CPU 测试时间上限（秒），按核心数自动缩放。ARM 平台建议设置更高。 |
+| `MEMORYTEST_SUDO_PASSWORD` | *(未设置)* | `dmidecode` 密码（内存通道数、DRAM 速度、CPU 频率）。未设置时终端用户每次会话交互式提示一次。 |
 
 ## 自动检测
 
@@ -275,11 +277,11 @@ make distclean    # 删除二进制和报告
 
 | 参数 | 方法 |
 |------|------|
-| CPU 型号、核心数、频率 | sysfs、cpuid、lscpu |
+| CPU 型号、核心数、频率 | sysfs、dmidecode（需 sudo）、lscpu |
 | 缓存大小（L1/L2/L3） | sysfs |
 | 多 CCD 总 L3 | sysfs + 拓扑 |
-| 内存通道数 | dmidecode（需 sudo）或 CPU 型号推断 |
-| DRAM 速度（MT/s） | dmidecode（需 sudo） |
+| 内存通道数 | dmidecode（需 sudo），或交互式提示 |
+| DRAM 速度（MT/s）、标准（DDR4/DDR5） | dmidecode（需 sudo），其次 lscpu、sysfs |
 | NUMA 拓扑 | sysfs |
 
 **多 CCD 支持：** 对 AMD EPYC/Ryzen 等多 CCD 处理器（如 EPYC 7R13：8 CCD × 32 MB L3 = 256 MB 总 L3），基准测试使用总计 L3 决定缓冲区大小和测量点标记，避免在大缓存服务器上将 DRAM 测量误落到 LLC 内。
@@ -340,7 +342,7 @@ memorytest/
 
 ## 注意事项
 
-- **`dmidecode` 需要 sudo。** 设置 `MEMORYTEST_SUDO_PASSWORD` 以启用完整硬件检测。未设置时内存通道数和 DRAM 速度为估算值。
+- **`dmidecode` 需要 sudo。** 在真实终端（TTY）中，基准测试会提示一次密码并缓存 10 分钟供所有二进制使用。CI 中可设置 `MEMORYTEST_SUDO_PASSWORD`，或留空（测试仍可运行，通道/速度将被提示或显示 N/A）。
 - **PMU 计数器需要 `perf_event_paranoid ≤ 2`。** 否则自动退回到基于时间的估算。
 - **虚拟化环境**（云主机、容器）可能报告缓存值或噪声延迟——基准测试假定裸金属或近裸金属的 CPU 缓存访问。
 - **核间测试**在大机器（96+ 核）上可能需要 5+ 分钟。设置 `CPU_TIMEOUT` 相应调整。
