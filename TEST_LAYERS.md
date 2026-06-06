@@ -1,6 +1,6 @@
 # Test Architecture — Three Mandatory Layers
 
-Every `make test` run executes all three layers in sequence.
+Every `make test` run executes all three test layers in sequence, then generates an HTML report.
 No layer can be skipped; partial results are not accepted.
 
 ## Layer 1 — Smoke (`test_smoke.sh`)
