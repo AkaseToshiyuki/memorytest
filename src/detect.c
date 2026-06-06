@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <setjmp.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <libgen.h>
 
@@ -930,7 +931,30 @@ static int detect_memory_channels_dmidecode(void) {
     pclose(fp);
     if (count > 0)
         fprintf(stderr, "[Memory] Channel keyword not found; fallback: %d populated DIMM(s)\n", count);
-    return (count > 0) ? count : -1;
+    if (count > 0) return count;
+
+    /* Third fallback: count EDAC memory controllers in sysfs.
+     * On most systems each mcN entry = one memory channel.
+     * Works on soldered-LPDDR ARM laptops where dmidecode reports
+     * a single "Onboard" DIMM with no CHANNEL keyword. */
+    {
+        int mc_count = 0;
+        for (int i = 0; i < 16; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/sys/devices/system/edac/mc/mc%d", i);
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+                mc_count++;
+            else
+                break;
+        }
+        if (mc_count > 0) {
+            fprintf(stderr, "[Memory] EDAC sysfs: %d memory controller(s)\n", mc_count);
+            return mc_count;
+        }
+    }
+
+    return -1;
 }
 
 int detect_memory_channels(void) {
