@@ -5,6 +5,7 @@
  * cross-platform safety (no getpass-on-non-TTY deadlock, NUL-terminated
  * password buffer, no shell interpolation of password).
  */
+#define _GNU_SOURCE   /* mkstemp */
 #include "util.h"
 #include "common.h"
 #include "platform.h"
@@ -228,29 +229,35 @@ static void sudo_token_path(char *buf, size_t bufsz) {
 }
 
 /* Try to read a cached sudo password from the token file.
- * Returns 1 on success (sudo_obtained set), 0 if no valid token. */
+ * Returns 1 on success (sudo_obtained set), 0 if no valid token.
+ *
+ * Open-then-fstat eliminates the TOCTOU window between stat() and fopen():
+ * on multi-user systems the file could be replaced between the two syscalls. */
 static int sudo_token_load(void) {
     char path[256];
     sudo_token_path(path, sizeof(path));
 
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
     struct stat st;
-    if (stat(path, &st) != 0) return 0;
+    if (fstat(fileno(f), &st) != 0) { fclose(f); return 0; }
 
     /* Token too old: delete and ignore */
     time_t now = time(NULL);
     if (now - st.st_mtime > SUDO_TOKEN_TTL) {
+        fclose(f);
         unlink(path);
         return 0;
     }
 
     /* Check permissions: must be 0600 */
     if ((st.st_mode & 0777) != 0600) {
+        fclose(f);
         unlink(path);
         return 0;
     }
 
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
     size_t n = fread(sudo_password, 1, SUDO_PWD_MAX - 1, f);
     fclose(f);
     if (n == 0) { unlink(path); return 0; }
@@ -262,16 +269,23 @@ static int sudo_token_load(void) {
     return 1;
 }
 
-/* Save the validated sudo password to the token file (0600, /tmp). */
+/* Save the validated sudo password to the token file (0600, /tmp).
+ * Writes to a temp file then atomically renames — avoids corruption if two
+ * binaries happen to run simultaneously and both try to write the token. */
 static void sudo_token_save(void) {
-    char path[256];
+    char path[256], tmp[270];
     sudo_token_path(path, sizeof(path));
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path);
+    int fd = mkstemp(tmp);
     if (fd < 0) return;
     size_t len = strlen(sudo_password);
     (void)!write(fd, sudo_password, len);
     (void)!write(fd, "\n", 1);
     close(fd);
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return;
+    }
     /* Best-effort: ignore write errors; the password is already in memory */
 }
 
@@ -293,10 +307,13 @@ static void hw_cache_path(char *buf, size_t bufsz) {
 }
 
 void hw_cache_save(void) {
-    char path[256];
+    char path[256], tmp[270];
     hw_cache_path(path, sizeof(path));
-    FILE *f = fopen(path, "w");
-    if (!f) return;
+    snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path);
+    int fd = mkstemp(tmp);
+    if (fd < 0) return;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp); return; }
 
     if (global_cache_config.l1d_size > 0)
         fprintf(f, "l1d=%zu\n", global_cache_config.l1d_size);
@@ -315,25 +332,30 @@ void hw_cache_save(void) {
         fprintf(f, "dram_std=%s\n", global_system_config.dram_standard);
 
     fclose(f);
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+    }
 }
 
 /* Load cached hardware config.  Returns number of keys successfully loaded.
- * Stale cache (> HW_CACHE_TTL) is deleted and ignored. */
+ * Stale cache (> HW_CACHE_TTL) is deleted and ignored.
+ * Open-then-fstat eliminates the TOCTOU window (same pattern as sudo_token_load). */
 int hw_cache_load(void) {
     char path[256];
     hw_cache_path(path, sizeof(path));
 
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
     struct stat st;
-    if (stat(path, &st) != 0) return 0;
+    if (fstat(fileno(f), &st) != 0) { fclose(f); return 0; }
 
     time_t now = time(NULL);
     if (now - st.st_mtime > HW_CACHE_TTL) {
+        fclose(f);
         unlink(path);
         return 0;
     }
-
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
 
     int loaded = 0;
     char line[256];
@@ -424,6 +446,8 @@ FILE *sudo_popen(const char *command) {
                      "echo '%s' | sudo -S -p '' %s 2>/dev/null",
                      safe_pwd, command);
     if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        fprintf(stderr, "[Sudo] Warning: sudo command truncated to %d bytes, "
+                        "running without privilege escalation\n", (int)sizeof(cmd));
         return popen(command, "r");
     }
     return popen(cmd, "r");
