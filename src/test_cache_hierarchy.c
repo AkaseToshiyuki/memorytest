@@ -562,18 +562,23 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
                 /* No L3: skip the L3 segment, just bridge to RAM later */
                 ;
         }
-        /* Segment 4: L3 → RAM. hi must be >= max(2× total_L3, 4GB) so
-         * the scan reaches real DRAM. On multi-CCD designs (EPYC: 256 MB
-         * total L3 across 8 CCDs), the old l3_size*32 with a 2GB cap
-         * only reached 1 GB —  barely 4× per-CCD L3, and most accesses
-         * still landed in the aggregate LLC. 4 GB ensures we're well into
-         * DRAM even on servers with 256-512 MB L3. */
+        /* Segment 4: L3 → RAM.
+         * lo must start ABOVE the aggregate LLC (total_l3) so every
+         * measurement point in the RAM segment exceeds the LLC and
+         * forces true DRAM access.  On multi-CCD designs (EPYC: 32 MB
+         * per CCD × 8 = 256 MB total L3), the old l3_size*2 = 64 MB
+         * landed INSIDE the aggregate LLC, measuring ~15 ns cached
+         * latency instead of ~94 ns DRAM.
+         *
+         * lo = total_l3 + 25% margin → always above LLC
+         * hi = max(4× total_l3, 4 GB) → well into DRAM */
         if (num_results < max_results) {
-            size_t lo = has_l3 ? l3_size * 2 : l2_size * 2;
             size_t total_l3 = global_cache_config.l3_total_size;
             if (total_l3 == 0) total_l3 = l3_size;
-            size_t hi = has_l3 ? (total_l3 * 2) : (4 * GB);
+            size_t lo = has_l3 ? (total_l3 > 0 ? total_l3 + (total_l3 / 4) : l3_size * 2) : l2_size * 2;
+            size_t hi = has_l3 ? (total_l3 * 4) : (4 * GB);
             if (hi < 4 * GB) hi = 4 * GB;
+            if (hi <= lo) hi = lo * 2;
             if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
         }
     } else {
