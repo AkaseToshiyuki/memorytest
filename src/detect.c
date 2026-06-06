@@ -529,6 +529,31 @@ static int detect_cache_via_dmidecode(void) {
                 sz *= 1024 * 1024 * 1024;
             else continue;
 
+            /* Sanity bounds per cache level to reject firmware garbage
+             * (e.g. dmidecode reporting "16 GB" for L1 on buggy ARM laptops). */
+            static const size_t MAX_L1 = 256 * 1024;       /* 256 KB */
+            static const size_t MIN_L1 = 4 * 1024;         /*   4 KB */
+            static const size_t MAX_L2 = 32 * 1024 * 1024; /*  32 MB */
+            static const size_t MIN_L2 = 64 * 1024;        /*  64 KB */
+            static const size_t MAX_L3 = 2048UL * 1024 * 1024; /* 2 GB */
+            static const size_t MIN_L3 = 256 * 1024;           /* 256 KB */
+            int reject = 0;
+            size_t orig_sz = sz;
+            if (current_level == 1) {
+                if (sz < MIN_L1 || sz > MAX_L1) { reject = 1; sz = 0; }
+            } else if (current_level == 2) {
+                if (sz < MIN_L2 || sz > MAX_L2) { reject = 1; sz = 0; }
+            } else if (current_level == 3) {
+                if (sz < MIN_L3 || sz > MAX_L3) { reject = 1; sz = 0; }
+            } else {
+                /* Unknown level > 3 — skip */
+                sz = 0; current_level = 0; continue;
+            }
+            if (reject) {
+                fprintf(stderr, "[dmidecode] Ignoring absurd L%d cache size (parsed %zu bytes, raw: %s)\n",
+                        current_level, orig_sz, val);
+            }
+
             /* Use the first entry at each level.
              * ARM big.LITTLE may report per-cluster totals,
              * but this is the best we can do without hardcoding. */
