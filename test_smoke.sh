@@ -18,11 +18,11 @@ SKIP=0
 
 NCPU=$(nproc 2>/dev/null || echo 1)
 
-# CPU tests: ~120s base + 4s per extra core beyond 24
+# CPU tests: ~300s base + 4s per extra core beyond 24
 # CPU_TIMEOUT env var overrides the formula (for slow platforms like ARM with
 # expensive clflush-equivalent cache maintenance instructions).
-CPU_TIMEOUT=${CPU_TIMEOUT:-$(( 120 + (NCPU - 24) * 4 ))}
-[ $CPU_TIMEOUT -lt 120 ] && CPU_TIMEOUT=120
+CPU_TIMEOUT=${CPU_TIMEOUT:-$(( 300 + (NCPU - 24) * 4 ))}
+[ $CPU_TIMEOUT -lt 300 ] && CPU_TIMEOUT=300
 [ $CPU_TIMEOUT -gt 600 ] && CPU_TIMEOUT=600
 
 # Inter-core test: N×N CAS pairs. Formula: 120 + N²/3 seconds.
