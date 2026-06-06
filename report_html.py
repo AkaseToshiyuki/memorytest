@@ -1133,9 +1133,9 @@ def build_html(score_dict: dict | None) -> str:
         parts.append(f'<div class="kpi-row">{cards}</div>')
     alu_pts = _collect_alu_chart_data()
     if alu_pts:
-        parts.append(_svg_line_chart(alu_pts, width=600, height=200,
-                                      xlabel="Operation", ylabel="IPC (instructions/cycle)",
-                                      title="Integer operation throughput"))
+        parts.append(_svg_bar_chart(alu_pts, width=600, height=200,
+                                     xlabel="Operation", ylabel="IPC (instructions/cycle)",
+                                     title="Integer operation throughput"))
     p = REPORTS / "cpu_alu_report.md"
     if p.exists():
         text = p.read_text()
@@ -1193,9 +1193,9 @@ def build_html(score_dict: dict | None) -> str:
         parts.append(f'<div class="kpi-row">{cards}</div>')
     simd_pts = _collect_simd_chart_data()
     if simd_pts:
-        parts.append(_svg_line_chart(simd_pts, width=600, height=200,
-                                      xlabel="Operation", ylabel="ns/op",
-                                      title="SIMD (128-bit NEON) latency per op"))
+        parts.append(_svg_bar_chart(simd_pts, width=600, height=200,
+                                     xlabel="Operation", ylabel="ns/op",
+                                     title="SIMD (128-bit NEON) latency per op"))
     p = REPORTS / "cpu_float_report.md"
     if p.exists():
         text = p.read_text()
