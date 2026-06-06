@@ -451,7 +451,25 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char *argv[]) {
     init_platform_layer();
-    size_t size = 256 * MB;
+    /* Default buffer size: at least 4× total L3 cache, and at least 1 GB.
+     * This guarantees the working set exceeds the last-level cache so the
+     * measurement reflects true DRAM bandwidth, not cached L2/L3 bandwidth.
+     *
+     * Prior default was a fixed 256 MB, which on a 96-thread machine gave
+     * each thread only 2.7 MB — the entire per-thread region fits in L2,
+     * and 20 warmup iterations kept the data L2-resident.  Measured
+     * "bandwidth" was 1.3-1.8 TB/s (L2/L3 cache speed), not DRAM. */
+    size_t l3_total = global_cache_config.l3_total_size;
+    size_t min_size = 1ULL * 1024 * 1024 * 1024;  /* 1 GB floor */
+    if (l3_total > 0) {
+        size_t want = l3_total * 4;  /* 4× total L3 */
+        if (want > min_size) min_size = want;
+    }
+    /* Cap at 8 GB — huge buffers increase allocation time without improving
+     * measurement stability. */
+    if (min_size > 8ULL * 1024 * 1024 * 1024) min_size = 8ULL * 1024 * 1024 * 1024;
+
+    size_t size = min_size;
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;  /* Default: use all available cores */
     if (threads < 1) threads = 1;
