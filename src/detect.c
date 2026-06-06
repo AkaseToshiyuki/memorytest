@@ -764,117 +764,16 @@ static int detect_memory_channels_dmidecode(void) {
     return (count > 0) ? count : -1;
 }
 
-static int detect_memory_channels_numa(void) {
-    /* NUMA nodes often correspond to memory channels on modern systems */
-    int numa_nodes = 0;
-    for (int i = 0; i < 8; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "/sys/devices/system/node/node%d", i);
-        if (access(path, F_OK) == 0) {
-            numa_nodes++;
-        }
-    }
-    /* On single-NUMA systems, channel count is UNKNOWN.
-     * Single NUMA != single channel; a 1-socket EPYC can have 2-12 channels.
-     * Do NOT guess 2 here. Caller will get 0 and prompt user. */
-    if (numa_nodes == 1) {
-        return 0;
-    }
-    /* Multi-NUMA: each node often has its own channel set, but not always.
-     * Return as detected — caller will warn user to verify. */
-    if (numa_nodes > 1) {
-        return numa_nodes;
-    }
-    /* numa_nodes == 0: no NUMA sysfs (very old system) */
-    return 0;
-}
-
-/* Heuristic: map CPU model name to known memory channel count.
- * Used as a last-resort fallback when dmidecode fails (no root) and
- * NUMA detection is ambiguous (single-socket server with 1 NUMA node).
- * Returns 0 if the model is unrecognized. */
-static int detect_memory_channels_by_model(void) {
-    char model[256] = {0};
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f) return 0;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "model name", 10) == 0) {
-            char *colon = strchr(line, ':');
-            if (colon) {
-                char *start = colon + 1;
-                while (*start == ' ' || *start == '\t') start++;
-                size_t len = strlen(start);
-                while (len > 0 && (start[len-1] == '\n' || start[len-1] == ' '))
-                    start[--len] = '\0';
-                strncpy(model, start, sizeof(model) - 1);
-            }
-            break;
-        }
-    }
-    fclose(f);
-    if (model[0] == '\0') return 0;
-
-    /* Known server CPU models and their memory channel counts.
-     * These are architectural facts, not guesses — each socket has a
-     * fixed number of DDR channels based on the die design. */
-    struct { const char *pattern; int channels; } known[] = {
-        /* AMD EPYC */
-        {"EPYC 7R13", 8},          /* Milan, 8ch DDR4 */
-        {"EPYC 7R",   8},          /* Milan family */
-        {"EPYC 7",    8},          /* Rome / Milan */
-        {"EPYC 9",   12},          /* Genoa / Bergamo, 12ch DDR5 */
-        {"EPYC 8",    8},          /* Siena */
-        /* Intel Xeon */
-        {"Xeon",      8},          /* Conservative: most Scalable are 8ch */
-        /* ARM server */
-        {"Kunpeng 920", 8},        /* HiSilicon */
-        {"Ampere",    8},          /* Ampere Altra / Altra Max */
-        {"Graviton",  8},          /* AWS Graviton 2/3/4 */
-        {NULL, 0}
-    };
-
-    for (int i = 0; known[i].pattern; i++) {
-        if (strstr(model, known[i].pattern)) {
-            printf("[Memory] Detected %d channels via CPU model heuristic (%s)\n",
-                   known[i].channels, known[i].pattern);
-            return known[i].channels;
-        }
-    }
-    return 0;
-}
-
 int detect_memory_channels(void) {
-    /* Try each method in order of reliability */
-
-    /* 1. dmidecode - most reliable but may need root */
+    /* Only dmidecode can provide real channel count — it reads the
+     * SMBIOS/DMI table, which lists physical DIMM slots and their
+     * channel assignments. No model heuristics, no NUMA guessing:
+     * if dmidecode fails, we ask the user. */
     int channels = detect_memory_channels_dmidecode();
     if (channels > 0) {
         printf("[Memory] Detected %d channels via dmidecode\n", channels);
         return channels;
     }
-
-    /* 2. NUMA node count as indicator — but do NOT silently fall back to 2
-     *    channels on single-NUMA systems. Single NUMA != single channel;
-     *    a single-socket EPYC with 8 DIMMs has 8 channels in 1 NUMA domain.
-     *    Return 0 to force explicit user input. */
-    channels = detect_memory_channels_numa();
-    if (channels > 1) {
-        /* Multi-NUMA: each node usually has its own memory controller.
-         * Still warn user — not all multi-NUMA systems map 1:1 to channels. */
-        printf("[Memory] WARNING: detected %d NUMA node(s), assuming %d channels. "
-               "Verify with: sudo dmidecode -t memory | grep 'Number Of Devices'\n",
-               channels, channels);
-        return channels;
-    }
-    /* channels == 0: NUMA detection failed or returned 0/1. We do NOT
-     * silently guess. Return 0 to force explicit user input. */
-
-    /* 3. CPU model heuristic — last resort for single-socket servers where
-     *    dmidecode needs root and there's only one NUMA node. */
-    channels = detect_memory_channels_by_model();
-    if (channels > 0) return channels;
-
     /* Cannot detect, return 0 to trigger user prompt */
     return 0;
 }
