@@ -644,34 +644,6 @@ int detect_cache_sizes(void) {
         return 1;
     }
 
-    /* Hardcoded fallback for known SoCs where all automatic methods fail.
-     * (e.g. Snapdragon X Elite: sysfs has no 'size' file, ARM registers
-     * are inaccessible, and dmidecode reports garbage "16 GB" for all levels.) */
-    {
-        FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
-        if (cpuinfo) {
-            char buf[256];
-            while (fgets(buf, sizeof(buf), cpuinfo)) {
-                if (strstr(buf, "model name") || strstr(buf, "Model")) {
-                    if (strstr(buf, "Oryon")) {
-                        fclose(cpuinfo);
-                        global_cache_config.l1d_size = 64 * 1024;
-                        global_cache_config.l1i_size = 64 * 1024;
-                        global_cache_config.l2_size = 12 * 1024 * 1024;
-                        global_cache_config.l3_size = 0;
-                        global_cache_config.l3_total_size = 0;
-                        global_cache_config.l3_ccd_count = 0;
-                        global_cache_config.detected = 1;
-                        fprintf(stderr, "[known-soc] Oryon (Snapdragon X Elite): L1D=64KB, L2=12MB, L3=none\n");
-                        return 1;
-                    }
-                    break;
-                }
-            }
-            fclose(cpuinfo);
-        }
-    }
-
     return 0;
 }
 
