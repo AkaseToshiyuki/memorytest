@@ -177,20 +177,23 @@ int request_sudo_password(void) {
 
         pid_t pid = fork();
         if (pid == 0) {
-            /* child: redirect stdin from pipe, exec sudo -S -v */
+            /* child: redirect stdin from pipe, exec sudo -S -v.
+             * Keep stderr open so the user can see sudo's error message
+             * (e.g. requiretty, PAM failures, wrong password). */
             dup2(pfd[0], STDIN_FILENO);
             close(pfd[0]);
             close(STDOUT_FILENO);
-            close(STDERR_FILENO);
-            execlp("sudo", "sudo", "-S", "-p", "", "-v", (char *)NULL);
+            /* STDERR intentionally left open for diagnostics */
+            execlp("sudo", "sudo", "-S", "-v", (char *)NULL);
             _exit(127);
         }
         close(pfd[0]);
         int status = 0;
         waitpid(pid, &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr, "[Sudo] Password validation failed. "
-                            "Falling back to unprivileged methods.\n");
+            int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            fprintf(stderr, "[Sudo] Password validation failed (exit=%d). "
+                            "Falling back to unprivileged methods.\n", rc);
             clear_sudo_password();
             return -1;
         }
