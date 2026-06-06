@@ -549,8 +549,14 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
     } while(0)
 
     if (has_priors) {
-        /* Segment 1: L1 boundary — [L1/2, L1*2] */
-        GEN_SEGMENT(l1_size / 2, l1_size * 2, PTS_PER_SEGMENT, "L1");
+        /* Segment 1: L1 — start small (16KB) regardless of L1D size.
+         * On large-L1D systems (e.g., 640KB Cortex-A720), starting at L1/2
+         * (320KB) would miss all true-L1-latency data points.  16KB fits
+         * inside every known L1D cache (min 32KB on desktop x86).  On
+         * small-L1D systems the early points show stable L1 latency;
+         * on large-L1D systems they capture the sub-2ns L1 hits that
+         * would otherwise be invisible. */
+        GEN_SEGMENT(16 * KB, l1_size * 2, PTS_PER_SEGMENT, "L1");
         /* Segment 2: L2 boundary — [L2/2, L2*2] */
         if (num_results < max_results)
             GEN_SEGMENT(l2_size / 2, l2_size * 2, PTS_PER_SEGMENT, "L2");
