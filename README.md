@@ -201,3 +201,156 @@ memorytest/
 ## License
 
 MIT
+
+---
+
+# Memorytest — 跨平台内存与 CPU 性能基准测试
+
+零依赖、跨平台微基准测试套件，测量从 L1 缓存到 DRAM 的真实硬件延迟与带宽。
+支持 x86_64、ARM64、RISC-V、PowerPC。
+
+**一条命令运行全部测试：** `make test`
+
+## 快速开始
+
+```bash
+git clone https://github.com/AkaseToshiyuki/memorytest.git
+cd memorytest
+make test
+```
+
+仅需 C 编译器和 Python 3（仅标准库），无其他依赖。
+
+## 测试架构
+
+`make test` 运行三层强制测试：
+
+| 层 | 目标 | 方式 |
+|---|------|------|
+| **L1 冒烟** | 所有二进制是否正常运行？ | `test_smoke.sh` — 检查退出码与报告文件 |
+| **L2 合理性** | 数值是否在物理可行范围内？ | `test_sanity.py` — 逐指标范围校验 |
+| **L3 回归** | 性能相比历史是否变化？ | `test_regression.py` — ±15% 警告，±30% 失败 |
+
+三层全部通过才算完成。详见 [TEST_LAYERS.md](TEST_LAYERS.md)
+
+## 测试二进制
+
+### 内存与缓存
+
+| 二进制 | 测量内容 |
+|--------|----------|
+| `test_cache_hierarchy` | L1D/L2/L3/DRAM 延迟（指针追踪）、各级带宽、边界检测 |
+| `test_memory_bandwidth` | 多线程读写复制带宽 |
+| `test_inter_core` | 核间 CAS 延迟（N×N 矩阵）、跨 CCD 延迟 |
+
+### CPU
+
+| 二进制 | 测量内容 |
+|--------|----------|
+| `test_cpu_alu` | 整数 IPC（加减乘除、与或异或） |
+| `test_cpu_float` | 浮点 IPC（加减乘、FMA、SIMD 点积） |
+| `test_cpu_branch` | 分支预测延迟（always-taken、never-taken） |
+| `test_cpu_multi` | 8 线程多核扩展效率 |
+
+## 构建
+
+```bash
+make              # 默认 -O2 构建全部二进制
+make memory       # 仅内存/缓存测试
+make cpu          # 仅 CPU 测试
+make clean        # 删除二进制
+make distclean    # 删除二进制和报告
+```
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CPU_TIMEOUT` | `60` | CPU 测试时间上限（秒），自动缩放 |
+| `MEMORYTEST_SUDO_PASSWORD` | *(未设置)* | `dmidecode` 密码（内存通道数、DRAM 速度）。基础测试无需 sudo |
+
+## 自动检测
+
+所有硬件参数运行时检测，无硬编码值：
+
+| 参数 | 方法 |
+|------|------|
+| CPU 型号、核心数、频率 | sysfs、cpuid、lscpu |
+| 缓存大小（L1/L2/L3） | sysfs |
+| 多 CCD 总 L3 | sysfs + 拓扑 |
+| 内存通道数 | dmidecode（需 sudo）或 CPU 型号推断 |
+| DRAM 速度（MT/s） | dmidecode（需 sudo） |
+| NUMA 拓扑 | sysfs |
+
+**多 CCD 支持：** 对 AMD EPYC/Ryzen 等多 CCD 处理器（如 EPYC 7R13：8 CCD × 32 MB L3 = 256 MB 总 L3），基准测试使用总计 L3 决定缓冲区大小和测量点标记，避免在大缓存服务器上将 DRAM 测量误落到 LLC 内。
+
+## 测量方法
+
+### 延迟（指针追踪）
+
+真正的串行依赖链：每次加载产生下一次加载的地址，击败 CPU 的乱序引擎和内存级并行。测量真实的各级缓存加载延迟。
+
+- ≤ 16 MB 缓冲区：Fisher-Yates 洗牌，全排列数组
+- > 16 MB 缓冲区：LCG 生成索引 + 位集去重（防止自环）
+
+### 逐出策略（边界检测）
+
+| 缓冲区大小 | 轮间逐出 | 效果 |
+|-----------|----------|------|
+| ≤ L3 | 仅首次运行前 | 第 2..N 次热缓存 — 测量真实缓存命中延迟 |
+| > L3 | 每轮 | 每轮冷缓存 — 测量真实 DRAM 延迟 |
+
+此选择性逐出保留了跨缓存边界的自然延迟曲线，实现准确的 L1→L2→L3→DRAM 转换检测。
+
+### 带宽
+
+缓冲区自动缩放至 4× 总 L3（最小 1 GB，最大 8 GB），确保工作集超出末级缓存。多线程顺序访问饱和所有内存通道。
+
+## 实测数据
+
+| 级别 | EPYC 7R13 (x86_64) | Kunpeng 920 (ARM64) |
+|------|---------------------|----------------------|
+| L1D | 1.9 ns | 1.5 ns |
+| L2 | 2.3 ns | 1.8 ns |
+| L3 | 11.9 ns | 7.6 ns |
+| DRAM | 89.2 ns | 67.6 ns |
+| 读带宽 | 127 GB/s (8通道 DDR4-2666) | 36 GB/s |
+
+## 评分
+
+`make test` 生成 HTML 报告（`reports/benchmark_report.html`），包含逐指标评分（0-100）和总体字母等级（A-F）。评分依据检测到的硬件自适应：DRAM 延迟 90 ns 在 EPYC 上得 100/100，但在 DDR5 系统上得分更低。
+
+## 项目结构
+
+```
+memorytest/
+├── README.md
+├── Makefile
+├── tests.json                  # 测试注册表
+├── test_smoke.sh               # 第 1 层：冒烟测试
+├── test_sanity.py              # 第 2 层：合理性检查
+├── test_regression.py          # 第 3 层：回归检测
+├── generate_report.py          # 运行全部二进制并生成报告
+├── report_html.py              # HTML 报告生成器（仅标准库）
+├── report_score.py             # 评分引擎
+├── src/                        # C 源码
+├── bin/                        # 构建产物（gitignore）
+└── reports/                    # 报告与 HTML（gitignore）
+```
+
+## 注意事项
+
+- **`dmidecode` 需要 sudo。** 设置 `MEMORYTEST_SUDO_PASSWORD` 以启用完整硬件检测。未设置时内存通道数和 DRAM 速度为估算值。
+- **PMU 计数器需要 `perf_event_paranoid ≤ 2`。** 否则自动退回到基于时间的估算。
+- **虚拟化环境**（云主机、容器）可能报告缓存值或噪声延迟——基准测试假定裸金属或近裸金属的 CPU 缓存访问。
+- **核间测试**在大机器（96+ 核）上可能需要 5+ 分钟。设置 `CPU_TIMEOUT` 相应调整。
+
+## 参考文档
+
+- [ASM_OPTIMIZATIONS.md](ASM_OPTIMIZATIONS.md) — 内联汇编原语（rdtsc、clflush、屏障）
+- [PERF_NOTES.md](PERF_NOTES.md) — 构建优化分析
+- [TEST_LAYERS.md](TEST_LAYERS.md) — 测试架构详解
+
+## 许可证
+
+MIT
