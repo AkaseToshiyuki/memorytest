@@ -58,13 +58,6 @@ Used to ensure a `volatile` load completes before we read the cycle counter.
   invalidates.
 - **Other**: falls back to `memory_fence()` (weak — does not actually evict).
 
-## Sites updated
-
-| File                              | What changed |
-|-----------------------------------|--------------|
-| `src/latency.c`                   | `measure_latency_timing`: `get_time_ns` → `rdtsc_ns`; added `prefetch_l1` for next random index; added `compiler_barrier` between load and counter read. |
-| `src/test_cache_hierarchy.c`      | `measure_latency`: same treatment. Added prefetch for the *next* LCG-derived index to overlap L1 misses. |
-
 ## What was NOT changed (deliberately)
 
 - `pmu_measure_cache_latency` in `pmu.c`: this path already uses PMU

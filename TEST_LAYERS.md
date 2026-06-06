@@ -48,15 +48,3 @@ make smoke
 make sanity
 make regression
 ```
-
-## Design principles
-
-1. **No short-cuts.** Every test run is complete. If inter-core takes
-   53 minutes on a 96-core EPYC, so be it — that data is valuable.
-
-2. **Machine-verifiable.** PASS/FAIL is determined by scripts, not
-   human eyeballing. The output is deterministic and CI-friendly.
-
-3. **No false urgency.** Smoke was never meant to be the end of
-   testing. It answers "did it run?" — not "are the numbers real?"
-   Layers 2 and 3 answer the real question.

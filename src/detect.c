@@ -960,9 +960,8 @@ static void detect_cpu_model(char *model, size_t len) {
          * implementing a Cortex-A76 reports part=0xd01). The implementer
          * is just the *vendor* of the implementation:
          *   0x41 = ARM Ltd, 0x48 = HiSilicon, 0x51 = Qualcomm, 0x4e = NVidia, ...
-         * We deliberately ignore implementer and trust the part number
-         * because the core microarchitecture is what we care about for
-         * identifying the core. */
+         * The implementer field is ignored; the part number identifies
+         * the microarchitecture. */
         if (part > 0) {
             const char *core_name = "Unknown-ARM-core";
             switch (part) {

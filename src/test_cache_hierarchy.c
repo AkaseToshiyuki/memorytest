@@ -876,7 +876,7 @@ void run_cache_hierarchy_test(void) {
     printf("cache size. 'Match' is OK if values are within 2x.\n");
     printf("On multi-chiplet CPUs (e.g. AMD EPYC/Ryzen with CCDs), the shared L3\n");
     printf("may show multiple internal boundaries from inter-CCD hop latency, which\n");
-    printf("the algorithm labels as L2/L3 transitions. This is correct behavior;\n");
+    printf("the algorithm labels as L2/L3 transitions.\n");
     printf("topology has more levels than the simple L1d/L2/L3/RAM model.\n\n");
 
     /* ========== 缓存层级扫描 ========== */
