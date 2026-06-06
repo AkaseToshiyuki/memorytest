@@ -40,7 +40,7 @@ CHARTS = REPORTS / "charts"
 DEFAULT_OUTPUT = REPORTS / "benchmark_report.html"
 
 try:
-    from report_score import score_run, score_to_dict, format_score_summary
+    from report_score import score_run, score_to_dict, format_score_summary, collect_display_data
     HAS_SCORE = True
 except ImportError as e:
     HAS_SCORE = False
@@ -1453,7 +1453,8 @@ def main():
     if HAS_SCORE:
         try:
             summary = score_run()
-            score_dict = score_to_dict(summary)
+            display = collect_display_data()
+            score_dict = score_to_dict(summary, display)
             print(f"Score: {score_dict['overall']:.1f}/100 ({score_dict['letter']})")
         except Exception as e:
             print(f"# WARN: scoring failed: {e}", file=sys.stderr)

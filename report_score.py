@@ -493,12 +493,102 @@ def parse_cpu_float(text: str) -> dict:
     return out
 
 
+def parse_cpu_branch(text: str) -> dict:
+    """Parse the branch prediction report. Returns a dict with 'branch'
+    key containing a list of {pattern, category, ns_branch} records."""
+    tbl = _find_data_table(text, skip_first=True)
+    if not tbl:
+        return {}
+    headers, rows = tbl
+    ns_col = _col_index(headers, "ns/branch", "ns_per_branch")
+    cat_col = _col_index(headers, "category")
+    pat_col = _col_index(headers, "pattern")
+    if ns_col is None or pat_col is None:
+        return {}
+    patterns = []
+    for row in rows:
+        lbl = _row_label(row)
+        ns = _safe_float(row[ns_col])
+        cat = row[cat_col].strip() if cat_col is not None and cat_col < len(row) else ""
+        if ns is not None and ns >= 0:
+            patterns.append({"pattern": lbl, "category": cat, "ns_branch": ns})
+    return {"branch": patterns} if patterns else {}
+
+
+def parse_cpu_multi(text: str) -> dict:
+    """Parse the multi-core scaling report. Returns a dict with 'multi'
+    key containing a list of {op, threads, speedup, efficiency, status} records,
+    plus 'bw_saturation' for the bandwidth saturation table."""
+    out = {}
+    # Multi-core scaling table
+    tbl = _find_data_table_after(text, "Multi-Core Scaling")
+    if tbl:
+        headers, rows = tbl
+        op_col = _col_index(headers, "operation")
+        th_col = _col_index(headers, "threads")
+        sp_col = _col_index(headers, "speedup")
+        ef_col = _col_index(headers, "efficiency")
+        st_col = _col_index(headers, "status")
+        scaling = []
+        if op_col is not None and th_col is not None:
+            for row in rows:
+                op = _row_label(row)
+                threads = _safe_int(row[th_col] if th_col < len(row) else None)
+                speedup_str = row[sp_col].strip().rstrip("x") if sp_col is not None and sp_col < len(row) else ""
+                speedup = _safe_float(speedup_str)
+                eff_str = row[ef_col].strip().rstrip("%") if ef_col is not None and ef_col < len(row) else ""
+                efficiency = _safe_float(eff_str)
+                status = row[st_col].strip() if st_col is not None and st_col < len(row) else ""
+                if op and threads is not None:
+                    scaling.append({
+                        "op": op, "threads": threads,
+                        "speedup": speedup, "efficiency": efficiency,
+                        "status": status,
+                    })
+        if scaling:
+            out["multi_scaling"] = scaling
+    # Bandwidth saturation table
+    tbl2 = _find_data_table_after(text, "Memory Bandwidth Saturation")
+    if tbl2:
+        headers2, rows2 = tbl2
+        bw_col = _col_index(headers2, "bw(gb/s)", "bw")
+        th_col2 = _col_index(headers2, "threads")
+        sat_col = _col_index(headers2, "saturation")
+        bw_data = []
+        if bw_col is not None and th_col2 is not None:
+            for row in rows2:
+                threads = _safe_int(row[th_col2] if th_col2 < len(row) else None)
+                bw = _safe_float(row[bw_col] if bw_col < len(row) else None)
+                sat_str = row[sat_col].strip().rstrip("%") if sat_col is not None and sat_col < len(row) else ""
+                saturation = _safe_float(sat_str)
+                if threads is not None:
+                    bw_data.append({
+                        "threads": threads, "bw_gbps": bw,
+                        "saturation_pct": saturation,
+                    })
+        if bw_data:
+            out["bw_saturation"] = bw_data
+    return out
+
+
+def _safe_int(s: str | None) -> int | None:
+    if s is None:
+        return None
+    s = s.strip()
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
 PARSERS = {
     "cache_hierarchy": parse_cache_hierarchy,
     "memory_bandwidth": parse_memory_bandwidth,
     "inter_core_latency": parse_inter_core,
     "cpu_alu": parse_cpu_alu,
     "cpu_float": parse_cpu_float,
+    "cpu_branch": parse_cpu_branch,
+    "cpu_multi_core": parse_cpu_multi,
 }
 
 
@@ -613,9 +703,28 @@ def format_score_summary(summary: ScoreSummary) -> str:
     return "\n".join(lines)
 
 
-def score_to_dict(summary: ScoreSummary) -> dict:
+def collect_display_data() -> dict:
+    """Parse branch + multi-core reports for display-only sections (no scoring)."""
+    display = {}
+    for category, parser in [("cpu_branch", parse_cpu_branch),
+                              ("cpu_multi_core", parse_cpu_multi)]:
+        candidates = list(REPORTS.glob(f"{category}_report.md"))
+        if not candidates:
+            candidates = list(REPORTS.glob(f"{category}*report*.md"))
+        if not candidates:
+            continue
+        try:
+            data = parser(candidates[0].read_text())
+            if data:
+                display.update(data)
+        except Exception as e:
+            print(f"# WARN: display parser {category} failed: {e}", file=__import__("sys").stderr)
+    return display
+
+
+def score_to_dict(summary: ScoreSummary, display: dict | None = None) -> dict:
     """JSON-serializable dict (for embedding in HTML/PDF)."""
-    return {
+    d = {
         "overall": round(summary.overall, 2),
         "letter": summary.letter,
         "n_metrics_total": summary.n_metrics_total,
@@ -632,6 +741,9 @@ def score_to_dict(summary: ScoreSummary) -> dict:
             for m in summary.metrics
         ],
     }
+    if display:
+        d["display"] = display
+    return d
 
 
 if __name__ == "__main__":
