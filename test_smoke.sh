@@ -73,8 +73,10 @@ for binary in "${!TESTS[@]}"; do
 
     # Run with empty stdin when non-interactive (skip sudo prompt),
     # but keep stdin open when it's a TTY so the user can enter a password.
+    # timeout(1) redirects stdin to /dev/null by default — --foreground
+    # prevents that so the binary can read the sudo password.
     if [ -t 0 ]; then
-        output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" 2>&1)
+        output=$(timeout --foreground "$THIS_TIMEOUT" "$BIN/$binary" 2>&1)
     else
         output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
     fi
