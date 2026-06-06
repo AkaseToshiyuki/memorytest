@@ -173,13 +173,13 @@ int request_sudo_password(void) {
     /* Wipe local copy */
     memset(pwd, 0, sizeof(pwd));
 
-    /* Verify the password by trying `sudo -n -v` (non-interactive validation).
-     * If `sudo` isn't installed, or the password is wrong, fall back to
-     * unprivileged methods without blocking.
+    /* Verify the password by trying `sudo -S -v` (pipe-based validation).
+     * Works whether or not sudo already has a cached ticket —
+     * no separate `sudo -n` pre-check needed.
      *
      * We never interpolate the password into a shell command. We write
      * it to a pipe and have sudo read it from stdin via -S. */
-    if (system("sudo -n -v </dev/null >/dev/null 2>&1") != 0) {
+    {
         int pfd[2];
         if (pipe(pfd) != 0) {
             clear_sudo_password();
