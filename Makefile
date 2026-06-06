@@ -25,7 +25,7 @@ CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result -W
 LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
-VERSION = 1.0.0
+VERSION = 1.0.1
 
 # Test categories
 MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
@@ -240,8 +240,8 @@ release: opt
 	@cp bin/* release/bin/
 	@cp Makefile generate_report.py report_html.py report_score.py README.md tests.json release/
 	@cp test_smoke.sh test_sanity.py test_regression.py release/
-	@cp src/common.h src/platform.h src/util.h release/src/
-	@cp tests.json release/
+	@cp ASM_OPTIMIZATIONS.md PERF_NOTES.md TEST_LAYERS.md release/
+	@cp src/common.h src/platform.h src/util.h src/asm_helpers.h release/src/
 	@tar -czf memorytest-$(VERSION).tar.gz -C . release
 	@rm -rf release/
 	@echo "Release package: memorytest-$(VERSION).tar.gz"
