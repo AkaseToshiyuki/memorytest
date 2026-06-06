@@ -403,10 +403,26 @@ FILE *sudo_popen(const char *command) {
         return popen(command, "r");
     }
 
+    /* Escape single-quotes in password: replace ' with '\'' so the shell
+     * quoting doesn't break.  This is safe because the password originates
+     * from read_password() (terminal input), not from an untrusted source. */
+    char safe_pwd[256];
+    size_t si = 0, di = 0;
+    while (sudo_password[si] && di < sizeof(safe_pwd) - 5) {
+        if (sudo_password[si] == '\'') {
+            safe_pwd[di++] = '\''; safe_pwd[di++] = '\\';
+            safe_pwd[di++] = '\''; safe_pwd[di++] = '\'';
+        } else {
+            safe_pwd[di++] = sudo_password[si];
+        }
+        si++;
+    }
+    safe_pwd[di] = '\0';
+
     char cmd[4096];
     int n = snprintf(cmd, sizeof(cmd),
                      "echo '%s' | sudo -S -p '' %s 2>/dev/null",
-                     sudo_password, command);
+                     safe_pwd, command);
     if (n < 0 || (size_t)n >= sizeof(cmd)) {
         return popen(command, "r");
     }
