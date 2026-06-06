@@ -46,4 +46,16 @@ FILE *sudo_popen(const char *command);
 /* Version of isatty() that doesn't crash on weird systems. */
 int isatty_safe(int fd);
 
+/* Save current hardware config (L1/L2/L3, channels, freq, DRAM) to a
+ * cross-process cache at /tmp/.memorytest_hw_<uid>.  The next binary
+ * can load it with hw_cache_load() instead of re-prompting the user.
+ * Best-effort — silently returns on write errors. */
+void hw_cache_save(void);
+
+/* Load cached hardware config, if fresh (10-min TTL).  Returns number
+ * of keys loaded (0 = no cache / expired / empty).  Sets the
+ * corresponding fields in global_cache_config and global_system_config
+ * directly so the caller can check whether they are now non-zero. */
+int hw_cache_load(void);
+
 #endif /* UTIL_H */

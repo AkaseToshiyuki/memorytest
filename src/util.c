@@ -274,6 +274,112 @@ static void sudo_token_save(void) {
     close(fd);
     /* Best-effort: ignore write errors; the password is already in memory */
 }
+
+/* ========== HW config cache (L1/L2/L3, channels, freq, DRAM) ==========
+ *
+ * When auto-detection fails (no dmidecode, restricted sysfs), the user
+ * is prompted for cache sizes / channel count / DRAM speed / CPU freq.
+ * Running 7 test binaries means entering the same values 7 times.
+ *
+ * This cache file avoids re-prompting: the first binary saves the
+ * user-supplied values, and subsequent binaries load them silently.
+ * TTL matches the sudo token (10 minutes) — across a `make test` run
+ * but cleaned on reboot.  Format is simple key=value, one per line. */
+
+#define HW_CACHE_TTL 600
+
+static void hw_cache_path(char *buf, size_t bufsz) {
+    snprintf(buf, bufsz, "/tmp/.memorytest_hw_%d", (int)getuid());
+}
+
+void hw_cache_save(void) {
+    char path[256];
+    hw_cache_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+
+    if (global_cache_config.l1d_size > 0)
+        fprintf(f, "l1d=%zu\n", global_cache_config.l1d_size);
+    if (global_cache_config.l2_size > 0)
+        fprintf(f, "l2=%zu\n",   global_cache_config.l2_size);
+    if (global_cache_config.l3_size > 0)
+        fprintf(f, "l3=%zu\n",   global_cache_config.l3_size);
+    if (global_system_config.memory_channels > 0)
+        fprintf(f, "channels=%d\n", global_system_config.memory_channels);
+    if (global_system_config.cpu_freq_mhz > 0)
+        fprintf(f, "freq_mhz=%d\n", global_system_config.cpu_freq_mhz);
+    if (global_system_config.dram_speed_mt_s > 0)
+        fprintf(f, "dram_mt=%d\n", global_system_config.dram_speed_mt_s);
+    if (global_system_config.dram_standard[0])
+        fprintf(f, "dram_std=%s\n", global_system_config.dram_standard);
+
+    fclose(f);
+}
+
+/* Load cached hardware config.  Returns number of keys successfully loaded.
+ * Stale cache (> HW_CACHE_TTL) is deleted and ignored. */
+int hw_cache_load(void) {
+    char path[256];
+    hw_cache_path(path, sizeof(path));
+
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+
+    time_t now = time(NULL);
+    if (now - st.st_mtime > HW_CACHE_TTL) {
+        unlink(path);
+        return 0;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    int loaded = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = 0;
+        char key[64];
+        long val = 0;
+        if (sscanf(line, "%63[^=]=%ld", key, &val) == 2) {
+            if (strcmp(key, "l1d") == 0 && val > 0) {
+                global_cache_config.l1d_size = (size_t)val;
+                global_cache_config.l1i_size = (size_t)val;
+                loaded++;
+            } else if (strcmp(key, "l2") == 0 && val > 0) {
+                global_cache_config.l2_size = (size_t)val;
+                loaded++;
+            } else if (strcmp(key, "l3") == 0 && val > 0) {
+                global_cache_config.l3_size = (size_t)val;
+                global_cache_config.l3_total_size = (size_t)val;
+                global_cache_config.l3_ccd_count = 1;
+                loaded++;
+            } else if (strcmp(key, "channels") == 0 && val > 0) {
+                global_system_config.memory_channels = (int)val;
+                loaded++;
+            } else if (strcmp(key, "freq_mhz") == 0 && val > 0) {
+                global_system_config.cpu_freq_mhz = (int)val;
+                loaded++;
+            } else if (strcmp(key, "dram_mt") == 0 && val > 0) {
+                global_system_config.dram_speed_mt_s = (int)val;
+                loaded++;
+            }
+        }
+        /* dram_std is a string, not numeric.
+         * Use an intermediate copy so the compiler can see the bound. */
+        if (strncmp(line, "dram_std=", 9) == 0 && line[9]) {
+            const char *src = line + 9;
+            size_t src_len = strlen(src);
+            if (src_len >= sizeof(global_system_config.dram_standard))
+                src_len = sizeof(global_system_config.dram_standard) - 1;
+            memcpy(global_system_config.dram_standard, src, src_len);
+            global_system_config.dram_standard[src_len] = '\0';
+            loaded++;
+        }
+    }
+    fclose(f);
+    return loaded;
+}
+
 /* Execute a command with sudo by piping the cached password to sudo -S.
  * Password originates from read_password() (terminal input), so it contains
  * no shell metacharacters and is safe for single-quoted shell embedding.

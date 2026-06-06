@@ -5,6 +5,7 @@
  */
 #include "common.h"
 #include "platform.h"
+#include "util.h"
 #include "stddef.h"
 #include <stdarg.h>
 #include <string.h>
@@ -517,6 +518,24 @@ static void prompt_cache_config_from_user(void) {
     /* Delegate to the platform layer. The platform layer:
      *   - on TTY: prompts with sensible defaults
      *   - on non-TTY: returns defaults immediately (no blocking) */
+
+    /* Try cross-process cache first — avoid re-prompting across binaries. */
+    if (hw_cache_load() > 0) {
+        /* Cache restored at least some keys. Check if all needed
+         * fields are now non-zero. */
+        if (global_cache_config.l1d_size > 0 &&
+            global_cache_config.l2_size > 0 &&
+            global_cache_config.l3_size > 0) {
+            global_cache_config.detected = 1;
+            fprintf(stderr, "[Cache] Loaded from HW cache (L1D=%zuKB, L2=%zuKB, L3=%zuKB)\n",
+                    global_cache_config.l1d_size / 1024,
+                    global_cache_config.l2_size / 1024,
+                    global_cache_config.l3_size / 1024);
+            return;
+        }
+        /* Partial load: continue to prompt for missing values. */
+    }
+
     fprintf(stderr, "\n[Cache] Some cache levels were not auto-detected.\n");
 
     /* Non-TTY fallback: use conservative but reasonable defaults. These
@@ -538,6 +557,7 @@ static void prompt_cache_config_from_user(void) {
         }
         global_cache_config.l1i_size = global_cache_config.l1d_size;
         global_cache_config.detected = 1;
+        hw_cache_save();  /* avoid re-prompting subsequent binaries */
         return;
     }
 
@@ -557,6 +577,7 @@ static void prompt_cache_config_from_user(void) {
     }
     global_cache_config.l1i_size = global_cache_config.l1d_size;
     global_cache_config.detected = 1;
+    hw_cache_save();  /* cache so next binary skips prompts */
 }
 
 void initialize_cache_config(void) {
@@ -1268,6 +1289,10 @@ int detect_cpu_freq(void) {
 
 /* ========== System Configuration ========== */
 void initialize_system_config(void) {
+    /* Try cross-process HW cache first — populate any fields the user
+     * already entered during a previous binary's run. */
+    hw_cache_load();
+
     /* Always detect CPU model (fast, no file I/O) */
     detect_cpu_model(global_system_config.cpu_model, sizeof(global_system_config.cpu_model));
 
@@ -1312,77 +1337,90 @@ void initialize_system_config(void) {
         global_system_config.cpu_cores_physical = physical;
     }
 
-    /* Always detect memory channels - no caching */
-    int channels = detect_memory_channels();
-    if (channels > 0) {
-        global_system_config.memory_channels = channels;
-    } else if (!platform_is_tty()) {
-        /* Non-interactive: leave as 0 (unknown). The report will show
-         * "N/A" instead of a misleading zero. We don't force stdin
-         * because there's no human to answer. */
-        global_system_config.memory_channels = 0;
-        fprintf(stderr, "[Memory] Channel count unknown (non-interactive); "
-                "report will show N/A\n");
+    /* Detect memory channels — but only if not already known from cache.
+     * hw_cache_load() may have populated this field. */
+    if (global_system_config.memory_channels > 0) {
+        printf("[Memory] Using cached channel count: %d\n",
+               global_system_config.memory_channels);
     } else {
-        /* Cannot detect, prompt user for memory channels */
-        char input[64];
-        printf("Please enter your memory channel count:\n");
-        printf("(Check mainboard specs, typically 1, 2, 4, 6, 8, or 12)\n");
-        printf("(Most desktops: 2-4, Servers: 4-12)\n\n");
-        printf("Memory Channels: ");
-        fflush(stdout);
+        int channels = detect_memory_channels();
+        if (channels > 0) {
+            global_system_config.memory_channels = channels;
+        } else if (!platform_is_tty()) {
+            /* Non-interactive: leave as 0 (unknown). The report will show
+             * "N/A" instead of a misleading zero. We don't force stdin
+             * because there's no human to answer. */
+            global_system_config.memory_channels = 0;
+            fprintf(stderr, "[Memory] Channel count unknown (non-interactive); "
+                    "report will show N/A\n");
+        } else {
+            /* Cannot detect, prompt user for memory channels */
+            char input[64];
+            printf("Please enter your memory channel count:\n");
+            printf("(Check mainboard specs, typically 1, 2, 4, 6, 8, or 12)\n");
+            printf("(Most desktops: 2-4, Servers: 4-12)\n\n");
+            printf("Memory Channels: ");
+            fflush(stdout);
 
-        if (fgets(input, sizeof(input), stdin) != NULL) {
-            input[strcspn(input, "\n")] = 0;
-            if (strlen(input) == 0) {
-                /* NO DEFAULT — empty input is invalid; re-prompt. Hardware
-                 * channel count cannot be guessed safely. */
-                printf("ERROR: channel count required. Default refused (was 2, which is wrong on "
-                       "single-channel laptops, 4-channel desktops, 8/12-channel servers).\n");
-                printf("Memory Channels: ");
-                fflush(stdout);
-                if (fgets(input, sizeof(input), stdin) != NULL) {
-                    input[strcspn(input, "\n")] = 0;
-                    int ch = atoi(input);
-                    if (ch > 0 && ch <= 16) {
-                        global_system_config.memory_channels = ch;
+            if (fgets(input, sizeof(input), stdin) != NULL) {
+                input[strcspn(input, "\n")] = 0;
+                if (strlen(input) == 0) {
+                    /* NO DEFAULT — empty input is invalid; re-prompt. Hardware
+                     * channel count cannot be guessed safely. */
+                    printf("ERROR: channel count required. Default refused (was 2, which is wrong on "
+                           "single-channel laptops, 4-channel desktops, 8/12-channel servers).\n");
+                    printf("Memory Channels: ");
+                    fflush(stdout);
+                    if (fgets(input, sizeof(input), stdin) != NULL) {
+                        input[strcspn(input, "\n")] = 0;
+                        int ch = atoi(input);
+                        if (ch > 0 && ch <= 16) {
+                            global_system_config.memory_channels = ch;
+                        } else {
+                            printf("ERROR: invalid channel count %d, defaulting to 0 (unknown).\n", ch);
+                            global_system_config.memory_channels = 0;
+                        }
                     } else {
-                        printf("ERROR: invalid channel count %d, defaulting to 0 (unknown).\n", ch);
-                        global_system_config.memory_channels = 0;
+                        global_system_config.memory_channels = 0;  /* unknown, will WARN in reports */
                     }
                 } else {
-                    global_system_config.memory_channels = 0;  /* unknown, will WARN in reports */
+                    int ch = atoi(input);
+                    global_system_config.memory_channels = (ch > 0 && ch <= 16) ? ch : 0;
                 }
             } else {
-                int ch = atoi(input);
-                global_system_config.memory_channels = (ch > 0 && ch <= 16) ? ch : 0;
+                global_system_config.memory_channels = 0;  /* unknown */
             }
-        } else {
-            global_system_config.memory_channels = 0;  /* unknown */
-        }
-        if (global_system_config.memory_channels == 0) {
-            printf("[Memory] WARNING: channel count unknown; theoretical bandwidth will be "
-                   "marked as 'undetermined' in reports.\n");
-        } else {
-            printf("[Memory] Using %d channels (user-supplied)\n", global_system_config.memory_channels);
+            if (global_system_config.memory_channels == 0) {
+                printf("[Memory] WARNING: channel count unknown; theoretical bandwidth will be "
+                       "marked as 'undetermined' in reports.\n");
+            } else {
+                printf("[Memory] Using %d channels (user-supplied)\n", global_system_config.memory_channels);
+            }
         }
     }
 
     /* Detect DRAM speed AFTER channels so theoretical_bw_mbps can be computed. */
     initialize_dram_speed();
 
-    /* Try multiple methods to detect CPU frequency */
-    int freq = detect_cpu_freq();
-    if (freq > 0) {
-        global_system_config.cpu_freq_mhz = freq;
+    /* Detect CPU frequency – but only if not already known from cache.
+     * hw_cache_load() may have populated this field. */
+    if (global_system_config.cpu_freq_mhz > 0) {
+        printf("[CPU] Using cached frequency: %d MHz\n",
+               global_system_config.cpu_freq_mhz);
     } else {
-        /* All detection methods failed, ask user */
-        printf("[CPU] All automatic detection methods failed.\n");
-        global_system_config.cpu_freq_mhz = prompt_cpu_freq_from_user();
-        printf("[CPU] Using frequency: %d MHz\n", global_system_config.cpu_freq_mhz);
+        int freq = detect_cpu_freq();
+        if (freq > 0) {
+            global_system_config.cpu_freq_mhz = freq;
+        } else {
+            /* All detection methods failed, ask user */
+            printf("[CPU] All automatic detection methods failed.\n");
+            global_system_config.cpu_freq_mhz = prompt_cpu_freq_from_user();
+            printf("[CPU] Using frequency: %d MHz\n", global_system_config.cpu_freq_mhz);
+        }
     }
 
     global_system_config.detected = 1;
+    hw_cache_save();  /* cache channels + DRAM + freq for next binary */
 }
 
 /* ========== DRAM Speed Detection (DDR3/4/5, LPDDR4/5) ==========
@@ -1550,6 +1588,15 @@ static void prompt_dram_speed_from_user(void) {
 }
 
 void initialize_dram_speed(void) {
+    /* If already known (e.g. from HW cross-process cache), skip detection
+     * and prompts entirely. */
+    if (global_system_config.dram_speed_mt_s > 0) {
+        printf("[DRAM] Using cached speed: %d MT/s, %s\n",
+               global_system_config.dram_speed_mt_s,
+               global_system_config.dram_standard);
+        return;
+    }
+
     int mt_s = 0;
     char std[32] = "unknown";
 
