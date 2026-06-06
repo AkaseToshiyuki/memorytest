@@ -492,8 +492,72 @@ static int detect_cache_via_sysfs(void) {
 }
 
 /* ========== Cache Configuration ========== */
+
+/* Parse dmidecode -t cache output for L1/L2/L3 sizes.
+ * Fallback for systems where sysfs cache size files are empty
+ * and CPU registers are inaccessible (e.g. some ARM SoCs).
+ * dmidecode reports per-instance sizes; we take the first
+ * entry at each level.  Not perfectly accurate on all ARM
+ * big.LITTLE clusters but much better than guessing. */
+static int detect_cache_via_dmidecode(void) {
+    FILE *fp = sudo_popen("dmidecode -t cache 2>/dev/null");
+    if (!fp) return -1;
+
+    char line[256];
+    int current_level = 0;
+    size_t l1 = 0, l2 = 0, l3 = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        /* "Configuration: Enabled, Not Socketed, Level 1" */
+        if (strstr(line, "Configuration:") && strstr(line, "Level")) {
+            char *p = strstr(line, "Level");
+            if (p) current_level = atoi(p + 5);
+            continue;
+        }
+        /* "Installed Size: 640 kB" */
+        if (strstr(line, "Installed Size:") && current_level > 0) {
+            char *colon = strchr(line, ':');
+            if (!colon) continue;
+            char *val = colon + 1;
+            while (*val == ' ') val++;
+            size_t sz = strtoul(val, NULL, 10);
+            if (strcasestr(val, "kB") || strcasestr(val, "KB"))
+                sz *= 1024;
+            else if (strcasestr(val, "MB"))
+                sz *= 1024 * 1024;
+            else if (strcasestr(val, "GB"))
+                sz *= 1024 * 1024 * 1024;
+            else continue;
+
+            /* Use the first entry at each level.
+             * ARM big.LITTLE may report per-cluster totals,
+             * but this is the best we can do without hardcoding. */
+            if (current_level == 1 && l1 == 0) l1 = sz;
+            if (current_level == 2 && l2 == 0) l2 = sz;
+            if (current_level == 3 && l3 == 0) l3 = sz;
+            current_level = 0;  /* next entry */
+        }
+    }
+    pclose(fp);
+
+    if (l1 == 0 && l2 == 0 && l3 == 0) return -1;
+
+    if (l1 > 0) global_cache_config.l1d_size = l1;
+    if (l2 > 0) global_cache_config.l2_size = l2;
+    if (l3 > 0) {
+        global_cache_config.l3_size = l3;
+        global_cache_config.l3_total_size = l3;
+        global_cache_config.l3_ccd_count = 1;
+    }
+    global_cache_config.l1i_size = (l1 > 0) ? l1 : global_cache_config.l1d_size;
+    global_cache_config.detected = 1;
+    fprintf(stderr, "[dmidecode] Cache: L1D=%zuKB, L2=%zuKB, L3=%zuKB\n",
+            l1 / 1024, l2 / 1024, l3 / 1024);
+    return 0;
+}
+
 int detect_cache_sizes(void) {
-    /* Priority: sysfs -> ARM registers -> x86 CPUID -> fail */
+    /* Priority: sysfs -> ARM registers -> x86 CPUID -> dmidecode -> fail */
 
     if (detect_cache_via_sysfs() == 0) {
         return 1;
@@ -510,6 +574,12 @@ int detect_cache_sizes(void) {
         return 1;
     }
 #endif
+
+    /* dmidecode is the last automatic method — reads SMBIOS/DMI tables.
+     * Works on both ARM and x86 when sysfs/registers/CPUID all fail. */
+    if (detect_cache_via_dmidecode() == 0) {
+        return 1;
+    }
 
     return 0;
 }
@@ -774,7 +844,7 @@ static int detect_memory_channels_dmidecode(void) {
      *   - x86:    Locator: P0 CHANNEL A
      *   - ARM:    Bank Locator: SOCKET 0 CHANNEL 1 DIMM 0
      * Some systems use "SODIMM_A" in Locator with channel only in Bank Locator. */
-    FILE *fp = sudo_popen("dmidecode -t memory 2>/dev/null | grep -E '(Locator|Bank Locator):.*CHANNEL' | sed 's/.*CHANNEL/CHANNEL/' | sort -u | wc -l");
+    FILE *fp = sudo_popen("dmidecode -t memory 2>/dev/null | grep -E '(Locator|Bank Locator):.*(CHANNEL|BANK)' | sed 's/.*CHANNEL/CHANNEL/; s/.*BANK/BANK/' | sort -u | wc -l");
     if (!fp) return -1;
 
     int count = 0;
