@@ -206,6 +206,19 @@ int request_sudo_password(void) {
  * no shell metacharacters and is safe for single-quoted shell embedding.
  * The caller receives a real popen() FILE* and must pclose() it. */
 FILE *sudo_popen(const char *command) {
+    /* Lazy env var check: if request_sudo_password() was never called
+     * (e.g. non-TTY subprocess), check the env var on first use. */
+    if (!sudo_obtained) {
+        const char *env = getenv("MEMORYTEST_SUDO_PASSWORD");
+        if (env && env[0]) {
+            size_t elen = strlen(env);
+            if (elen >= SUDO_PWD_MAX) elen = SUDO_PWD_MAX - 1;
+            memcpy(sudo_password, env, elen);
+            sudo_password[elen] = '\0';
+            sudo_obtained = 1;
+        }
+    }
+
     if (!sudo_obtained || sudo_password[0] == '\0') {
         return popen(command, "r");
     }
