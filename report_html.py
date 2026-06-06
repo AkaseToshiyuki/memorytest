@@ -702,53 +702,17 @@ def _collect_intercore_kpis() -> list:
             if v is not None:
                 matrix[i][j] = v
 
-    # Find natural clusters
-    min_adj = float('inf')
-    for i in range(n):
-        for j in (i - 1, i + 1):
-            if 0 <= j < n and matrix[i][j] is not None and matrix[i][j] < min_adj:
-                min_adj = matrix[i][j]
-    if min_adj == float('inf'):
-        for i in range(n):
-            for j in range(n):
-                if i != j and matrix[i][j] is not None and matrix[i][j] < min_adj:
-                    min_adj = matrix[i][j]
+    # Find natural clusters (shared module)
+    from inter_core_cluster import find_clusters, median as _med
+    clusters_data = find_clusters(matrix, n)
 
-    if min_adj == float('inf'):
+    intra = clusters_data["intra"]
+    cross = clusters_data["cross"]
+
+    if not intra and not cross:
         flat = [v for row in matrix_rows for v in row if v is not None]
         return [("Min CAS", f"{min(flat):.1f}", "ns"),
                 ("Mean CAS", f"{sum(flat)/len(flat):.1f}", "ns")] if flat else []
-
-    threshold = min_adj * 2.0
-    parent = list(range(n))
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-    for i in range(n):
-        for j in range(i + 1, n):
-            if matrix[i][j] is not None and matrix[i][j] < threshold:
-                union(i, j)
-            elif matrix[j][i] is not None and matrix[j][i] < threshold:
-                union(i, j)
-
-    intra, cross = [], []
-    for i in range(n):
-        for j in range(n):
-            if i == j or matrix[i][j] is None:
-                continue
-            (intra if find(i) == find(j) else cross).append(matrix[i][j])
-
-    intra.sort(); cross.sort()
-    def _med(vals):
-        if not vals: return None
-        m = len(vals) // 2
-        return vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2.0
 
     out = []
     if intra:

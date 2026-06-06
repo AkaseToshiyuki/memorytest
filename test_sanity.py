@@ -278,55 +278,13 @@ def parse_inter_core(text):
             except ValueError:
                 continue
 
-    # Find natural clusters (same algorithm as report_score.py)
-    min_adj = float('inf')
-    for i in range(n):
-        for j in (i - 1, i + 1):
-            if 0 <= j < n and not (matrix[i][j] != matrix[i][j]):
-                if matrix[i][j] < min_adj:
-                    min_adj = matrix[i][j]
-    if min_adj == float('inf'):
-        for i in range(n):
-            for j in range(n):
-                if i != j and not (matrix[i][j] != matrix[i][j]):
-                    if matrix[i][j] < min_adj:
-                        min_adj = matrix[i][j]
-    if min_adj == float('inf'):
-        return {"intra_socket_lat_ns": None}
-
-    threshold = min_adj * 2.0
-    parent = list(range(n))
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if not (matrix[i][j] != matrix[i][j]) and matrix[i][j] < threshold:
-                union(i, j)
-            elif not (matrix[j][i] != matrix[j][i]) and matrix[j][i] < threshold:
-                union(i, j)
-
-    intra = []
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            v = matrix[i][j]
-            if v != v:
-                continue
-            if find(i) == find(j):
-                intra.append(v)
+    # Find natural clusters (shared module)
+    from inter_core_cluster import find_clusters
+    clusters_data = find_clusters(matrix, n)
+    intra = clusters_data["intra"]
 
     if not intra:
         return {"intra_socket_lat_ns": None}
-    intra.sort()
     m = len(intra) // 2
     med = intra[m] if len(intra) % 2 else (intra[m - 1] + intra[m]) / 2.0
     return {"intra_socket_lat_ns": med}

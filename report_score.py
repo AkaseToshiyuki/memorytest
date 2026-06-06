@@ -441,93 +441,23 @@ def parse_inter_core(text: str) -> dict:
             except ValueError:
                 continue
 
-    # --- Step 2: find natural clusters from latency gaps ---
-    # Compute the minimum adjacency latency across all non-self pairs.
-    min_adj = float('inf')
-    for i in range(n):
-        for j in (i - 1, i + 1):
-            if 0 <= j < n and not (matrix[i][j] != matrix[i][j]):  # not NaN
-                if matrix[i][j] < min_adj:
-                    min_adj = matrix[i][j]
-    if min_adj == float('inf'):
-        # Fallback: use overall minimum
-        for i in range(n):
-            for j in range(n):
-                if i != j and not (matrix[i][j] != matrix[i][j]):
-                    if matrix[i][j] < min_adj:
-                        min_adj = matrix[i][j]
-    if min_adj == float('inf'):
-        return {}
-
-    threshold = min_adj * 2.0  # cores with latency < threshold are "close"
-
-    # Union-Find to group cores by connectivity
-    parent = list(range(n))
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            # Two cores are in the same cluster if latency is below threshold
-            # OR they are directly adjacent with similar latency to the minimum
-            if not (matrix[i][j] != matrix[i][j]):  # not NaN
-                if matrix[i][j] < threshold:
-                    union(i, j)
-            elif not (matrix[j][i] != matrix[j][i]):
-                if matrix[j][i] < threshold:
-                    union(i, j)
-
-    # Build cluster groups
-    clusters = {}
-    for i in range(n):
-        cid = find(i)
-        clusters.setdefault(cid, []).append(i)
-
-    # --- Step 3: compute intra- and cross-cluster medians ---
-    intra, cross = [], []
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            v = matrix[i][j]
-            if v != v:  # NaN
-                continue
-            if find(i) == find(j):
-                intra.append(v)
-            else:
-                cross.append(v)
-
-    intra.sort()
-    cross.sort()
-
-    def _median(vals):
-        if not vals:
-            return None
-        m = len(vals) // 2
-        if len(vals) % 2 == 0:
-            return (vals[m - 1] + vals[m]) / 2.0
-        return vals[m]
-
+    # --- Step 2-3: find clusters and compute medians (shared module) ---
+    from inter_core_cluster import find_clusters, median as _median
     result = {}
-    intra_med = _median(intra)
-    cross_med = _median(cross) if cross else None
+    clusters_data = find_clusters(matrix, n)
+
+    intra_med = _median(clusters_data["intra"])
+    cross_med = _median(clusters_data["cross"]) if clusters_data["cross"] else None
 
     if intra_med is not None:
         result["cas_intra_median_ns"] = intra_med
     if cross_med is not None:
         result["cas_cross_median_ns"] = cross_med
     # Keep backward-compat: overall median = intra if one cluster, else combined
-    all_vals = intra + cross
+    all_vals = clusters_data["intra"] + clusters_data["cross"]
     all_vals.sort()
     result["cas_median_ns"] = _median(all_vals)
-    result["_clusters"] = len(clusters)
+    result["_clusters"] = len(clusters_data["clusters"])
 
     return result
 
