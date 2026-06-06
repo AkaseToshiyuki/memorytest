@@ -50,13 +50,23 @@ def _find_data_table(text: str, skip_first: bool = True) -> tuple[list[str], lis
     lines = text.splitlines()
     i = 0
     found = 0
+    def _norm(l):
+        """Normalise a table line: ensure it starts with | so both
+        canonical (`| H |`) and ASCII-aligned (`H | H |`) formats work."""
+        s = l.strip()
+        return s if s.startswith("|") else "| " + s
     while i < len(lines) - 1:
-        if lines[i].startswith("|") and re.match(r"^\|[\s\-|:]+\|?\s*$", lines[i + 1]):
-            headers = [c.strip().rstrip("*").strip() for c in lines[i].split("|")[1:-1]]
+        li = _norm(lines[i])
+        li1 = _norm(lines[i + 1])
+        if "|" in li and re.match(r"^\|[\s\-|:]+\|?\s*$", li1):
+            headers = [c.strip().rstrip("*").strip() for c in li.split("|")[1:-1]]
             rows = []
             j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                cells = [c.strip().rstrip("*").strip() for c in lines[j].split("|")[1:-1]]
+            while j < len(lines):
+                lj = _norm(lines[j])
+                if "|" not in lj:
+                    break
+                cells = [c.strip().rstrip("*").strip() for c in lj.split("|")[1:-1]]
                 if len(cells) == len(headers):
                     rows.append(cells)
                 j += 1

@@ -170,19 +170,28 @@ class Reporter:
 def _parse_md_table(text, table_header):
     """Extract the first markdown table that contains `table_header` in its
     header row. Returns a list of dicts (one per data row) with stripped values.
-    Returns [] if not found."""
+    Returns [] if not found.
+    
+    Accepts both canonical (`| H | H |`) and ASCII-aligned (`H | H |`)
+    table formats — the C binaries emit the latter."""
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if table_header in line and "|" in line:
-            # Find the separator line (|---|---|)
-            if i + 1 >= len(lines) or not re.match(r"^\s*\|[\s\-:|]+\|\s*$", lines[i + 1]):
+            # Normalise: ensure header line starts with |
+            norm_line = line if line.strip().startswith("|") else "| " + line.strip()
+            # Find the separator line (---|---| or --- | --- | ---)
+            sep = lines[i + 1] if i + 1 < len(lines) else ""
+            sep_norm = sep if sep.strip().startswith("|") else "|" + sep.strip()
+            if i + 1 >= len(lines) or not re.match(r"^\s*\|[\s\-:|]+\|?\s*$", sep_norm):
                 continue
-            header = [re.sub(r"\*\*", "", c.strip()) for c in line.strip().strip("|").split("|")]
+            header = [re.sub(r"\*\*", "", c.strip()) for c in norm_line.strip().strip("|").split("|")]
             rows = []
             for j in range(i + 2, len(lines)):
-                if not lines[j].strip().startswith("|"):
+                rline = lines[j]
+                if not rline.strip() or "|" not in rline:
                     break
-                cells = [c.strip() for c in lines[j].strip().strip("|").split("|")]
+                rnorm = rline if rline.strip().startswith("|") else "| " + rline.strip()
+                cells = [c.strip() for c in rnorm.strip().strip("|").split("|")]
                 if len(cells) == len(header):
                     rows.append(dict(zip(header, cells)))
             return rows
