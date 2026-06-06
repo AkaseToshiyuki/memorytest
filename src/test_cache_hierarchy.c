@@ -33,9 +33,11 @@ static __thread double thread_sum;
 /* ========== 序列化CPU以确保准确的内存访问时间 ========== */
 static inline void cpu_relax(void) {
 #if defined(__x86_64__)
-    __asm__ volatile("" ::: "memory");
+    __builtin_ia32_pause();
 #elif defined(__aarch64__)
-    __asm__ volatile("isb" ::: "memory");
+    __asm__ volatile("yield" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
 #endif
 }
 

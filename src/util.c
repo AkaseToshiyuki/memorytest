@@ -222,10 +222,12 @@ int request_sudo_password(void) {
 }
 
 /* Return path to the sudo token file
- * Uses /tmp so it survives across process invocations but is
+ * Uses $TMPDIR (or /tmp) so it survives across process invocations but is
  * cleaned on reboot. Per-user to avoid cross-user leaking. */
 static void sudo_token_path(char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "/tmp/.memorytest_sudo_%d", (int)getuid());
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !tmpdir[0]) tmpdir = "/tmp";
+    snprintf(buf, bufsz, "%s/.memorytest_sudo_%d", tmpdir, (int)getuid());
 }
 
 /* Try to read a cached sudo password from the token file.
@@ -303,7 +305,9 @@ static void sudo_token_save(void) {
 #define HW_CACHE_TTL 600
 
 static void hw_cache_path(char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "/tmp/.memorytest_hw_%d", (int)getuid());
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !tmpdir[0]) tmpdir = "/tmp";
+    snprintf(buf, bufsz, "%s/.memorytest_hw_%d", tmpdir, (int)getuid());
 }
 
 void hw_cache_save(void) {

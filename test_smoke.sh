@@ -73,9 +73,15 @@ for binary in "${!TESTS[@]}"; do
 
     # In a real terminal, let output pass through so the user sees the
     # sudo password prompt. In CI (non-TTY), capture everything.
-    # timeout --foreground keeps stdin connected to the terminal.
+    # --foreground keeps stdin connected to the terminal (GNU extension).
+    # Check support first; fall back to plain timeout on BSD/macOS.
+    if timeout --help 2>&1 | grep -q -- '--foreground'; then
+        FG="--foreground"
+    else
+        FG=""
+    fi
     if [ -t 0 ]; then
-        timeout --foreground "$THIS_TIMEOUT" "$BIN/$binary"
+        timeout $FG "$THIS_TIMEOUT" "$BIN/$binary"
         exit_code=$?
         output="(ran interactively)"
     else

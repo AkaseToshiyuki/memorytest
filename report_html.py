@@ -30,6 +30,7 @@ import base64
 import datetime
 import html
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -240,7 +241,6 @@ def _svg_score_gauge(score: float, letter: str) -> str:
     # SVG arc from 0 to score (out of 100), starting at 9 o'clock going clockwise
     angle = (score / 100.0) * 360.0
     rad = (angle - 90) * 3.14159 / 180.0
-    import math
     cx, cy, r = 100, 100, 80
     x = cx + r * math.cos(rad)
     y = cy + r * math.sin(rad)
@@ -274,7 +274,6 @@ def _svg_line_chart(points: list, width: int = 600, height: int = 200,
     else:
         ymin, ymax = min(ys), max(ys)
         def yscale(v): return (v - ymin) / max(ymax - ymin, 1e-9)
-    import math
     n = len(points)
     pad_l, pad_r, pad_t, pad_b = 60, 20, 30, 50
     plot_w = width - pad_l - pad_r

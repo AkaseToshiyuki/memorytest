@@ -357,23 +357,6 @@ static int compare_doubles(const void *a, const void *b) {
     return (da < db) ? -1 : (da > db) ? 1 : 0;
 }
 
-/* Compute p25 / median / p75 from samples[] using nearest-rank percentile.
- * Returns 1 if ok, 0 if no samples. */
-static int percentiles(const double *samples, int n,
-                       double *p25, double *med, double *p75) {
-    if (n <= 0) return 0;
-    /* Sort in place. Caller is expected to pass a copy because we
-     * may sort, but workers[i].samples is single-use per pair anyway. */
-    /* NB: we don't sort here; the caller does it on its own buffer. */
-    *p25 = samples[n / 4];
-    *med = samples[n / 2];
-    *p75 = samples[(3 * n) / 4];
-    if (n >= 4) return 1;
-    if (n >= 2) { *p25 = samples[0]; *med = samples[n/2]; *p75 = samples[n-1]; return 1; }
-    *p25 = *med = *p75 = samples[0];
-    return 1;
-}
-
 /* Trim outliers: drop bottom 5% and top 5% of sorted samples. */
 static void trim_outliers(const double *sorted_in, int n_in,
                           double *out, int *n_out) {
