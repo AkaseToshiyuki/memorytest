@@ -777,13 +777,21 @@ void run_cache_hierarchy_test(void) {
      * measurements validate the sysfs data, not the other way around.
      *
      * We still record the ratio hits above for the comparison table, but
-     * the row labels are now deterministic from scan position. */
+     * the row labels are now deterministic from scan position.
+     *
+     * L3 labelling uses l3_total_size (aggregate across all CCDs), not
+     * per-CCD l3_size.  On EPYC 7R13 (32 MB × 8 CCD = 256 MB total),
+     * labelling with per-CCD l3_size marks buffers 32–256 MB as "RAM"
+     * despite them fitting comfortably inside the aggregate LLC, causing
+     * test_sanity.py to report ~15 ns "RAM" latency (actually L3). */
+    size_t l3_label = global_cache_config.l3_total_size;
+    if (l3_label == 0) l3_label = l3_size;
     for (int i = 0; i < num_results; i++) {
         size_t sz = results[i].size;
         const char *lbl = "RAM";
         if (l1_size > 0 && sz <= l1_size) lbl = "L1";
         else if (l2_size > 0 && sz <= l2_size) lbl = "L2";
-        else if (l3_size > 0 && sz <= l3_size) lbl = "L3";
+        else if (l3_size > 0 && sz <= l3_label) lbl = "L3";
         snprintf(results[i].expected, sizeof(results[i].expected), "%s", lbl);
     }
 
