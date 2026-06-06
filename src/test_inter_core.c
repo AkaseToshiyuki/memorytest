@@ -543,7 +543,7 @@ void run_inter_core_latency_test(void) {
      * Calibrate g_bw_iterations on a single pair first so all pairs
      * use the same iteration count — avoids inconsistent scaling. */
     {
-        int bw_cap = (n > 64) ? 200000 : 1000000;
+        int bw_cap = (n > 64) ? 200000 : 800000;
         int cal_pair_i = 0, cal_pair_j = (n > 1) ? 1 : 0;
         while (g_bw_iterations < bw_cap) {
             uint64_t t0 = get_time_ns();
