@@ -328,6 +328,14 @@ static void perf_reset_counters(void) {
         ioctl(perf_counters.branch_mispred_fd, PERF_EVENT_IOC_RESET, 0);
         ioctl(perf_counters.branch_mispred_fd, PERF_EVENT_IOC_ENABLE, 0);
     }
+    if (perf_counters.mem_access_fd >= 0) {
+        ioctl(perf_counters.mem_access_fd, PERF_EVENT_IOC_RESET, 0);
+        ioctl(perf_counters.mem_access_fd, PERF_EVENT_IOC_ENABLE, 0);
+    }
+    if (perf_counters.l1d_miss_fd >= 0) {
+        ioctl(perf_counters.l1d_miss_fd, PERF_EVENT_IOC_RESET, 0);
+        ioctl(perf_counters.l1d_miss_fd, PERF_EVENT_IOC_ENABLE, 0);
+    }
 }
 
 static void perf_disable_counters(void) {
@@ -337,6 +345,10 @@ static void perf_disable_counters(void) {
         ioctl(perf_counters.inst_retired_fd, PERF_EVENT_IOC_DISABLE, 0);
     if (perf_counters.branch_mispred_fd >= 0)
         ioctl(perf_counters.branch_mispred_fd, PERF_EVENT_IOC_DISABLE, 0);
+    if (perf_counters.mem_access_fd >= 0)
+        ioctl(perf_counters.mem_access_fd, PERF_EVENT_IOC_DISABLE, 0);
+    if (perf_counters.l1d_miss_fd >= 0)
+        ioctl(perf_counters.l1d_miss_fd, PERF_EVENT_IOC_DISABLE, 0);
 }
 
 /* ========== Measure Performance with PMU ========== */
