@@ -302,8 +302,9 @@ void hw_cache_save(void) {
         fprintf(f, "l1d=%zu\n", global_cache_config.l1d_size);
     if (global_cache_config.l2_size > 0)
         fprintf(f, "l2=%zu\n",   global_cache_config.l2_size);
-    if (global_cache_config.l3_size > 0)
-        fprintf(f, "l3=%zu\n",   global_cache_config.l3_size);
+    /* Always save l3 even when 0 — some systems genuinely have no L3,
+     * and we need to record that fact so subsequent binaries skip the prompt. */
+    fprintf(f, "l3=%zu\n",   global_cache_config.l3_size);
     if (global_system_config.memory_channels > 0)
         fprintf(f, "channels=%d\n", global_system_config.memory_channels);
     if (global_system_config.cpu_freq_mhz > 0)
@@ -348,10 +349,10 @@ int hw_cache_load(void) {
             } else if (strcmp(key, "l2") == 0 && val > 0) {
                 global_cache_config.l2_size = (size_t)val;
                 loaded++;
-            } else if (strcmp(key, "l3") == 0 && val > 0) {
+            } else if (strcmp(key, "l3") == 0) {
                 global_cache_config.l3_size = (size_t)val;
                 global_cache_config.l3_total_size = (size_t)val;
-                global_cache_config.l3_ccd_count = 1;
+                global_cache_config.l3_ccd_count = (val > 0) ? 1 : 0;
                 loaded++;
             } else if (strcmp(key, "channels") == 0 && val > 0) {
                 global_system_config.memory_channels = (int)val;

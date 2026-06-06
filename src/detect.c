@@ -619,8 +619,8 @@ static void prompt_cache_config_from_user(void) {
         /* Cache restored at least some keys. Check if all needed
          * fields are now non-zero. */
         if (global_cache_config.l1d_size > 0 &&
-            global_cache_config.l2_size > 0 &&
-            global_cache_config.l3_size > 0) {
+            global_cache_config.l2_size > 0) {
+            /* L3 may be 0 on systems without L3 cache — that's valid. */
             global_cache_config.detected = 1;
             fprintf(stderr, "[Cache] Loaded from HW cache (L1D=%zuKB, L2=%zuKB, L3=%zuKB)\n",
                     global_cache_config.l1d_size / 1024,
@@ -685,7 +685,9 @@ void initialize_cache_config(void) {
                global_cache_config.l3_size / KB);
 
         /* Check if any cache level was not detected */
-        if (global_cache_config.l2_size == 0 || global_cache_config.l3_size == 0) {
+        if (global_cache_config.l1d_size == 0 ||
+            global_cache_config.l2_size == 0 ||
+            global_cache_config.l3_size == 0) {
             printf("[Warning] Some cache sizes could not be detected\n");
             prompt_cache_config_from_user();
         }
