@@ -340,6 +340,10 @@ def parse_cache_hierarchy(text: str) -> dict:
         if unit == "TB": return v * 1024 * 1024 * 1024
         if unit == "B":  return v / 1024
         return None
+    # Collect ALL candidates per target range, then pick the one closest to
+    # the upper end of the range.  This avoids picking transition-point noise
+    # (the first row after a cache boundary is often unstable).
+    candidates = {key: [] for key, _, _ in targets}
     for row in rows:
         lbl = _row_label(row)
         size_kb = _size_to_kb(lbl)
@@ -349,11 +353,18 @@ def parse_cache_hierarchy(text: str) -> dict:
         if v is None or not (0.1 < v < 1000):
             continue
         for key, lo, hi in targets:
-            if key in out:
-                continue
             if lo <= size_kb <= hi:
-                out[key] = v
+                candidates[key].append((size_kb, v))
                 break
+
+    for key, lo, hi in targets:
+        cands = candidates[key]
+        if not cands:
+            continue
+        # Pick the entry with the largest size within the range —
+        # it's furthest from the boundary and most stable.
+        cands.sort(key=lambda x: x[0])
+        out[key] = cands[-1][1]
     return out
 
 

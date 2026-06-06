@@ -111,8 +111,8 @@ static void *thread_double_mul(void *arg) {
 static void *thread_mem_bw_read(void *arg) {
     ThreadArgs *t = (ThreadArgs *)arg;
     volatile uint8_t *buf = (volatile uint8_t *)t->buffer;
-    size_t size_per_thread = MEM_TEST_SIZE / t->num_threads;
-    size_t offset = t->thread_id * size_per_thread;
+    size_t size_per_thread = MEM_TEST_SIZE;  /* each thread reads a full 64 MB slice */
+    size_t offset = t->thread_id * MEM_TEST_SIZE;
 
     set_cpu_affinity(t->thread_id);
 
@@ -344,9 +344,10 @@ void run_cpu_multi_core_test(void) {
     printf("%-10s | %-12s | %-12s | %-15s | %-12s\n",
            "----------", "------------", "------------", "---------------", "------------");
 
-    void *mem_buffer = malloc(MEM_TEST_SIZE * 2);
+    void *mem_buffer = malloc((size_t)MEM_TEST_SIZE * max_threads);
+    size_t total_buffer = (size_t)MEM_TEST_SIZE * max_threads;
     if (mem_buffer) {
-        memset(mem_buffer, 1, MEM_TEST_SIZE * 2);
+        memset(mem_buffer, 1, total_buffer);
 
         int mem_thread_counts[16];
         int num_mem_thread_counts = 0;
