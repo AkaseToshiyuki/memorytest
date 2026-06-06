@@ -136,22 +136,35 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         start_ptr = (uint64_t *)&p[perm[0]];
         chain_len = words;   /* visit every node */
     } else {
-        /* ==== Large buffer: in-place chain via LCG ====
-         * Generate chain_len random indices with LCG, then wire them
-         * together: p[indices[i]] = &p[indices[i+1]].
+        /* ==== Large buffer: in-place chain via LCG (deduplicated) ====
+         * Generate chain_len UNIQUE random indices.  Duplicates would
+         * create self-loops or broken links: if index i appears twice,
+         * p[i] gets overwritten — the first write's target is orphaned.
+         * Self-loops cause ~4 ns L1 hits and poison the latency median.
          *
-         * With a 64k chain in a >= 16 MB buffer (>= 2M words), the LCG
-         * % words mapping may produce occasional duplicate indices, but
-         * their impact on measured latency is negligible (< 0.01% of
-         * accesses).  The chain remains walkable regardless. */
+         * We use a bitset to reject duplicates.  With chain_len=64k and
+         * words>=2M, each LCG attempt has >96% chance of selecting an
+         * unused slot, so the while-loop finishes in ~66k iterations. */
         chain_indices = malloc(chain_len * sizeof(size_t));
         if (!chain_indices) { free(perm); return 0; }
 
+        size_t bitset_words = (words + 63) / 64;
+        uint64_t *used = calloc(bitset_words, sizeof(uint64_t));
+        if (!used) { free(chain_indices); free(perm); return 0; }
+
         uint64_t lcg = 1;
-        for (size_t i = 0; i < chain_len; i++) {
+        size_t count = 0;
+        while (count < chain_len) {
             lcg = lcg_a * lcg + lcg_c;
-            chain_indices[i] = lcg % words;
+            size_t idx = lcg % words;
+            size_t w = idx / 64;
+            size_t b = idx % 64;
+            if (!(used[w] & ((uint64_t)1 << b))) {
+                used[w] |= ((uint64_t)1 << b);
+                chain_indices[count++] = idx;
+            }
         }
+        free(used);
 
         /* Wire the chain in-place */
         for (size_t i = 0; i < chain_len - 1; i++)
