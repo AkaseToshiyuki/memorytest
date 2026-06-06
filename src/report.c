@@ -30,11 +30,10 @@ ReportContext *report_init(const char *test_name, ReportFormat format) {
 
     mkdir(REPORTS_DIR, 0755);
 
-    char filename[256];
-    snprintf(filename, sizeof(filename), "%s/%s_report%s",
+    snprintf(ctx->filename, sizeof(ctx->filename), "%s/%s_report%s",
              REPORTS_DIR, test_name, format_extension(format));
 
-    ctx->fp = fopen(filename, "w");
+    ctx->fp = fopen(ctx->filename, "w");
     if (!ctx->fp) {
         free(ctx);
         return NULL;
@@ -78,9 +77,7 @@ void report_free(ReportContext *ctx) {
 
 const char *report_get_filename(ReportContext *ctx) {
     if (!ctx) return "";
-    static char filename[256];
-    snprintf(filename, sizeof(filename), "reports/%s_report.md", ctx->test_name);
-    return filename;
+    return ctx->filename;
 }
 
 void report_write_system_info(ReportContext *ctx) {

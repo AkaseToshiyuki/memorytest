@@ -17,6 +17,7 @@
 #ifndef ASM_HELPERS_H
 #define ASM_HELPERS_H
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include "common.h"
 
@@ -69,6 +70,17 @@ static inline uint64_t rdtsc_cycles(void) {
 #endif
 }
 
+/* ============================================================
+ * Calibration state for rdtsc_ns().
+ * cycles_per_ns is initialized lazily on first call, guarded by
+ * an atomic flag so multi-threaded tests don't race on the init.
+ * Each translation unit gets its own copy (inline static header),
+ * so there is no cross-TU contention — the flag protects within-TU
+ * thread races only.
+ * ============================================================ */
+static atomic_flag cycles_calibrated = ATOMIC_FLAG_INIT;
+static double cycles_per_ns = 1.0;
+
 /* Calibrated: convert cycles to nanoseconds. Lazily initialized.
  *
  * IMPORTANT: on ARM64, cntvct_el0 ticks at the *counter frequency* (cntfrq_el0),
@@ -77,8 +89,7 @@ static inline uint64_t rdtsc_cycles(void) {
  * underestimate time by 30x. We read cntfrq_el0 directly for ARM64.
  * On x86 with invariant TSC, rdtsc ticks at the CPU frequency. */
 static inline uint64_t rdtsc_ns(void) {
-    static double cycles_per_ns = 0.0;
-    if (__builtin_expect(cycles_per_ns == 0.0, 0)) {
+    if (!atomic_flag_test_and_set(&cycles_calibrated)) {
 #if defined(__aarch64__)
         uint64_t cntfrq;
         __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(cntfrq));

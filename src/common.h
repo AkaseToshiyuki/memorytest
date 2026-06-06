@@ -153,6 +153,7 @@ typedef enum {
 typedef struct {
     char test_name[64];
     char timestamp[64];
+    char filename[256];
     ReportFormat format;
     FILE *fp;
 } ReportContext;
