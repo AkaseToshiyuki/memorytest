@@ -71,8 +71,13 @@ for binary in "${!TESTS[@]}"; do
         THIS_TIMEOUT=$TIMEOUT_SEC
     fi
 
-    # Run with empty stdin (skip sudo prompt), bound by timeout
-    output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
+    # Run with empty stdin when non-interactive (skip sudo prompt),
+    # but keep stdin open when it's a TTY so the user can enter a password.
+    if [ -t 0 ]; then
+        output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" 2>&1)
+    else
+        output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
+    fi
     exit_code=$?
 
     # Print diagnostics on non-zero exit

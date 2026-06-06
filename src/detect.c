@@ -1226,13 +1226,7 @@ int detect_cpu_freq(void) {
      *        wall-clock interval, very accurate on ARM. Doesn't need
      *        sudo (perf_event_open with paranoid=4 still works for
      *        self-counting on most kernels).
-     *   6.   Sudo-enabled probes (cpupower / dmidecode / sudo sysfs).
-     *        These can read privileged files (e.g. dmidecode needs
-     *        root for SMBIOS). Placed AFTER PMU because PMU is faster
-     *        and works without sudo. Placed BEFORE BogoMIPS because
-     *        BogoMIPS is only a heuristic — we'd rather ask the user
-     *        for sudo than fall back to a guess.
-     *   7.   BogoMIPS heuristic. LAST RESORT. The result is
+     *   5.   BogoMIPS heuristic. LAST RESORT. The result is
      *        approximate (±20%) and is marked with a WARNING in
      *        detect_cpu_freq_bogomips() so the user knows it's a
      *        guess, not a measurement. */
@@ -1241,27 +1235,28 @@ int detect_cpu_freq(void) {
     freq = detect_cpu_freq_sysfs();
     if (freq > 0) return freq;
 
-    /* 2. /proc/cpuinfo "cpu MHz" */
+    /* 2. Sudo-enabled probes (dmidecode / cpupower / sudo sysfs).
+     *    These can read privileged files and return the MAX/RATED
+     *    frequency, not the current (possibly throttled) clock.
+     *    Non-blocking: returns 0 immediately if no sudo password. */
+    freq = detect_cpu_freq_sudo();
+    if (freq > 0) return freq;
+
+    /* 3. /proc/cpuinfo "cpu MHz" — reports current frequency,
+     *    which may be lower than the rated max due to power saving. */
     freq = detect_cpu_freq_cpuinfo();
     if (freq > 0) return freq;
 
-    /* 3. sysctl (BSD/macOS or Linux sysctl fallback) */
+    /* 4. sysctl (BSD/macOS or Linux sysctl fallback) */
     freq = detect_cpu_freq_sysctl();
     if (freq > 0) return freq;
 
-    /* 4. lscpu (popen) */
+    /* 5. lscpu (popen) */
     freq = detect_cpu_freq_lscpu();
     if (freq > 0) return freq;
 
-    /* 5. ARM PMU cycle counting */
+    /* 6. ARM PMU cycle counting */
     freq = detect_cpu_freq_pmu();
-    if (freq > 0) return freq;
-
-    /* 6. Sudo-enabled probes (only if user has provided a password).
-     *    This is non-blocking: if no sudo password was obtained at
-     *    init_platform_layer(), detect_cpu_freq_sudo() returns 0
-     *    immediately. */
-    freq = detect_cpu_freq_sudo();
     if (freq > 0) return freq;
 
     /* 7. BogoMIPS heuristic — LAST RESORT, with ±20% warning */
