@@ -747,8 +747,12 @@ static void init_arch(void) {
 
 /* ========== Memory Channel Detection ========== */
 static int detect_memory_channels_dmidecode(void) {
-    /* Try dmidecode if available (may require root) */
-    FILE *fp = popen("dmidecode -t memory 2>/dev/null | grep -c 'Channel'", "r");
+    /* Try dmidecode if available (may require root).
+     * Count unique channel designators from the Locator field
+     * (e.g. "P0 CHANNEL A" → channel A, "P0 CHANNEL B" → channel B).
+     * This is more reliable than counting "Channel" substring matches
+     * which can match non-channel metadata. */
+    FILE *fp = sudo_popen("dmidecode -t memory 2>/dev/null | grep 'Locator:.*CHANNEL' | sed 's/.*CHANNEL/CHANNEL/' | sort -u | wc -l");
     if (!fp) return -1;
 
     int count = 0;
@@ -1506,7 +1510,7 @@ void initialize_system_config(void) {
 static int detect_dram_speed_dmidecode(int *out_mt_s, char *out_std, size_t std_len) {
     /* Parse: `Speed: 3200 MT/s` and `Type: DDR4` from dmidecode. Multiple
      * DIMMs may report different speeds (mixed RAM); use the maximum. */
-    FILE *fp = popen("dmidecode -t memory 2>/dev/null", "r");
+    FILE *fp = sudo_popen("dmidecode -t memory 2>/dev/null");
     if (!fp) return -1;
 
     char line[512];

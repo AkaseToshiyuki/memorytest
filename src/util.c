@@ -99,6 +99,19 @@ static ssize_t read_password(char *buf, size_t bufsz) {
 int request_sudo_password(void) {
     if (sudo_obtained) return 0;
 
+    /* Check environment variable first — useful for CI, remote SSH,
+     * and non-TTY environments where interactive prompting is impossible. */
+    const char *env = getenv("MEMORYTEST_SUDO_PASSWORD");
+    if (env && env[0]) {
+        size_t elen = strlen(env);
+        if (elen >= SUDO_PWD_MAX) elen = SUDO_PWD_MAX - 1;
+        memcpy(sudo_password, env, elen);
+        sudo_password[elen] = '\0';
+        sudo_obtained = 1;
+        fprintf(stderr, "[Sudo] Using password from MEMORYTEST_SUDO_PASSWORD env var.\\n");
+        return 0;
+    }
+
     /* Cache the TTY check */
     if (!tty_checked) {
         stdin_is_tty_cached = isatty_safe(STDIN_FILENO);
