@@ -16,17 +16,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SUDO_PWD_MAX 256   /* plenty for any reasonable password */
+#define SUDO_TOKEN_TTL 600 /* 10 minutes — matches typical sudo timestamp */
 
 /* Global sudo password storage. Zero-initialised, always NUL-terminated. */
 static char sudo_password[SUDO_PWD_MAX] = {0};
 static int sudo_obtained = 0;
 static int tty_checked = 0;
 static int stdin_is_tty_cached = 0;
+
+/* Forward declarations for token-based cross-process password caching. */
+static int  sudo_token_load(void);
+static void sudo_token_save(void);
 
 int isatty_safe(int fd) {
     if (fd < 0) return 0;
@@ -99,7 +106,15 @@ static ssize_t read_password(char *buf, size_t bufsz) {
 int request_sudo_password(void) {
     if (sudo_obtained) return 0;
 
-    /* Check environment variable first — useful for CI, remote SSH,
+    /* Check token file first — cross-process cache so the user
+     * only enters the password once across multiple binaries. */
+    if (sudo_token_load()) {
+        fprintf(stderr, "[Sudo] Reusing cached password (valid for %d minutes).\n",
+                SUDO_TOKEN_TTL / 60);
+        return 0;
+    }
+
+    /* Check environment variable — useful for CI, remote SSH,
      * and non-TTY environments where interactive prompting is impossible. */
     const char *env = getenv("MEMORYTEST_SUDO_PASSWORD");
     if (env && env[0]) {
@@ -200,10 +215,65 @@ int request_sudo_password(void) {
     }
 
     sudo_obtained = 1;
+    sudo_token_save();
     fprintf(stderr, "[Sudo] OK. Hardware detection will use sudo where helpful.\n");
     return 0;
 }
 
+/* Return path to the sudo token file
+ * Uses /tmp so it survives across process invocations but is
+ * cleaned on reboot. Per-user to avoid cross-user leaking. */
+static void sudo_token_path(char *buf, size_t bufsz) {
+    snprintf(buf, bufsz, "/tmp/.memorytest_sudo_%d", (int)getuid());
+}
+
+/* Try to read a cached sudo password from the token file.
+ * Returns 1 on success (sudo_obtained set), 0 if no valid token. */
+static int sudo_token_load(void) {
+    char path[256];
+    sudo_token_path(path, sizeof(path));
+
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+
+    /* Token too old: delete and ignore */
+    time_t now = time(NULL);
+    if (now - st.st_mtime > SUDO_TOKEN_TTL) {
+        unlink(path);
+        return 0;
+    }
+
+    /* Check permissions: must be 0600 */
+    if ((st.st_mode & 0777) != 0600) {
+        unlink(path);
+        return 0;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(sudo_password, 1, SUDO_PWD_MAX - 1, f);
+    fclose(f);
+    if (n == 0) { unlink(path); return 0; }
+
+    /* Strip trailing newline if present */
+    if (sudo_password[n-1] == '\n') n--;
+    sudo_password[n] = '\0';
+    sudo_obtained = 1;
+    return 1;
+}
+
+/* Save the validated sudo password to the token file (0600, /tmp). */
+static void sudo_token_save(void) {
+    char path[256];
+    sudo_token_path(path, sizeof(path));
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    size_t len = strlen(sudo_password);
+    (void)!write(fd, sudo_password, len);
+    (void)!write(fd, "\n", 1);
+    close(fd);
+    /* Best-effort: ignore write errors; the password is already in memory */
+}
 /* Execute a command with sudo by piping the cached password to sudo -S.
  * Password originates from read_password() (terminal input), so it contains
  * no shell metacharacters and is safe for single-quoted shell embedding.
