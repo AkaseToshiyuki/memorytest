@@ -1548,9 +1548,12 @@ static int detect_dram_speed_dmidecode(int *out_mt_s, char *out_std, size_t std_
 }
 
 static int detect_dram_speed_lscpu(int *out_mt_s, char *out_std, size_t std_len) {
-    /* lscpu sometimes shows max memory speed; for DDR it often shows MHz
-     * (half of MT/s for DDR because DDR transfers twice per clock). Try
-     * to detect the standard from "Model name" and adjust. */
+    /* lscpu sometimes shows max memory speed, but the output format varies
+     * widely.  THE KEY PITFALL: lscpu also reports CPU max MHz / CPU min MHz /
+     * BogoMIPS — those are CPU frequencies, NOT memory speed.  We MUST skip
+     * any line that matches 'CPU' or 'Bogo' to avoid misidentifying the CPU
+     * clock as DRAM clock.  Additionally, we only trust lines that mention
+     * 'Memory', 'RAM', 'DRAM', 'DIMM', or 'memory'. */
     FILE *fp = popen("lscpu 2>/dev/null", "r");
     if (!fp) return -1;
     char line[512];
@@ -1563,21 +1566,27 @@ static int detect_dram_speed_lscpu(int *out_mt_s, char *out_std, size_t std_len)
             else if (strstr(line, "DDR3")) is_ddr3 = 1;
             else if (strstr(line, "DDR")) is_ddr = 1;
         }
-        /* Parse MHz from lines like "CPU max MHz: 2400.0000" */
-        if (mhz == 0 && strstr(line, "MHz")) {
-            const char *colon = strchr(line, ':');
-            if (colon) {
-                double val;
-                if (sscanf(colon + 1, "%lf", &val) == 1 && val >= 100.0 && val <= 10000.0)
-                    mhz = (int)(val + 0.5);
+        /* Only match lines that talk about memory, not CPU clocks:
+         * - 'CPU max MHz' / 'CPU min MHz' / 'CPU(s) scaling MHz' are CPU
+         * - 'BogoMIPS' is a synthetic bogomips number
+         * We only trust lines containing 'memory', 'Memory', 'RAM', 'DRAM',
+         * or 'DIMM' when they also contain 'MHz' or 'MT/s'. */
+        if (mhz == 0 && !strstr(line, "CPU") && !strstr(line, "Bogo")) {
+            int is_mem = strstr(line, "memory") || strstr(line, "Memory")
+                      || strstr(line, "RAM") || strstr(line, "DRAM")
+                      || strstr(line, "DIMM") || strstr(line, "mem");
+            if (is_mem && strstr(line, "MHz")) {
+                const char *colon = strchr(line, ':');
+                if (colon) {
+                    double val;
+                    if (sscanf(colon + 1, "%lf", &val) == 1 && val >= 100.0 && val <= 10000.0)
+                        mhz = (int)(val + 0.5);
+                }
             }
         }
     }
     pclose(fp);
     if (mhz > 0) {
-        /* lscpu often reports MHz = MT/s/2 for DDR; multiply by 2 to get MT/s.
-         * For LPDDR it reports MT/s directly. We assume DDR convention here
-         * and double. */
         *out_mt_s = mhz * 2;
         if (is_ddr5) snprintf(out_std, std_len, "DDR5");
         else if (is_ddr4) snprintf(out_std, std_len, "DDR4");
