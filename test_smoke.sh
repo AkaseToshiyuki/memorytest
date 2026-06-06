@@ -19,7 +19,9 @@ SKIP=0
 NCPU=$(nproc 2>/dev/null || echo 1)
 
 # CPU tests: ~90s base + 4s per extra core beyond 24
-CPU_TIMEOUT=$(( 90 + (NCPU - 24) * 4 ))
+# CPU_TIMEOUT env var overrides the formula (for slow platforms like ARM with
+# expensive clflush-equivalent cache maintenance instructions).
+CPU_TIMEOUT=${CPU_TIMEOUT:-$(( 90 + (NCPU - 24) * 4 ))}
 [ $CPU_TIMEOUT -lt 90 ] && CPU_TIMEOUT=90
 [ $CPU_TIMEOUT -gt 600 ] && CPU_TIMEOUT=600
 
