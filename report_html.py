@@ -421,7 +421,9 @@ def _collect_cache_kpis() -> list:
 
     The "Cache Hierarchy Scan" table has columns `Size | RdLat(ns) | WrLat |
     BW | Expected | Analysis`. We pick the first row tagged with each level
-    and return the RdLat as the latency.
+    and return the RdLat as the latency.  Level labels come from the
+    **measured latency boundary** (the `Inferred` column of the
+    "Inferred vs Reported" table) — NOT from system-detected cache sizes.
     """
     p = REPORTS / "cache_hierarchy_report.md"
     if not p.exists(): return []
@@ -435,6 +437,25 @@ def _collect_cache_kpis() -> list:
         if "rdlat" in hl: rd_col = i
         elif hl == "expected": exp_col = i
     if rd_col is None or exp_col is None: return []
+
+    # Parse the "Inferred vs Reported" table to get inferred sizes.
+    # Format: | Level | Inferred (from latency) | Reported (sysfs) | Match |
+    inferred = {}
+    ir_tbl = _find_data_table_after(text, "Inferred (from latency)")
+    if not ir_tbl:
+        ir_tbl = _find_data_table_after(text, "Inferred")
+    if ir_tbl:
+        _, ir_rows = ir_tbl
+        for row in ir_rows:
+            if len(row) < 2: continue
+            lvl = row[0].strip().lower()
+            inf = row[1].strip()
+            # Normalise level names to match Expected column
+            if lvl.startswith("l1"):   inferred["L1"] = inf
+            elif lvl.startswith("l2"): inferred["L2"] = inf
+            elif lvl.startswith("l3"): inferred["L3"] = inf
+            elif lvl.startswith("ram"): inferred["RAM"] = inf
+
     seen = set()
     out = []
     for row in rows:
@@ -445,7 +466,12 @@ def _collect_cache_kpis() -> list:
             continue
         if level in seen: continue
         seen.add(level)
-        out.append((level, f"{v:.2f}", "ns"))
+        # Build label: prefer inferred boundary, fall back to level name
+        if level in inferred:
+            label = f"{level.upper()} ≤ {inferred[level]}"
+        else:
+            label = level.upper()
+        out.append((label, f"{v:.2f}", "ns"))
     return out
 
 
@@ -962,10 +988,10 @@ def build_html(score_dict: dict | None) -> str:
         'Pointer-chase latency over working-set sizes spanning 1 KB to several GB. '
         'When the working set exceeds the L1d / L2 / L3 capacity, latency '
         'jumps sharply as misses start to hit the next level (L2 / L3 / RAM). '
-        'The chart below plots the latency curve in log scale; the table records '
-        'where each transition is observed. The <i>Expected</i> column is the '
-        'level inferred from sysfs-detected cache sizes; <i>Inferred</i> is the '
-        'largest size that still hits each level.'
+        'Cache-level boundaries are <b>determined from measured latency jumps</b> — '
+        'the <i>Expected</i> column is the level inferred from the latency boundary; '
+        '<i>Analysis</i> describes the transition.  System-detected cache sizes are '
+        'shown in the comparison table below as a reference only.'
         '</p>'
     )
     # KPI cards (L1D / L2 / L3 / RAM latency) — concrete numbers, prominent
@@ -992,6 +1018,14 @@ def build_html(score_dict: dict | None) -> str:
         tbl = _find_data_table_after(text, "RdLat(ns)")
         if tbl:
             parts.append(_table_html(*tbl))
+        # Inferred vs Reported comparison table — shows both the measured
+        # boundary (from latency jumps) and the system-reported cache size.
+        ir_tbl = _find_data_table_after(text, "Inferred (from latency)")
+        if not ir_tbl:
+            ir_tbl = _find_data_table_after(text, "Inferred")
+        if ir_tbl:
+            parts.append('<h3 style="margin-top:24px">Inferred vs Reported</h3>')
+            parts.append(_table_html(*ir_tbl))
     # Interpretation
     if kpis and len(kpis) >= 4:
         try:
