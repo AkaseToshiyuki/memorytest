@@ -161,48 +161,53 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         start_ptr = (uint64_t *)&p[chain_indices[0]];
     }
 
-    /* ---- Step 2: evict the buffer from all cache levels ----
-     * Allocate and touch an array larger than the total on-chip cache.
-     * The sequential write fills all cache ways and forces our pointer
-     * chain out to DRAM (or the appropriate outer cache level). */
-    {
-        size_t total_cache = global_cache_config.l1d_size
-                           + global_cache_config.l2_size
-                           + global_cache_config.l3_total_size;
-        size_t evict_size = 32 * MB;
-        if (total_cache > 0 && total_cache * 2 > evict_size)
-            evict_size = total_cache * 2;
-        if (evict_size > 256 * MB)
-            evict_size = 256 * MB;
-
-        void *evict = malloc(evict_size);
-        if (evict) {
-            for (size_t i = 0; i < evict_size; i += 64)
-                ((volatile uint64_t *)evict)[i / 8] = i;
-            free(evict);
-        }
+    /* ---- Step 2: allocate persistent eviction buffer ----
+     * This buffer lives for the entire measurement and is rewritten
+     * between every run to force all cache ways to evict.  We size it
+     * to 2× the total on-chip cache so a single sequential pass is
+     * guaranteed to displace every line of our pointer chain. */
+    size_t total_cache = global_cache_config.l1d_size
+                       + global_cache_config.l2_size
+                       + global_cache_config.l3_total_size;
+    size_t evict_words = (32 * MB) / sizeof(uint64_t);
+    if (total_cache > 0) {
+        size_t want = (total_cache * 2) / sizeof(uint64_t);
+        if (want > evict_words) evict_words = want;
     }
+    if (evict_words > (512 * MB) / sizeof(uint64_t))
+        evict_words = (512 * MB) / sizeof(uint64_t);
+
+    volatile uint64_t *evict_buf = (volatile uint64_t *)malloc(evict_words * sizeof(uint64_t));
+    if (!evict_buf) { free(perm); free(chain_indices); return 0; }
 
     /* ---- Step 3: traverse the chain and measure latency ----
      * Each traversal walks chain_len nodes.  Every load is serially
      * dependent on the previous one — the CPU cannot issue the next load
      * until the current one completes, so we measure true load-to-use
-     * latency. */
+     * latency.
+     *
+     * KEY INSIGHT: between each run we do a FULL eviction by writing
+     * the entire eviction buffer sequentially.  This forces eviction of
+     * ALL nodes touched in the previous run — not just the start node.
+     * Without this, runs 2..N would measure L3 (cached) latency instead
+     * of true DRAM latency, poisoning the median. */
     {
         int num_runs = samples / (int)chain_len;
-        if (num_runs < 1)  num_runs = 1;
-        if (num_runs > 100) num_runs = 100;
+        if (num_runs < 5)  num_runs = 5;    /* minimum for stable median */
+        if (num_runs > 500) num_runs = 500;  /* sanity cap */
 
         double *latencies = malloc(num_runs * sizeof(double));
-        if (!latencies) { free(perm); free(chain_indices); return 0; }
+        if (!latencies) { free(perm); free(chain_indices); free((void *)evict_buf); return 0; }
 
         int count = 0;
         for (int r = 0; r < num_runs; r++) {
-            /* Re-evict start node between runs so each run starts cold */
-            if (r > 0) {
-                clflush(start_ptr);
-                memory_fence();
-            }
+            /* Full cache eviction before every run: sequential write
+             * over an array > total on-chip cache.  The first run's
+             * eviction also serves as a warm-up for the evict_buf pages
+             * themselves, keeping subsequent evictions fast. */
+            for (size_t i = 0; i < evict_words; i++)
+                evict_buf[i] = i;
+            memory_fence();
 
             volatile uint64_t *next = (volatile uint64_t *)start_ptr;
             uint64_t start = rdtsc_ns();
@@ -233,6 +238,7 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         free(latencies);
         free(perm);
         free(chain_indices);
+        free((void *)evict_buf);
         return result;
     }
 }
@@ -586,7 +592,7 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
          * buffer into L3 and corrupted DRAM latency measurements. */
 
         /* Random access latency */
-        int lat_iter = (size < 1 * MB) ? 5000 : (size < 16 * MB) ? 2000 : 500;
+        int lat_iter = (size < 16 * MB) ? 500000 : 1500000;
         double lat = measure_latency(ptr, size, lat_iter);
         double wr_lat = measure_write_latency(ptr, size, lat_iter);
 
