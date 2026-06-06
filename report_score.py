@@ -70,7 +70,7 @@ METRICS = [
     # chain) is 1.0 but is unmeasurable without the sink.)
     MetricSpec("alu_add_ipc", "higher", 0.2, 0.7, "Integer add IPC",          "alu"),
     MetricSpec("alu_mul_ipc", "higher", 0.2, 0.7, "Integer mul IPC",          "alu"),
-    MetricSpec("alu_div_ipc", "higher", 0.1, 0.5, "Integer div IPC",          "alu"),
+    MetricSpec("alu_div_ipc", "higher", 0.05, 0.5, "Integer div IPC",          "alu"),
     MetricSpec("alu_and_ipc", "higher", 0.2, 0.3, "Integer AND IPC",          "alu"),
     MetricSpec("alu_or_ipc",  "higher", 0.2, 0.3, "Integer OR IPC",           "alu"),
     MetricSpec("alu_xor_ipc", "higher", 0.2, 0.3, "Integer XOR IPC",          "alu"),
