@@ -1023,8 +1023,7 @@ static void detect_cpu_model(char *model, size_t len) {
     }
 
     /* If model name not found, try Hardware (ARM) */
-    if (!found_model) {
-        rewind(f);
+    if (!found_model && fseek(f, 0, SEEK_SET) == 0) {
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "Hardware", 8) == 0) {
                 char *colon = strchr(line, ':');
@@ -1051,8 +1050,7 @@ static void detect_cpu_model(char *model, size_t len) {
      * We try this BEFORE the generic "processor : N" line check below,
      * because "processor" matches on every core (24+ matches) and would
      * short-circuit the more specific ARM implementer lookup. */
-    {
-        rewind(f);
+    if (fseek(f, 0, SEEK_SET) == 0) {
         int part = -1;  /* Vendor-independent core part number */
         while (fgets(line, sizeof(line), f)) {
             /* Note: we deliberately ignore "CPU implementer" because the
@@ -1113,8 +1111,7 @@ static void detect_cpu_model(char *model, size_t len) {
     }
 
     /* If still not found, try Processor (some ARM) */
-    if (!found_model) {
-        rewind(f);
+    if (!found_model && fseek(f, 0, SEEK_SET) == 0) {
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "processor", 8) == 0) {
                 /* Some systems just say "processor" - use architecture instead */
