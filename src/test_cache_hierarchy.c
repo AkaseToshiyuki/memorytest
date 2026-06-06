@@ -97,9 +97,17 @@ static double measure_latency(void *ptr, size_t size, int samples) {
 
     /* Chain length: target ~64k dependent loads per traversal.
      * For small buffers we visit every word (chain_len = words).
-     * For large buffers we build a 64k-node chain scattered across the
-     * buffer — enough for a stable median without O(words) overhead. */
+     * For large buffers we build an N-node chain scattered across the
+     * buffer — enough for a stable median without O(words) overhead.
+     *
+     * Minimum chain length: 2× L2 cache size in words, so the chain
+     * data (chain_len × 8 bytes) exceeds L2.  This guarantees that
+     * for L3-sized buffers, the chain cannot be fully cached in L2,
+     * forcing true L3-access latency. */
     size_t chain_len = 65536;
+    size_t l2_words = global_cache_config.l2_size / sizeof(uint64_t);
+    size_t min_by_l2 = l2_words * 2;
+    if (min_by_l2 > chain_len) chain_len = min_by_l2;
     if (chain_len > words) chain_len = words;
     if (chain_len < 1024) chain_len = 1024;
 
@@ -189,15 +197,23 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * until the current one completes, so we measure true load-to-use
      * latency.
      *
-     * KEY INSIGHT: between each run we clflush EVERY node in the chain
-     * (not just the start node).  Without this, runs 2..N would measure
-     * cached latency instead of true DRAM latency, poisoning the median.
+     * EVICTION STRATEGY (key for correct boundary detection):
+     * - Buffer ≤ L3: evict only before the FIRST run (cold-start).
+     *   After run 1 the chain data is cached at the level that fits
+     *   the buffer (L1/L2/L3).  Runs 2..N then measure warm cache-hit
+     *   latency — this is what we WANT for cache hierarchy detection.
+     * - Buffer > L3: evict EVERY run.  The chain data (chain_len × 8 B)
+     *   exceeds L2, so even the chain doesn't stay cached.  Full eviction
+     *   guarantees true DRAM latency on every run.
      *
-     * We use clflush rather than an eviction-buffer write because
-     * sequential writes can be detected as streaming stores by the CPU
-     * and bypass the cache — leaving the chain data untouched.  clflush
-     * is deterministic on every architecture. */
+     * Prior code evicted every run for ALL sizes — L1 buffers were
+     * measured at L2 latency (~7 ns instead of ~1 ns), collapsing the
+     * latency curve and preventing the boundary-detection algorithm
+     * from finding L1→L2 and L2→L3 transitions. */
     {
+        size_t l3_total = global_cache_config.l3_total_size;
+        int evict_every_run = (size > l3_total);
+
         int num_runs = samples / (int)chain_len;
         if (num_runs < 5)  num_runs = 5;    /* minimum for stable median */
         if (num_runs > 500) num_runs = 500;  /* sanity cap */
@@ -207,13 +223,13 @@ static double measure_latency(void *ptr, size_t size, int samples) {
 
         int count = 0;
         for (int r = 0; r < num_runs; r++) {
-            /* Deterministic eviction: clflush every node in the chain.
-             * For a 64k-node chain this is ~2 ms — comparable to the
-             * traversal itself.  We flush ALL nodes every run so no
-             * cached data from the previous run survives. */
-            for (size_t i = 0; i < flush_count; i++)
-                clflush(&p[flush_order[i]]);
-            memory_fence();
+            /* Eviction: always on run 0 (cold start), then selectively
+             * on subsequent runs based on buffer size. */
+            if (r == 0 || evict_every_run) {
+                for (size_t i = 0; i < flush_count; i++)
+                    clflush(&p[flush_order[i]]);
+                memory_fence();
+            }
 
             volatile uint64_t *next = (volatile uint64_t *)start_ptr;
             uint64_t start = rdtsc_ns();
