@@ -161,24 +161,14 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         start_ptr = (uint64_t *)&p[chain_indices[0]];
     }
 
-    /* ---- Step 2: allocate persistent eviction buffer ----
-     * This buffer lives for the entire measurement and is rewritten
-     * between every run to force all cache ways to evict.  We size it
-     * to 2× the total on-chip cache so a single sequential pass is
-     * guaranteed to displace every line of our pointer chain. */
-    size_t total_cache = global_cache_config.l1d_size
-                       + global_cache_config.l2_size
-                       + global_cache_config.l3_total_size;
-    size_t evict_words = (32 * MB) / sizeof(uint64_t);
-    if (total_cache > 0) {
-        size_t want = (total_cache * 2) / sizeof(uint64_t);
-        if (want > evict_words) evict_words = want;
-    }
-    if (evict_words > (512 * MB) / sizeof(uint64_t))
-        evict_words = (512 * MB) / sizeof(uint64_t);
-
-    volatile uint64_t *evict_buf = (volatile uint64_t *)malloc(evict_words * sizeof(uint64_t));
-    if (!evict_buf) { free(perm); free(chain_indices); return 0; }
+    /* ---- Step 2: prepare flush-order array ----
+     * After building the chain, we know the exact order nodes are visited.
+     * For small buffers the order is perm[0..words-1]; for large buffers
+     * it's chain_indices[0..chain_len-1].  We point flush_order at the
+     * appropriate array so the between-run eviction can clflush every
+     * node deterministically. */
+    size_t *flush_order = (size < SMALL_BUF) ? perm : chain_indices;
+    size_t flush_count  = chain_len;
 
     /* ---- Step 3: traverse the chain and measure latency ----
      * Each traversal walks chain_len nodes.  Every load is serially
@@ -186,27 +176,30 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * until the current one completes, so we measure true load-to-use
      * latency.
      *
-     * KEY INSIGHT: between each run we do a FULL eviction by writing
-     * the entire eviction buffer sequentially.  This forces eviction of
-     * ALL nodes touched in the previous run — not just the start node.
-     * Without this, runs 2..N would measure L3 (cached) latency instead
-     * of true DRAM latency, poisoning the median. */
+     * KEY INSIGHT: between each run we clflush EVERY node in the chain
+     * (not just the start node).  Without this, runs 2..N would measure
+     * cached latency instead of true DRAM latency, poisoning the median.
+     *
+     * We use clflush rather than an eviction-buffer write because
+     * sequential writes can be detected as streaming stores by the CPU
+     * and bypass the cache — leaving the chain data untouched.  clflush
+     * is deterministic on every architecture. */
     {
         int num_runs = samples / (int)chain_len;
         if (num_runs < 5)  num_runs = 5;    /* minimum for stable median */
         if (num_runs > 500) num_runs = 500;  /* sanity cap */
 
         double *latencies = malloc(num_runs * sizeof(double));
-        if (!latencies) { free(perm); free(chain_indices); free((void *)evict_buf); return 0; }
+        if (!latencies) { free(perm); free(chain_indices); return 0; }
 
         int count = 0;
         for (int r = 0; r < num_runs; r++) {
-            /* Full cache eviction before every run: sequential write
-             * over an array > total on-chip cache.  The first run's
-             * eviction also serves as a warm-up for the evict_buf pages
-             * themselves, keeping subsequent evictions fast. */
-            for (size_t i = 0; i < evict_words; i++)
-                evict_buf[i] = i;
+            /* Deterministic eviction: clflush every node in the chain.
+             * For a 64k-node chain this is ~2 ms — comparable to the
+             * traversal itself.  We flush ALL nodes every run so no
+             * cached data from the previous run survives. */
+            for (size_t i = 0; i < flush_count; i++)
+                clflush(&p[flush_order[i]]);
             memory_fence();
 
             volatile uint64_t *next = (volatile uint64_t *)start_ptr;
@@ -238,7 +231,6 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         free(latencies);
         free(perm);
         free(chain_indices);
-        free((void *)evict_buf);
         return result;
     }
 }
