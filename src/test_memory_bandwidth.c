@@ -470,8 +470,13 @@ int main(int argc, char *argv[]) {
     if (min_size > 8ULL * 1024 * 1024 * 1024) min_size = 8ULL * 1024 * 1024 * 1024;
 
     size_t size = min_size;
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    int threads = (int)num_cpus;  /* Default: use all available cores */
+    /* Use physical cores when HT/SMT is detected — same logic as
+     * test_cache_hierarchy.c and test_inter_core.c. HT siblings share
+     * memory bandwidth and add contention without providing additional
+     * throughput, dragging down measured bandwidth. */
+    int physical = global_system_config.cpu_cores_physical;
+    long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
+    int threads = (int)num_cpus;
     if (threads < 1) threads = 1;
     if (threads > MAX_THREADS) {
         fprintf(stderr, "[mem] %d cores detected, but MAX_THREADS=%d. "
