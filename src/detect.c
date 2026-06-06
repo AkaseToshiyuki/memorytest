@@ -1417,8 +1417,12 @@ static int detect_dram_speed_dmidecode(int *out_mt_s, char *out_std, size_t std_
     char current_std[32] = "unknown";
 
     while (fgets(line, sizeof(line), fp)) {
-        /* Type appears in Memory Device blocks: e.g. "Type: DDR4" */
-        if (strstr(line, "Type:") == line || strncmp(line, "Type:", 5) == 0) {
+        /* Type appears in Memory Device blocks: e.g. "        Type: DDR4".
+         * dmidecode output indents block fields, so skip leading whitespace
+         * before checking for the "Type:" prefix. */
+        char *s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (strncmp(s, "Type:", 5) == 0) {
             char *colon = strchr(line, ':');
             if (!colon) continue;
             char *v = colon + 1;
