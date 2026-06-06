@@ -670,6 +670,17 @@ void run_inter_core_latency_test(void) {
             }
             fprintf(json_fp, "]%s\n", i < n - 1 ? "," : "");
         }
+        fprintf(json_fp, "  ],\n");
+        fprintf(json_fp, "  \"cas_throughput_matrix\": [\n");
+        for (int i = 0; i < n; i++) {
+            fprintf(json_fp, "    [");
+            for (int j = 0; j < n; j++) {
+                if (j) fprintf(json_fp, ", ");
+                if (i == j) fprintf(json_fp, "null");
+                else { double v = M->bw_mops[i*n+j]; fprintf(json_fp, v==v?"%.1f":"null", v); }
+            }
+            fprintf(json_fp, "]%s\n", i < n - 1 ? "," : "");
+        }
         fprintf(json_fp, "  ]\n}\n");
         fclose(json_fp);
     }

@@ -1086,6 +1086,11 @@ def build_html(score_dict: dict | None) -> str:
         parts.append(f'<img class="chart-img" src="{uri}" alt="Inter-core heatmap">')
     else:
         parts.append('<p class="no-data">No inter-core heatmap (run generate_report.py first to generate charts/)</p>')
+    tp_heatmap = CHARTS / "inter_core_throughput.png"
+    tp_uri = _png_data_uri(tp_heatmap)
+    if tp_uri:
+        parts.append(f'<h3>CAS Throughput (MOPS)</h3>')
+        parts.append(f'<img class="chart-img" src="{tp_uri}" alt="Inter-core throughput heatmap">')
     if ic_kpis and len(ic_kpis) >= 3:
         try:
             lo, hi, mean = float(ic_kpis[0][1]), float(ic_kpis[1][1]), float(ic_kpis[2][1])
@@ -1406,6 +1411,12 @@ def _ensure_charts() -> None:
             gr.create_inter_core_heatmap(str(ic_md), str(CHARTS / "inter_core_heatmap.png"))
         except Exception as e:
             print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
+    # Inter-core throughput heatmap (MOPS)
+    if ic_json.exists():
+        try:
+            gr.create_inter_core_throughput_heatmap_from_json(str(ic_json), str(CHARTS / "inter_core_throughput.png"))
+        except Exception as e:
+            print(f"# WARN: inter-core throughput heatmap failed: {e}", file=sys.stderr)
     # Multi-core scaling
     if multi_md.exists():
         try:

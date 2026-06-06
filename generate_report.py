@@ -802,6 +802,75 @@ def create_inter_core_heatmap_from_json(json_path, output_path):
     return output_path
 
 
+def create_inter_core_throughput_heatmap_from_json(json_path, output_path):
+    """Render inter-core throughput (MOPS) heatmap from the same JSON."""
+    if not HAS_MATPLOTLIB:
+        return None
+    import json as _json
+    import numpy as np
+    with open(json_path) as f:
+        data = _json.load(f)
+    raw = data.get("cas_throughput_matrix")
+    if not raw:
+        return None
+    n = len(raw)
+    matrix = np.full((n, n), np.nan, dtype=float)
+    for i, row in enumerate(raw):
+        if i >= n: break
+        for j, v in enumerate(row):
+            if j >= n: break
+            if v is None: continue
+            try:
+                matrix[i, j] = float(v)
+            except (TypeError, ValueError):
+                pass
+    if np.all(np.isnan(matrix)):
+        return None
+    _render_throughput_heatmap(matrix, output_path)
+    return output_path
+
+
+def _render_throughput_heatmap(matrix, output_path):
+    """Render an NxN throughput matrix (MOPS) — blue-green scale, NaN = grey."""
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(12, 10))
+    cmap = plt.get_cmap('YlGnBu').copy()
+    cmap.set_bad(color='#d0d0d0')
+    masked = np.ma.masked_invalid(matrix)
+    im = ax.imshow(masked, cmap=cmap, aspect='auto',
+                   vmin=np.nanmin(matrix), vmax=np.nanmax(matrix))
+    ax.set_title('Inter-Core CAS Throughput (MOPS) — diagonal = self (not measured)', fontsize=13)
+    ax.set_xlabel('Core ID', fontsize=12)
+    ax.set_ylabel('Core ID', fontsize=12)
+
+    n = matrix.shape[0]
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(range(n))
+    ax.set_yticklabels(range(n))
+
+    finite_max = np.nanmax(matrix)
+    finite_min = np.nanmin(matrix)
+    threshold = (finite_max + finite_min) / 2
+    for i in range(n):
+        for j in range(n):
+            if np.isnan(matrix[i, j]):
+                label = "—"
+                color = '#888'
+            else:
+                label = f'{matrix[i, j]:.0f}'
+                color = 'white' if matrix[i, j] < threshold else 'black'
+            ax.text(j, i, label, ha='center', va='center',
+                    color=color, fontsize=6)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Throughput (MOPS) — grey = self-pair (not measured)', fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
 def _render_heatmap(matrix, output_path):
     """Common matplotlib rendering for an NxN latency matrix (NaN = no data)."""
     import numpy as np
