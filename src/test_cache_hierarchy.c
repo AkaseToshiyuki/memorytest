@@ -78,9 +78,11 @@ static double measure_latency(void *ptr, size_t size, int samples) {
     if (words < 2) return 0;
 
     /* ---- Step 0: lightweight page-fault-in (replaces memset) ----
-     * Touch one byte per 4 KB page so the kernel faults in physical pages
-     * without pulling the entire buffer into L3 cache. */
-    for (size_t i = 0; i < size; i += 4096) {
+     * Touch one byte per OS page so the kernel faults in physical pages
+     * without pulling the entire buffer into L3 cache.
+     * sysconf(_SC_PAGESIZE) covers ARM64 64KB pages, x86 4KB, etc. */
+    long page_size = sysconf(_SC_PAGESIZE);
+    for (size_t i = 0; i < size; i += (size_t)page_size) {
         ((volatile char *)ptr)[i] = 0;
     }
 
