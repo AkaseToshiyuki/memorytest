@@ -84,7 +84,7 @@ sanity:
 
 # `make test` runs all 3 layers: smoke (binaries run) → sanity (physical range) → regression (history baseline)
 # This is the ONLY recommended test target. Individual layers exist for debugging.
-test: tests smoke sanity regression
+test: tests smoke sanity regression report
 
 # Layer 3 regression: record current metrics, compare to median of last 3 runs
 # Exits 1 if any metric deviates >50% from baseline.
