@@ -71,16 +71,17 @@ for binary in "${!TESTS[@]}"; do
         THIS_TIMEOUT=$TIMEOUT_SEC
     fi
 
-    # Run with empty stdin when non-interactive (skip sudo prompt),
-    # but keep stdin open when it's a TTY so the user can enter a password.
-    # timeout(1) redirects stdin to /dev/null by default — --foreground
-    # prevents that so the binary can read the sudo password.
+    # In a real terminal, let output pass through so the user sees the
+    # sudo password prompt. In CI (non-TTY), capture everything.
+    # timeout --foreground keeps stdin connected to the terminal.
     if [ -t 0 ]; then
-        output=$(timeout --foreground "$THIS_TIMEOUT" "$BIN/$binary" 2>&1)
+        timeout --foreground "$THIS_TIMEOUT" "$BIN/$binary"
+        exit_code=$?
+        output="(ran interactively)"
     else
         output=$(timeout "$THIS_TIMEOUT" "$BIN/$binary" < /dev/null 2>&1)
+        exit_code=$?
     fi
-    exit_code=$?
 
     # Print diagnostics on non-zero exit
     if [ $exit_code -ne 0 ] && [ $exit_code -ne 124 ]; then
