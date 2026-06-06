@@ -663,49 +663,103 @@ def _collect_bw_kpis() -> list:
 def _collect_intercore_kpis() -> list:
     """KPI cards for the Inter-Core Latency section.
 
-    Derives min / max / diagonal-off-diagonal mean from the CAS matrix
-    in `inter_core_latency_report.md`. Requires a real, populated matrix.
+    Splits CAS latencies into intra-cluster and cross-cluster groups
+    when natural clusters exist (auto-detected from latency gaps).
+    On uniform systems (one cluster), all pairs are intra-cluster.
     """
     p = REPORTS / "inter_core_latency_report.md"
     if not p.exists(): return []
     text = p.read_text()
-    # Matrix starts with header row "| **Core** | 0 | 1 | 2 | ... |" then
-    # row "| 0 | - | 32.2 | 32.2 | ... |" etc. We want all data rows.
     import re
     matrix_rows = []
-    seen_indices = set()  # guard: stop at second table (latency then throughput)
+    seen_indices = set()
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("|"): continue
         if line.startswith("| **Core**") or line.startswith("|---"): continue
-        # Split off the leading row label, parse the rest as floats.
         parts = [c.strip() for c in line.strip("|").split("|")]
         if not parts: continue
-        try: row_idx = int(parts[0])  # first col should be the row index
+        try: row_idx = int(parts[0])
         except ValueError: continue
         if row_idx in seen_indices:
-            # Duplicate row index → second table (throughput). Stop.
-            break
+            break  # second table (throughput) — stop
         seen_indices.add(row_idx)
         row_vals = []
         for c in parts[1:]:
             if c in ("-", ""): row_vals.append(None); continue
-            # Handle "VALUE [P25-P75]" format by extracting the median
             if "[" in c:
                 c = c.split("[")[0].strip()
             try: row_vals.append(float(c))
             except ValueError: row_vals.append(None)
         if row_vals: matrix_rows.append(row_vals)
     if not matrix_rows: return []
-    flat = [v for row in matrix_rows for v in row if v is not None]
-    if not flat: return []
-    # Diagonal entries are None (skip), so all flat values are off-diagonal.
-    out = [
-        ("Min CAS latency",   f"{min(flat):.1f}", "ns"),
-        ("Max CAS latency",   f"{max(flat):.1f}", "ns"),
-        ("Mean CAS latency",  f"{sum(flat)/len(flat):.1f}", "ns"),
-        ("Matrix size",       f"{len(matrix_rows)}×{len(matrix_rows)}", "cores"),
-    ]
+    n = len(matrix_rows)
+
+    # Build full matrix; None for self/missing
+    matrix = [[None] * n for _ in range(n)]
+    for i, row in enumerate(matrix_rows):
+        for j, v in enumerate(row[:n]):
+            if v is not None:
+                matrix[i][j] = v
+
+    # Find natural clusters
+    min_adj = float('inf')
+    for i in range(n):
+        for j in (i - 1, i + 1):
+            if 0 <= j < n and matrix[i][j] is not None and matrix[i][j] < min_adj:
+                min_adj = matrix[i][j]
+    if min_adj == float('inf'):
+        for i in range(n):
+            for j in range(n):
+                if i != j and matrix[i][j] is not None and matrix[i][j] < min_adj:
+                    min_adj = matrix[i][j]
+
+    if min_adj == float('inf'):
+        flat = [v for row in matrix_rows for v in row if v is not None]
+        return [("Min CAS", f"{min(flat):.1f}", "ns"),
+                ("Mean CAS", f"{sum(flat)/len(flat):.1f}", "ns")] if flat else []
+
+    threshold = min_adj * 2.0
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    for i in range(n):
+        for j in range(i + 1, n):
+            if matrix[i][j] is not None and matrix[i][j] < threshold:
+                union(i, j)
+            elif matrix[j][i] is not None and matrix[j][i] < threshold:
+                union(i, j)
+
+    intra, cross = [], []
+    for i in range(n):
+        for j in range(n):
+            if i == j or matrix[i][j] is None:
+                continue
+            (intra if find(i) == find(j) else cross).append(matrix[i][j])
+
+    intra.sort(); cross.sort()
+    def _med(vals):
+        if not vals: return None
+        m = len(vals) // 2
+        return vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2.0
+
+    out = []
+    if intra:
+        out.append(("Intra-cluster median", f"{_med(intra):.1f}", "ns"))
+    if cross:
+        out.append(("Cross-cluster median", f"{_med(cross):.1f}", "ns"))
+    # Always show min as a sense of the best-case core-to-core latency
+    all_flat = intra + cross
+    if all_flat:
+        out.append(("Min CAS latency", f"{min(all_flat):.1f}", "ns"))
+    out.append(("Matrix size", f"{n}×{n}", "cores"))
     return out
 
 

@@ -231,30 +231,96 @@ def parse_memory_bandwidth(text):
 
 
 def parse_inter_core(text):
-    """Returns median CAS latency for off-diagonal entries (inter-core)."""
+    """Returns intra-cluster CAS median (auto-detects clusters from latency gaps)."""
     rows = _parse_md_table(text, "**Core**")
     if not rows:
         return {"intra_socket_lat_ns": None}
-    # rows are dicts; key "Core" is the row label, other keys (0, 1, 2, ...) are core IDs
-    header_keys = list(rows[0].keys())  # ["Core", "0", "1", ...]
+    header_keys = list(rows[0].keys())
     if header_keys[0] != "Core":
         return {"intra_socket_lat_ns": None}
-    vals = []
-    for r in rows:
-        for col in header_keys[1:]:
-            v = r.get(col, "-")
-            try:
-                # Format: "32.3 [32.3-32.3]" — extract the median
-                space_idx = v.find(" ")
-                if space_idx > 0:
-                    v = v[:space_idx]
-                vals.append(float(v))
-            except ValueError:
-                pass
-    if not vals:
+    n = len(header_keys) - 1
+    if n < 2:
         return {"intra_socket_lat_ns": None}
-    vals.sort()
-    return {"intra_socket_lat_ns": vals[len(vals) // 2]}  # median across all 24×23 pairs
+
+    # Build full N×N matrix
+    matrix = [[float('nan')] * n for _ in range(n)]
+    for r in rows:
+        try:
+            src = int(r["Core"])
+        except (ValueError, KeyError):
+            continue
+        if src < 0 or src >= n:
+            continue
+        for col_key in header_keys[1:]:
+            try:
+                dst = int(col_key)
+            except ValueError:
+                continue
+            cell = r.get(col_key, "-").strip()
+            if cell in ('-', '—', ''):
+                continue
+            space_idx = cell.find(" ")
+            if space_idx > 0:
+                cell = cell[:space_idx]
+            try:
+                v = float(cell)
+                if 1 < v < 5000:
+                    matrix[src][dst] = v
+            except ValueError:
+                continue
+
+    # Find natural clusters (same algorithm as report_score.py)
+    min_adj = float('inf')
+    for i in range(n):
+        for j in (i - 1, i + 1):
+            if 0 <= j < n and not (matrix[i][j] != matrix[i][j]):
+                if matrix[i][j] < min_adj:
+                    min_adj = matrix[i][j]
+    if min_adj == float('inf'):
+        for i in range(n):
+            for j in range(n):
+                if i != j and not (matrix[i][j] != matrix[i][j]):
+                    if matrix[i][j] < min_adj:
+                        min_adj = matrix[i][j]
+    if min_adj == float('inf'):
+        return {"intra_socket_lat_ns": None}
+
+    threshold = min_adj * 2.0
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if not (matrix[i][j] != matrix[i][j]) and matrix[i][j] < threshold:
+                union(i, j)
+            elif not (matrix[j][i] != matrix[j][i]) and matrix[j][i] < threshold:
+                union(i, j)
+
+    intra = []
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            v = matrix[i][j]
+            if v != v:
+                continue
+            if find(i) == find(j):
+                intra.append(v)
+
+    if not intra:
+        return {"intra_socket_lat_ns": None}
+    intra.sort()
+    m = len(intra) // 2
+    med = intra[m] if len(intra) % 2 else (intra[m - 1] + intra[m]) / 2.0
+    return {"intra_socket_lat_ns": med}
 
 
 def parse_cpu_alu(text):

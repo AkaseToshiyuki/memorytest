@@ -61,8 +61,9 @@ METRICS = [
     MetricSpec("read_mbps",   "higher", 20000.0, 1.0, "Memory read bandwidth",   "bandwidth"),
     MetricSpec("write_mbps",  "higher", 10000.0, 1.0, "Memory write bandwidth",  "bandwidth"),
     MetricSpec("copy_mbps",   "higher", 15000.0, 1.0, "Memory copy bandwidth",   "bandwidth"),
-    # Inter-core latency (lower = better, intra-socket median of one-hop pairs)
-    MetricSpec("cas_median_ns", "lower", 20.0, 1.0, "Median intra-socket CAS", "inter_core"),
+    # Inter-core latency (lower = better, median intra-cluster CAS — clustering
+    # is auto-detected from latency gaps; cross-cluster latency is topology, not a defect)
+    MetricSpec("cas_intra_median_ns", "lower", 20.0, 1.0, "Median intra-cluster CAS", "inter_core"),
     # ALU IPC (higher = better, but chained volatile sinks depress it; ~0.1-0.2 is realistic
     # because each iteration has a RAW dependency on the previous sum. We use 0.2 as the
     # "good" baseline for ALU with anti-opt volatile sinks — the theoretical peak (no dep
@@ -403,53 +404,141 @@ def parse_memory_bandwidth(text: str) -> dict:
 def parse_inter_core(text: str) -> dict:
     """Parse the NxN inter-core latency matrix.
 
-    The inter-core binary writes a 24x24 markdown table where row/col
-    index = core id. Self-sentinels are `-` (a literal dash), and the
-    1-hop latency for each row is the non-zero minimum of the cells
-    adjacent to that row's self-sentinel. We compute the average and
-    minimum across all 24 row minima and return `cas_avg_ns` / `cas_min_ns`.
+    Builds the full latency matrix, finds natural core clusters by analysing
+    latency gaps (adjacent clusters when latency > 2× the minimum), then
+    returns the median intra-cluster CAS latency as the primary metric.
+    Cross-cluster latency is also reported but not scored — it reflects
+    physical topology (multi-CCD / big.LITTLE / multi-socket), not a
+    performance defect.
     """
+    # --- Step 1: parse the full N×N matrix ---
     tbl = _find_data_table_after(text, "**Core**")
-    if not tbl: return {}
+    if not tbl:
+        return {}
     headers, rows = tbl
-    # The first header cell is the row-label sentinel (e.g. "**Core**")
-    # and the rest are column indices 0..N-1.
     try:
-        n_cols = len(headers) - 1
+        n = len(headers) - 1
     except Exception:
         return {}
-    if n_cols < 2: return {}
-    one_hop = []
+    if n < 2:
+        return {}
+
+    # Build matrix[n][n], stored as floats; self-sentinels/dashes → NaN
+    matrix = [[float('nan')] * n for _ in range(n)]
     for row in rows:
-        # First cell is the row index (core id)
         try:
             src = int(row[0])
         except (ValueError, IndexError):
             continue
-        if len(row) < n_cols + 1: continue
-        # The cell at position src+1 corresponds to column src (self)
-        sentinel_col = src + 1
-        candidates = []
-        for k in (sentinel_col - 1, sentinel_col + 1):
-            if 1 <= k <= n_cols:
-                try:
-                    cell = row[k]
-                    # Format: "32.3 [32.3-32.3]" — extract median
-                    space_idx = cell.find(" ")
-                    if space_idx > 0:
-                        cell = cell[:space_idx]
-                    v = float(cell)
-                    if 1 < v < 5000:
-                        candidates.append(v)
-                except (ValueError, IndexError):
-                    pass
-        if candidates:
-            one_hop.append(min(candidates))
-    if one_hop:
-        return {
-            "cas_median_ns": sum(one_hop) / len(one_hop),
-        }
-    return {}
+        if src < 0 or src >= n:
+            continue
+        for dst in range(n):
+            col = dst + 1  # skip row-label column
+            if col >= len(row):
+                continue
+            cell = row[col].strip()
+            if cell in ('-', '—', ''):
+                continue
+            # Format: "32.3 [32.3-32.3]" — extract median
+            space_idx = cell.find(" ")
+            if space_idx > 0:
+                cell = cell[:space_idx]
+            try:
+                v = float(cell)
+                if 1 < v < 5000:
+                    matrix[src][dst] = v
+            except ValueError:
+                continue
+
+    # --- Step 2: find natural clusters from latency gaps ---
+    # Compute the minimum adjacency latency across all non-self pairs.
+    min_adj = float('inf')
+    for i in range(n):
+        for j in (i - 1, i + 1):
+            if 0 <= j < n and not (matrix[i][j] != matrix[i][j]):  # not NaN
+                if matrix[i][j] < min_adj:
+                    min_adj = matrix[i][j]
+    if min_adj == float('inf'):
+        # Fallback: use overall minimum
+        for i in range(n):
+            for j in range(n):
+                if i != j and not (matrix[i][j] != matrix[i][j]):
+                    if matrix[i][j] < min_adj:
+                        min_adj = matrix[i][j]
+    if min_adj == float('inf'):
+        return {}
+
+    threshold = min_adj * 2.0  # cores with latency < threshold are "close"
+
+    # Union-Find to group cores by connectivity
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Two cores are in the same cluster if latency is below threshold
+            # OR they are directly adjacent with similar latency to the minimum
+            if not (matrix[i][j] != matrix[i][j]):  # not NaN
+                if matrix[i][j] < threshold:
+                    union(i, j)
+            elif not (matrix[j][i] != matrix[j][i]):
+                if matrix[j][i] < threshold:
+                    union(i, j)
+
+    # Build cluster groups
+    clusters = {}
+    for i in range(n):
+        cid = find(i)
+        clusters.setdefault(cid, []).append(i)
+
+    # --- Step 3: compute intra- and cross-cluster medians ---
+    intra, cross = [], []
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            v = matrix[i][j]
+            if v != v:  # NaN
+                continue
+            if find(i) == find(j):
+                intra.append(v)
+            else:
+                cross.append(v)
+
+    intra.sort()
+    cross.sort()
+
+    def _median(vals):
+        if not vals:
+            return None
+        m = len(vals) // 2
+        if len(vals) % 2 == 0:
+            return (vals[m - 1] + vals[m]) / 2.0
+        return vals[m]
+
+    result = {}
+    intra_med = _median(intra)
+    cross_med = _median(cross) if cross else None
+
+    if intra_med is not None:
+        result["cas_intra_median_ns"] = intra_med
+    if cross_med is not None:
+        result["cas_cross_median_ns"] = cross_med
+    # Keep backward-compat: overall median = intra if one cluster, else combined
+    all_vals = intra + cross
+    all_vals.sort()
+    result["cas_median_ns"] = _median(all_vals)
+    result["_clusters"] = len(clusters)
+
+    return result
 
 
 
