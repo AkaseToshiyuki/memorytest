@@ -112,7 +112,7 @@ static void *thread_mem_bw_read(void *arg) {
     ThreadArgs *t = (ThreadArgs *)arg;
     volatile uint8_t *buf = (volatile uint8_t *)t->buffer;
     size_t size_per_thread = MEM_TEST_SIZE;  /* each thread reads a full 64 MB slice */
-    size_t offset = t->thread_id * MEM_TEST_SIZE;
+    size_t offset = (size_t)t->thread_id * MEM_TEST_SIZE;
 
     set_cpu_affinity(t->thread_id);
 
@@ -395,7 +395,7 @@ void run_cpu_multi_core_test(void) {
             double time_ms = run_mem_bw_benchmark(threads, mem_buffer);
 
             /* 计算实际带宽: size * threads / time */
-            double bytes_per_sec = (MEM_TEST_SIZE * threads) / (time_ms / 1000.0);
+            double bytes_per_sec = ((size_t)MEM_TEST_SIZE * threads) / (time_ms / 1000.0);
             double bw_gbs = bytes_per_sec / (1024.0 * 1024.0 * 1024.0);
 
             double saturation = (theoretical_bw > 0.0)
