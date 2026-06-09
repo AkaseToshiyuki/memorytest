@@ -526,10 +526,13 @@ void run_inter_core_latency_test(void) {
      * Calibrate g_bw_iterations on a single pair first so all pairs
      * use the same iteration count — avoids inconsistent scaling. */
     {
-        /* Cap BW iterations when there are many core pairs (>1000) to keep
-         * total test time reasonable. Each pair runs g_bw_iterations CAS ops,
-         * so 1024 pairs × 800k iters = excessive runtime. */
-        int bw_cap = (n * n > 1000) ? 400000 : 800000;
+        /* Cap BW iterations by pair count to bound total test time.
+         * Three tiers: small machines get full precision (800k), medium get
+         * halved (400k), large get further reduced (200k). */
+        int bw_cap;
+        if (n > 64)            bw_cap = 200000;
+        else if (n * n > 1000) bw_cap = 400000;
+        else                   bw_cap = 800000;
         int cal_pair_i = 0, cal_pair_j = (n > 1) ? 1 : 0;
         while (g_bw_iterations < bw_cap) {
             uint64_t t0 = get_time_ns();
