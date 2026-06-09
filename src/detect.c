@@ -591,7 +591,9 @@ static int detect_cache_via_dmidecode(void) {
             else continue;
 
             /* Sanity bounds per cache level to reject firmware garbage
-             * (e.g. dmidecode reporting "16 GB" for L1 on buggy ARM laptops). */
+             * (e.g. dmidecode reporting "16 GB" for L1 on buggy ARM laptops).
+             * Also try ÷10 rescue: some firmware drops the decimal point,
+             * reporting "640 kB" when it means "64.0 kB" (real size = 64 KB). */
             static const size_t MAX_L1 = 256 * 1024;       /* 256 KB */
             static const size_t MIN_L1 = 4 * 1024;         /*   4 KB */
             static const size_t MAX_L2 = 32 * 1024 * 1024; /*  32 MB */
@@ -601,7 +603,16 @@ static int detect_cache_via_dmidecode(void) {
             int reject = 0;
             size_t orig_sz = sz;
             if (current_level == 1) {
-                if (sz < MIN_L1 || sz > MAX_L1) { reject = 1; sz = 0; }
+                if (sz < MIN_L1 || sz > MAX_L1) {
+                    /* Try ÷10 rescue for firmware that drops decimal point */
+                    size_t sz10 = orig_sz / 10;
+                    if (sz10 >= MIN_L1 && sz10 <= MAX_L1) {
+                        sz = sz10;
+                        fprintf(stderr, "[dmidecode] L1 cache: raw '%s' → %zu bytes "
+                                "→ adjusted to %zu bytes (÷10, firmware likely dropped decimal point)\n",
+                                val, orig_sz, sz);
+                    } else { reject = 1; sz = 0; }
+                }
             } else if (current_level == 2) {
                 if (sz < MIN_L2 || sz > MAX_L2) { reject = 1; sz = 0; }
             } else if (current_level == 3) {
