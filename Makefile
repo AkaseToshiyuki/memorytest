@@ -25,7 +25,7 @@ CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result -W
 LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
-VERSION = 1.0.1
+VERSION = 1.0.2
 
 # Test categories
 MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
