@@ -23,15 +23,15 @@ NCPU=$(nproc 2>/dev/null || echo 1)
 # expensive clflush-equivalent cache maintenance instructions).
 CPU_TIMEOUT=${CPU_TIMEOUT:-$(( 300 + (NCPU - 24) * 4 ))}
 [ $CPU_TIMEOUT -lt 300 ] && CPU_TIMEOUT=300
-[ $CPU_TIMEOUT -gt 600 ] && CPU_TIMEOUT=600
+[ $CPU_TIMEOUT -gt 2400 ] && CPU_TIMEOUT=2400
 
 # Inter-core test: N×N CAS pairs. Formula: 120 + N²/3 seconds.
 #   - 24 cores →  312s (~5 min)
 #   - 96 cores → 3192s (~53 min, EPYC dual-socket)
-# Capped at 3 hours as a safety net.
+# Both CPU and inter-core timeouts capped at 40 minutes.
 INTER_TIMEOUT=$(( 120 + (NCPU * NCPU) / 3 ))
 [ $INTER_TIMEOUT -lt 120 ] && INTER_TIMEOUT=120
-[ $INTER_TIMEOUT -gt 10800 ] && INTER_TIMEOUT=10800
+[ $INTER_TIMEOUT -gt 2400 ] && INTER_TIMEOUT=2400
 
 TIMEOUT_SEC=$CPU_TIMEOUT
 
