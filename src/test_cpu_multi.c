@@ -17,7 +17,7 @@
 #include <math.h>
 #include <pthread.h>
 
-#define ITERATIONS 100000000
+#define ITERATIONS 500000000
 #define WARMUP_ITERATIONS 1000000
 /* MAX_THREADS: per-stack-array limit. See test_memory_bandwidth.c for
  * the rationale on the value 256. */
@@ -311,15 +311,17 @@ void run_cpu_multi_core_test(void) {
     printf("%-12s | %-8s | %-10s | %-10s | %-10s | %-10s | %-12s\n",
            "------------", "--------", "----------", "----------", "----------", "----------", "------------");
 
-    /* 存储单核时间用于speedup计算 */
-    double single_core_times[16] = {0};
+    /* Store results for report reuse (avoid double measurement). */
+    double stored_multi_time[16][16];
+    double stored_speedup[16][16];
+    double stored_eff[16][16];
+    const char *stored_status[16][16];
 
     for (int i = 0; i < num_tests; i++) {
         const char *cat = tests[i].category;
 
         /* 先测试单核时间 */
         double single_time = run_multi_core_benchmark(tests[i].thread_func, 1, 0);
-        single_core_times[i] = single_time;
 
         printf("\n-- %s --\n", cat);
 
@@ -332,18 +334,26 @@ void run_cpu_multi_core_test(void) {
             double speedup = single_time / multi_time;
             double efficiency = speedup / threads * 100.0;
 
-            /* 判断是否带宽受限 */
+            /* Status label: compute-bound tests drop efficiency from frequency
+             * scaling / power limits when all cores are active, not bandwidth. */
             const char *status;
+            int is_mem_test = tests[i].uses_memory;
             if (efficiency < 50.0) {
-                status = "BANDWIDTH LIMIT";
+                status = is_mem_test ? "BANDWIDTH LIMIT" : "FREQ/TDP LIMIT";
             } else if (efficiency < 80.0) {
-                status = "scalability limit";
+                status = is_mem_test ? "scalability limit" : "scaling limit";
             } else {
                 status = "optimal";
             }
 
             printf("%-12s | %-8s | %-10d | %-10.2f | %-10.2fx | %-10.1f%% | %s\n",
                    tests[i].name, cat, threads, multi_time, speedup, efficiency, status);
+
+            /* Store for report reuse */
+            stored_multi_time[i][t] = multi_time;
+            stored_speedup[i][t]   = speedup;
+            stored_eff[i][t]       = efficiency;
+            stored_status[i][t]    = status;
         }
     }
 
@@ -418,18 +428,16 @@ void run_cpu_multi_core_test(void) {
 
         for (int i = 0; i < num_tests; i++) {
             const char *cat = tests[i].category;
-            double single_time = single_core_times[i];
 
             for (int t = 0; t < num_thread_counts; t++) {
                 int threads = thread_counts[t];
                 if (threads > max_threads) continue;
 
-                double multi_time = run_multi_core_benchmark(tests[i].thread_func, threads, 0);
-                double speedup = single_time / multi_time;
-                double eff = speedup / threads * 100.0;
-
-                const char *status = (eff < 50.0) ? "BANDWIDTH LIMIT" :
-                                     (eff < 80.0) ? "scalability" : "optimal";
+                /* Reuse values from display pass — no re-run */
+                double multi_time = stored_multi_time[i][t];
+                double speedup    = stored_speedup[i][t];
+                double eff        = stored_eff[i][t];
+                const char *status = stored_status[i][t];
 
                 report_write(report, "| %s | %s | %d | %.2f | %.2fx | %.1f%% | %s |\n",
                            tests[i].name, cat, threads, multi_time, speedup, eff, status);
@@ -440,8 +448,8 @@ void run_cpu_multi_core_test(void) {
         report_section(report, "Notes");
         report_write(report, "- Speedup = Single-core time / Multi-core time\n");
         report_write(report, "- Efficiency = Speedup / Threads * 100%%\n");
-        report_write(report, "- Efficiency < 50%% indicates memory bandwidth saturation\n");
-        report_write(report, "- Efficiency 50-80%% indicates some scalability limits\n");
+        report_write(report, "- Compute-bound tests (ALU/FPU): efficiency < 50%% → FREQ/TDP LIMIT, 50-80%% → scaling limit (all-core frequency reduction / power throttling)\n");
+        report_write(report, "- Memory-bound tests: efficiency < 50%% → BANDWIDTH LIMIT (memory controller saturated)\n");
         report_write(report, "- Efficiency > 80%% indicates near-optimal scaling\n\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
