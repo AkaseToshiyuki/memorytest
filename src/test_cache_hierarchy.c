@@ -537,6 +537,19 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
     int has_priors = (l1_size > 0 && l2_size > 0);
     int has_l3 = (l3_size > 0);
 
+    /* Safety cap: never allocate more than 70% of available system memory.
+     * On machines with ≤4 GB RAM, the old 4 GB upper bound would push the
+     * kernel into swapping or OOM.  This cap applies to both the RAM
+     * segment hi and the no-priors fallback loop.  If detection fails
+     * (returns 0), the cap is disabled — the machine has at least enough
+     * RAM to compile and run, so a single malloc() won't OOM. */
+    size_t mem_avail = detect_available_memory();
+    __attribute__((unused)) size_t mem_cap = (mem_avail > 0) ? (mem_avail * 70 / 100) : 0;
+    if (mem_cap > 0) {
+        printf("[cache] Available memory: %.1f GB → test cap: %.1f GB (70%%)\n",
+               (double)mem_avail / GB, (double)mem_cap / GB);
+    }
+
     /* Helper lambda-like macro: generate PTS_PER_SEGMENT log-spaced points
      * in [lo, hi] range. size_t with overflow protection. */
     #define GEN_SEGMENT(lo, hi, pts, label) do { \
@@ -600,14 +613,17 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
             size_t lo = has_l3 ? (total_l3 > 0 ? total_l3 + (total_l3 / 4) : l3_size * 2) : l2_size * 2;
             size_t hi = has_l3 ? (total_l3 * 4) : (4 * GB);
             if (hi < 4 * GB) hi = 4 * GB;
+            if (mem_cap > 0 && hi > mem_cap) hi = mem_cap;
             if (hi <= lo) hi = lo * 2;
             if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
         }
     } else {
         /* No priors: fall back to coarse 1MB→4GB @ 1.20x. ~85 points.
-         * Upper bound is 4GB to ensure DRAM reach on large-LLC systems. */
+         * Upper bound is 4GB (or 70% of available memory) to ensure DRAM
+         * reach on large-LLC systems. */
+        size_t hi_limit = (mem_cap > 0) ? mem_cap : (4 * GB);
         size_t size = 1 * MB;
-        while (size <= 4 * GB && num_results < max_results) {
+        while (size <= hi_limit && num_results < max_results) {
             char name[32];
             if (size < 1*MB) snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
             else if (size < 1*GB) snprintf(name, sizeof(name), "%.1fMB", (double)size / MB);

@@ -180,6 +180,7 @@ void print_system_info(void);
 /* System config functions */
 int detect_memory_channels(void);
 int detect_cpu_freq(void);
+size_t detect_available_memory(void);
 void initialize_system_config(void);
 int get_memory_channels(void);
 int get_cpu_freq_mhz(void);

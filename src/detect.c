@@ -14,6 +14,10 @@
 #include <dirent.h>
 #include <libgen.h>
 
+#ifdef __linux__
+  #include <sys/sysinfo.h>
+#endif
+
 /* ========== ARM Cache Detection ========== */
 #ifdef __aarch64__
 /* Try to execute an MRS instruction in a child process.  If the instruction
@@ -1743,6 +1747,52 @@ void initialize_dram_speed(void) {
     } else {
         global_system_config.theoretical_bw_mbps = 0.0;
     }
+}
+
+/* Detect available (free + reclaimable) system memory in bytes.
+ * Returns 0 if detection fails — callers should treat 0 as "unbounded".
+ *
+ * Priority:
+ *   1. /proc/meminfo MemAvailable  (kernel's own estimate, most accurate)
+ *   2. sysconf(_SC_AVPHYS_PAGES)   (POSIX; excludes cached buffers on some OS)
+ *   3. sysinfo() freeram            (Linux/glibc; includes buffers/cache)
+ *   4. return 0                     (caller assumes no memory constraint)
+ */
+size_t detect_available_memory(void) {
+#ifdef __linux__
+    /* 1. /proc/meminfo MemAvailable — the kernel's best estimate of memory
+     *    available for new allocations, accounting for reclaimable caches. */
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            unsigned long kb = 0;
+            if (sscanf(line, "MemAvailable: %lu kB", &kb) == 1) {
+                fclose(f);
+                return (size_t)kb * 1024;
+            }
+        }
+        fclose(f);
+    }
+#endif
+
+    /* 2. POSIX: _SC_AVPHYS_PAGES * _SC_PAGESIZE */
+    long pages = sysconf(_SC_AVPHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page_size > 0) {
+        return (size_t)pages * (size_t)page_size;
+    }
+
+#ifdef __linux__
+    /* 3. sysinfo() freeram — includes buffers + page cache (Linux-specific) */
+    struct sysinfo si;
+    if (sysinfo(&si) == 0 && si.freeram > 0) {
+        return si.freeram * (size_t)si.mem_unit;
+    }
+#endif
+
+    /* 4. Can't determine — return 0 to signal "no constraint" */
+    return 0;
 }
 
 int get_dram_speed_mt_s(void) {

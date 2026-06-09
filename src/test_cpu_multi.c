@@ -368,6 +368,25 @@ void run_cpu_multi_core_test(void) {
 
     void *mem_buffer = malloc((size_t)MEM_TEST_SIZE * max_threads);
     size_t total_buffer = (size_t)MEM_TEST_SIZE * max_threads;
+
+    /* Safety cap: never allocate more than 70% of available system memory.
+     * Reduce per-thread buffer size proportionally if total would overflow. */
+    {
+        size_t mem_avail = detect_available_memory();
+        if (mem_avail > 0) {
+            size_t mem_cap = mem_avail * 70 / 100;
+            if (total_buffer > mem_cap) {
+                size_t new_per_thread = mem_cap / max_threads;
+                if (new_per_thread < 16 * 1024 * 1024) new_per_thread = 16 * 1024 * 1024; /* 16 MB floor */
+                total_buffer = new_per_thread * max_threads;
+                printf("[multi] Available memory: %.1f GB → capping buffer to %.1f GB (70%%)\n",
+                       (double)mem_avail / (1024.0*1024*1024),
+                       (double)total_buffer / (1024.0*1024*1024));
+                free(mem_buffer);
+                mem_buffer = malloc(total_buffer);
+            }
+        }
+    }
     if (mem_buffer) {
         memset(mem_buffer, 1, total_buffer);
 

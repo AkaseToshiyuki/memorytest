@@ -487,6 +487,20 @@ int main(int argc, char *argv[]) {
      * measurement stability. */
     if (min_size > 8ULL * 1024 * 1024 * 1024) min_size = 8ULL * 1024 * 1024 * 1024;
 
+    /* Safety cap: never allocate more than 70% of available system memory.
+     * On machines with ≤4 GB RAM this protects against swap/OOM. */
+    size_t mem_avail = detect_available_memory();
+    if (mem_avail > 0) {
+        size_t mem_cap = mem_avail * 70 / 100;
+        if (min_size > mem_cap) {
+            printf("[mem] Available memory: %.1f GB → capping buffer from %.1f GB to %.1f GB (70%%)\n",
+                   (double)mem_avail / (1024.0*1024*1024),
+                   (double)min_size / (1024.0*1024*1024),
+                   (double)mem_cap / (1024.0*1024*1024));
+            min_size = mem_cap;
+        }
+    }
+
     size_t size = min_size;
     /* Use physical cores when HT/SMT is detected — same logic as
      * test_cache_hierarchy.c and test_inter_core.c. HT siblings share
