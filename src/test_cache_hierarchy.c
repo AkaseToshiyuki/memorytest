@@ -640,7 +640,7 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
          * buffer into L3 and corrupted DRAM latency measurements. */
 
         /* Random access latency */
-        int lat_iter = (size < 16 * MB) ? 500000 : 1500000;
+        int lat_iter = (size < 16 * MB) ? 1000000 : 3000000;
         double lat = measure_latency(ptr, size, lat_iter);
         double wr_lat = measure_write_latency(ptr, size, lat_iter);
 
