@@ -54,6 +54,8 @@ def _find_data_table(text: str, skip_first: bool = True) -> tuple[list[str], lis
         """Normalise a table line: ensure it starts with | so both
         canonical (`| H |`) and ASCII-aligned (`H | H |`) formats work."""
         s = l.strip()
+        if not s:
+            return s
         return s if s.startswith("|") else "| " + s
     while i < len(lines) - 1:
         li = _norm(lines[i])
@@ -105,33 +107,64 @@ def _row_label(row: list[str]) -> str:
 
 
 def parse_cache_hierarchy(text: str) -> dict:
-    """Pick one latency reading per cache level: L1 (16KB), L2 (256KB), L3 (24MB), RAM (256MB)."""
+    """Pick one latency reading per cache level: L1 (16KB), L2 (256KB), L3 (24MB), RAM (256MB).
+    Scans ALL tables for one with RdLat/BW headers (the latency scan table)."""
     out = {}
-    tbl = _find_data_table(text)
-    if not tbl:
-        return out
-    headers, rows = tbl
-    rd_col = _col_index(headers, "rdlat", "read latency", "latency")
-    if rd_col is None:
-        rd_col = 1  # second column is usually RdLat
-
-    # We want rows that match these size labels
-    targets = {
-        "l1d_latency_ns": ["16KB", "32KB"],
-        "l2_latency_ns":  ["256KB", "512KB"],
-        "l3_latency_ns":  ["12MB", "24MB"],
-        "ram_latency_ns": ["48MB", "64MB", "256MB"],
-    }
-    for row in rows:
-        lbl = _row_label(row)
-        for key, candidates in targets.items():
-            if key in out:
-                continue
-            if any(c in lbl for c in candidates):
-                v = _safe_float(row[rd_col])
-                if v is not None and 0.1 < v < 1000:  # sanity
-                    out[key] = v
-                break
+    # Don't skip the first table blindly — the latency table may be 3rd or 4th.
+    # Instead search for the table whose headers contain "rdlat" or "size".
+    lines = text.splitlines()
+    i = 0
+    def _norm(l):
+        s = l.strip()
+        if not s: return s
+        return s if s.startswith("|") else "| " + s
+    while i < len(lines) - 1:
+        li = _norm(lines[i])
+        li1 = _norm(lines[i + 1])
+        if "|" in li and re.match(r"^\|[\s\-|:]+\|?\s*$", li1):
+            headers = [c.strip().rstrip("*").strip() for c in li.split("|")[1:-1]]
+            rows = []
+            j = i + 2
+            while j < len(lines):
+                lj = _norm(lines[j])
+                if "|" not in lj:
+                    break
+                cells = [c.strip().rstrip("*").strip() for c in lj.split("|")[1:-1]]
+                if len(cells) == len(headers):
+                    rows.append(cells)
+                j += 1
+            # Check if this is the latency table (has RdLat or Size + BW)
+            norm_headers = [h.lower() for h in headers]
+            if any("rdlat" in h or "read latency" in h for h in norm_headers) and \
+               any("bw" in h or "bandwidth" in h for h in norm_headers):
+                rd_col = _col_index(headers, "rdlat", "read latency", "latency")
+                if rd_col is None:
+                    rd_col = 1
+                size_col = _col_index(headers, "size")
+                if size_col is None:
+                    size_col = 0
+                # Pick representative sizes: first L1 entry, first L2, first L3, first RAM
+                for row in rows:
+                    # Column 4 is Expected (L1/L2/L3/RAM), column 5 is Analysis
+                    expected = row[4].strip() if len(row) > 4 else ""
+                    lbl = row[size_col] if size_col < len(row) else row[0]
+                    v = _safe_float(row[rd_col])
+                    if v is None or not (0.1 < v < 1000):
+                        continue
+                    if "l1d_latency_ns" not in out and "L1" in expected:
+                        out["l1d_latency_ns"] = v
+                    elif "l2_latency_ns" not in out and "L2" in expected and "L1" not in out:
+                        pass  # skip, L2 comes after L1
+                    if "l1d_latency_ns" in out and "l2_latency_ns" not in out and "L2" in expected:
+                        out["l2_latency_ns"] = v
+                    elif "l2_latency_ns" in out and "l3_latency_ns" not in out and "L3" in expected:
+                        out["l3_latency_ns"] = v
+                    elif "l3_latency_ns" in out and "ram_latency_ns" not in out and "RAM" in expected:
+                        out["ram_latency_ns"] = v
+                break  # found the right table
+            i = j
+            continue
+        i += 1
     return out
 
 
@@ -188,6 +221,9 @@ def parse_inter_core(text: str) -> dict:
             cell = row[col_idx]
             if cell in ("-", ""):
                 continue
+            # Handle "value [range]" format (e.g., "33.1 [33.0-33.5]")
+            if "[" in cell:
+                cell = cell.split("[")[0].strip()
             v = _safe_float(cell)
             if v is not None and 1 < v < 5000:
                 intra.append(v)
