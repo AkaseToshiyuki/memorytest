@@ -131,10 +131,10 @@ static void test_double_log(void *arg) {
 /* 双精度幂运算测试 */
 static void test_double_pow(void *arg) {
     (void)arg;
-    double result = 1.0;
+    volatile double result = 2.0;
     for (long i = 1; i < ITERATIONS; i++) {
         result = pow(result, 0.5);  /* sqrt via pow */
-        if (result < 0.1) result = 2.0;
+        if (result < 1.0001) result = 2.0;  /* reset before converging to constant */
     }
     g_result_d = result;
 }
