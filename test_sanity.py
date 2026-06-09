@@ -210,7 +210,9 @@ def parse_cache_hierarchy(text):
         ("L3_latency_ns", "L3"),
         ("RAM_latency_ns", "RAM"),
     ]:
-        for r in rows:
+        # Pick LAST matching row — on multi-CCD CPUs the first L3 entry
+        # is the fast local-CCD cache, not the representative shared L3.
+        for r in reversed(rows):
             if r.get("Expected", "").strip() == expected:
                 try:
                     out[level_key] = float(r["RdLat(ns)"])

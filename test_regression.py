@@ -143,24 +143,24 @@ def parse_cache_hierarchy(text: str) -> dict:
                 size_col = _col_index(headers, "size")
                 if size_col is None:
                     size_col = 0
-                # Pick representative sizes: first L1 entry, first L2, first L3, first RAM
-                for row in rows:
+                # Pick representative sizes: LAST entry per level.
+                # On multi-CCD CPUs the first L3 is fast local-CCD cache;
+                # the last L3 (just before RAM) is the representative shared L3.
+                for row in reversed(rows):
                     # Column 4 is Expected (L1/L2/L3/RAM), column 5 is Analysis
                     expected = row[4].strip() if len(row) > 4 else ""
                     lbl = row[size_col] if size_col < len(row) else row[0]
                     v = _safe_float(row[rd_col])
                     if v is None or not (0.1 < v < 1000):
                         continue
-                    if "l1d_latency_ns" not in out and "L1" in expected:
-                        out["l1d_latency_ns"] = v
-                    elif "l2_latency_ns" not in out and "L2" in expected and "L1" not in out:
-                        pass  # skip, L2 comes after L1
-                    if "l1d_latency_ns" in out and "l2_latency_ns" not in out and "L2" in expected:
-                        out["l2_latency_ns"] = v
-                    elif "l2_latency_ns" in out and "l3_latency_ns" not in out and "L3" in expected:
-                        out["l3_latency_ns"] = v
-                    elif "l3_latency_ns" in out and "ram_latency_ns" not in out and "RAM" in expected:
+                    if "ram_latency_ns" not in out and "RAM" in expected:
                         out["ram_latency_ns"] = v
+                    elif "l3_latency_ns" not in out and "L3" in expected:
+                        out["l3_latency_ns"] = v
+                    elif "l2_latency_ns" not in out and "L2" in expected:
+                        out["l2_latency_ns"] = v
+                    elif "l1d_latency_ns" not in out and "L1" in expected:
+                        out["l1d_latency_ns"] = v
                 break  # found the right table
             i = j
             continue
