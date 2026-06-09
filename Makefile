@@ -101,7 +101,7 @@ regression-record:
 # 0-100 score with letter grade.
 report: deps
 	@echo "=== generating HTML report ==="
-	@/usr/bin/python3 report_html.py
+	@python3 report_html.py
 	@echo ""
 	@echo "=== score summary ==="
 	@python3 report_score.py | head -10
@@ -206,8 +206,7 @@ distclean: clean clean-reports
 # `make opt` adds -O3 -DNDEBUG but NOT -march=native. The platform layer
 # (src/platform.c) will still detect and use the best SIMD at runtime.
 # Use `make opt-native` only when you are *sure* you won't run the binary
-# on a different CPU than the build host (i.e. you understand and accept
-# the cross-machine risks documented in PERF_NOTES.md).
+# on a different CPU than the build host.
 # ========================================================================
 
 # Safe optimised build — no -march, runtime SIMD detection picks the best.
@@ -255,9 +254,9 @@ SIZE ?= size
 release: opt
 	@mkdir -p release/bin release/src
 	@cp bin/* release/bin/
-	@cp Makefile generate_report.py report_html.py report_score.py README.md tests.json release/
+	@cp Makefile generate_report.py report_html.py report_score.py README.md LICENSE tests.json release/
 	@cp test_smoke.sh test_sanity.py test_regression.py release/
-	@cp ASM_OPTIMIZATIONS.md PERF_NOTES.md TEST_LAYERS.md release/
+	@cp ASM_OPTIMIZATIONS.md TEST_LAYERS.md release/
 	@cp src/common.h src/platform.h src/util.h src/asm_helpers.h release/src/
 	@tar -czf memorytest-$(VERSION).tar.gz -C . release
 	@rm -rf release/

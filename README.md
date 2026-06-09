@@ -196,7 +196,6 @@ memorytest/
 ## References
 
 - [ASM_OPTIMIZATIONS.md](ASM_OPTIMIZATIONS.md) — inline assembly primitives (rdtsc, clflush, barriers)
-- [PERF_NOTES.md](PERF_NOTES.md) — build optimization analysis, -O2 vs -O3
 - [TEST_LAYERS.md](TEST_LAYERS.md) — detailed test architecture
 
 ## License
@@ -350,7 +349,6 @@ memorytest/
 ## 参考文档
 
 - [ASM_OPTIMIZATIONS.md](ASM_OPTIMIZATIONS.md) — 内联汇编原语（rdtsc、clflush、屏障）
-- [PERF_NOTES.md](PERF_NOTES.md) — 构建优化分析
 - [TEST_LAYERS.md](TEST_LAYERS.md) — 测试架构详解
 
 ## 许可证

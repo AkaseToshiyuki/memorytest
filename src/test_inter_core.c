@@ -35,7 +35,7 @@
 
 /* ===== Tunables (compile-time; runtime scaling for big machines below) ===== */
 #define NUM_SAMPLES             10      /* samples per pair for latency */
-#define ROUND_TRIPS_PER_SAMPLE  1000    /* CAS round-trips per sample */
+#define ROUND_TRIPS_PER_SAMPLE  10000   /* CAS round-trips per sample */
 #define BW_ITERATIONS_DEFAULT   100000  /* bandwidth CAS per pair */
 #define BW_ITERATIONS_LARGE     50000   /* used when nproc > 64 */
 #define BW_MIN_DURATION_NS      20000000 /* target ≥20ms per pair (less clock noise) */
