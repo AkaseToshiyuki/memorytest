@@ -76,7 +76,8 @@ RANGES = {
     },
     # cpu_multi: scaling efficiency at N threads
     "cpu_multi": {
-        "Mod_efficiency_at_8_threads_pct": (50.0, 100.0, "Mod scaling efficiency at 8 threads"),
+        "Mod_efficiency_at_8_threads_pct": (25.0, 100.0,
+            "Mod scaling efficiency at 8 threads (lower bound 25%: SBCs/small boards with shared integer-divider or thermal throttling may legitimately score 30-45%)"),
     },
 }
 
