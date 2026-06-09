@@ -82,10 +82,10 @@ interactive-sudo: tests
 sanity:
 	@python3 test_sanity.py --skip-missing
 
-# `make test` runs all 3 layers: smoke (binaries run) → sanity (physical range) → regression (history baseline)
-# Regression is advisory only — failures are reported but do not block report generation.
+# `make test` runs all 3 layers then generates the HTML report.
+# All layers are advisory — failures are reported but do not block later steps.
 # This is the ONLY recommended test target. Individual layers exist for debugging.
-test: tests smoke sanity -regression report
+test: tests -smoke -sanity -regression report
 
 # Layer 3 regression: record current metrics, compare to median of last 3 runs
 # Exits 1 if any metric deviates >50% from baseline.
