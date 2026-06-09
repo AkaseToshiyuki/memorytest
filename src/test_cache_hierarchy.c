@@ -219,7 +219,7 @@ static double measure_latency(void *ptr, size_t size, int samples) {
         int evict_every_run = (size > l3_total);
 
         int num_runs = samples / (int)chain_len;
-        if (num_runs < 5)  num_runs = 5;    /* minimum for stable median */
+        if (num_runs < 31)  num_runs = 31;   /* minimum for stable median */
         if (num_runs > 500) num_runs = 500;  /* sanity cap */
 
         double *latencies = malloc(num_runs * sizeof(double));
@@ -640,7 +640,7 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
          * buffer into L3 and corrupted DRAM latency measurements. */
 
         /* Random access latency */
-        int lat_iter = (size < 16 * MB) ? 1000000 : 3000000;
+        int lat_iter = (size < 16 * MB) ? 5000000 : 3000000;
         double lat = measure_latency(ptr, size, lat_iter);
         double wr_lat = measure_write_latency(ptr, size, lat_iter);
 
