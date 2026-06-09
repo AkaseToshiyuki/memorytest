@@ -1220,85 +1220,6 @@ static int prompt_cpu_freq_from_user(void) {
     return platform_prompt_int("  CPU frequency in MHz (0 to leave unknown)", 0, 0, 10000);
 }
 
-static int detect_cpu_freq_bogomips(void) {
-    /* ARM/Linux fallback: when cpufreq is unavailable (containers, restricted
-     * kernels) AND /proc/cpuinfo has no "cpu MHz" line (which is the case
-     * for most ARM Linux), parse BogoMIPS and convert to MHz.
-     *
-     * BogoMIPS = loops_per_jiffy * jiffy_hz / 50000
-     * On modern Linux (HZ=100 or HZ=250, USER_HZ=100), BogoMIPS is
-     * approximately MHz for low-clocked cores and 2x MHz for high-clocked
-     * cores. A widely used rule of thumb: BogoMIPS / 100 ≈ CPU frequency
-     * in MHz (works for Cortex-A53/A55/A76/A77 to within ~10%).
-     *
-     * Examples verified against real SoCs:
-     *   Cortex-A53 @ 1.2 GHz   → BogoMIPS =  120.00  → 1200 MHz
-     *   Cortex-A76 @ 2.0 GHz   → BogoMIPS =  200.00  → 2000 MHz
-     *   Cortex-A77 @ 3.0 GHz   → BogoMIPS =  300.00  → 3000 MHz
-     *   Cortex-X1  @ 2.84 GHz  → BogoMIPS =  284.00  → 2840 MHz
-     *
-     * This is approximate (call it 10-20% off in the worst case) but it's
-     * better than reporting 0 MHz and getting no IPC score.
-     *
-     * Returns 0 if no BogoMIPS line is found.
-     */
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f) return 0;
-
-    char line[256];
-    double bogomips = 0.0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "BogoMIPS", 8) == 0 || strncmp(line, "bogomips", 8) == 0) {
-            char *colon = strchr(line, ':');
-            if (!colon) continue;
-            char *p = colon + 1;
-            while (*p && (isspace((unsigned char)*p) || *p == ':' || *p == '\t')) p++;
-            double v = strtod(p, NULL);
-            if (v > bogomips) bogomips = v;
-        }
-    }
-    fclose(f);
-
-    if (bogomips <= 0) return 0;
-
-    /* Heuristic: on most modern ARM Linux, BogoMIPS is approximately
-     *     BogoMIPS = CPU_freq_Hz / (50000 * 2) = MHz / 10
-     * i.e. CPU_MHz = BogoMIPS × 10.
-     *
-     * Verified against multiple SoCs:
-     *   Cortex-A53 @ 1.2 GHz   → BogoMIPS =  120.00  → 1200 MHz  ✓
-     *   Cortex-A76 @ 2.0 GHz   → BogoMIPS =  200.00  → 2000 MHz  ✓
-     *   Cortex-A77 @ 3.0 GHz   → BogoMIPS =  300.00  → 3000 MHz  ✓
-     *   Cortex-X1  @ 2.84 GHz  → BogoMIPS =  284.00  → 2840 MHz  ✓
-     *   Cortex-A78 @ 2.4 GHz   → BogoMIPS =  240.00  → 2400 MHz  ✓
-     *
-     * The factor 10 comes from the kernel calibration loop:
-     *   BogoMIPS = loops_per_jiffy / (50000 * HZ/100)
-     * With HZ=100, this is BogoMIPS = loops_per_jiffy / 50000, and
-     *   CPU_Hz = loops_per_jiffy × 50000 × 2 = MHz × 10 / 1.
-     * The factor 2 is because BogoMIPS measures one half-cycle of a
-     * delay-loop (2 iterations per cycle). Multiply by 10 to get MHz.
-     *
-     * NOTE: this is the LAST-RESORT fallback. It runs only after
-     * unprivileged probes (sysfs, cpuinfo, sysctl, lscpu, PMU) AND
-     * sudo-enabled probes (cpupower, dmidecode, sudo sysfs) have all
-     * failed. The result is approximate (±20%) — printed with a clear
-     * WARNING so the user knows it's a guess, not a measurement. */
-    int freq_mhz = (int)(bogomips * 10.0 + 0.5);
-    if (freq_mhz >= 100 && freq_mhz <= 10000) {
-        fprintf(stderr,
-                "[CPU] WARNING: BogoMIPS heuristic is a LAST-RESORT FALLBACK.\n"
-                "              Result is approximate (%.2f BogoMIPS × 10 ≈ %d MHz, ±20%%).\n"
-                "              For accurate CPU frequency, re-run with sudo enabled\n"
-                "              (cpupower / dmidecode / /sys/.../cpuinfo_max_freq).\n",
-                bogomips, freq_mhz);
-        return freq_mhz;
-    }
-    /* BogoMIPS out of plausible CPU-frequency range — could be a kernel
-     * build that calibrates with a different formula. Don't guess. */
-    return 0;
-}
-
 static int detect_cpu_freq_pmu(void) {
     /* CPU frequency detection via perf_event_open PMU.
      * Measures actual CPU cycles over a time interval.
@@ -1429,18 +1350,18 @@ int detect_cpu_freq(void) {
     /* Try multiple detection methods in order of reliability.
      *
      * Order rationale:
-     *   1-4. Unprivileged probes (no sudo needed). These are the
-     *        preferred source — they're either a direct kernel export
-     *        (sysfs, /proc/cpuinfo) or a calibrated tool reading it
-     *        (lscpu, sysctl).
-     *   5.   ARM PMU cycle counting. Measures actual cycles over a
+     *   1-2. Direct probes — kernel sysfs export or sudo-privileged tools
+     *        (dmidecode, cpupower). These return the MAX/RATED frequency.
+     *   3-5. Unprivileged probes — /proc/cpuinfo, sysctl, lscpu. These
+     *        report the current (possibly throttled) clock.
+     *   6.   ARM PMU cycle counting. Measures actual cycles over a
      *        wall-clock interval, very accurate on ARM. Doesn't need
      *        sudo (perf_event_open with paranoid=4 still works for
      *        self-counting on most kernels).
-     *   5.   BogoMIPS heuristic. LAST RESORT. The result is
-     *        approximate (±20%) and is marked with a WARNING in
-     *        detect_cpu_freq_bogomips() so the user knows it's a
-     *        guess, not a measurement. */
+     *
+     * If all methods fail, returns 0. The caller (initialize_system_config)
+     * will then prompt the user interactively — same fallback as memory
+     * channels and DRAM speed. No BogoMIPS guessing. */
 
     /* 1. Direct sysfs read (cpufreq) */
     freq = detect_cpu_freq_sysfs();
@@ -1470,11 +1391,7 @@ int detect_cpu_freq(void) {
     freq = detect_cpu_freq_pmu();
     if (freq > 0) return freq;
 
-    /* 7. BogoMIPS heuristic — LAST RESORT, with ±20% warning */
-    freq = detect_cpu_freq_bogomips();
-    if (freq > 0) return freq;
-
-    return 0;  /* All methods failed */
+    return 0;  /* All methods failed — caller will prompt user */
 }
 
 /* ========== System Configuration ========== */
