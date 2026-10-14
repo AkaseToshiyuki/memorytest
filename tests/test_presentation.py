@@ -252,6 +252,10 @@ class NativePresentationTests(unittest.TestCase):
         page.table.horizontalHeader().resizeSection(1, 207)
         page.refresh_table(); self.window.resize(1120, 850); self.app.processEvents()
         self.assertEqual(page.table.columnWidth(1), 207)
+        # Screenshots show the default layout, not the manual-resize fixture.
+        page.columns_user_resized = False
+        page.columns_initialized = False
+        page.equalize_columns()
         evidence = ROOT / "build/ui-revision"
         evidence.mkdir(parents=True, exist_ok=True)
         for language in ("zh", "en"):
@@ -314,10 +318,14 @@ class NativePresentationTests(unittest.TestCase):
                 self.assertTrue(page.access_status.isHidden())
                 self.assertTrue(page.warning.isHidden())
             self.assertNotRegex(page.enhanced.toolTip(), "只读|推算|read-only|inferred")
+        page.modes["cpu"].setEnabled(True)
         page.active = True
         try:
             page.refresh_warning()
             self.assertFalse(page.warning.isHidden())
+            page.modes["cpu"].setChecked(False)
+            page.refresh_warning()
+            self.assertTrue(page.warning.isHidden())
         finally:
             page.active = False
 
