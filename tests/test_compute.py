@@ -75,8 +75,8 @@ class ScoreContractTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             text = report.read_text()
-            self.assertIn("OS scheduled (not pinned)", text)
-            self.assertIn("macOS CPU performance levels", text)
+            self.assertIn("OS scheduled, user-initiated QoS", text)
+            self.assertIn("OS-reported caches", text)
             self.assertIn("Performance", text)
             self.assertIn("Efficiency", text)
             self.assertIn("33,941", text)
@@ -272,7 +272,7 @@ class NativeKernelTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(render.returncode, 0, render.stdout + render.stderr)
         text = report.read_text()
-        self.assertIn("Memorytest ComputeMark v2", text)
+        self.assertIn("ComputeMark v2", text)
         self.assertIn("Single-thread score", text)
         self.assertNotIn("/100", text)
         self.assertNotIn("ComputeMark unavailable", text)
@@ -343,7 +343,7 @@ class NativeKernelTests(unittest.TestCase):
                                  "--module", "cpu_multi", "--skip-charts", "--output", str(report)],
                                 capture_output=True, text=True)
         self.assertEqual(render.returncode, 0, render.stdout + render.stderr)
-        self.assertIn("OS scheduled (not pinned)", report.read_text())
+        self.assertIn("OS scheduled, user-initiated QoS", report.read_text())
         self.assertNotIn("ComputeMark unavailable", report.read_text())
 
 

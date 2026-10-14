@@ -1,138 +1,217 @@
-"""Native per-module results; Qt's text renderer, not a browser engine."""
+"""Native result cards, charts and tables backed by the same model as HTML."""
 import json
 import sys
-
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QTextTable
-from PySide6.QtWidgets import QLabel, QHBoxLayout, QProgressBar, QPushButton, QTextBrowser, QVBoxLayout, QWidget
-from benchmark_registry import TESTS
+from PySide6.QtCore import Qt, QAbstractTableModel, QSize
+from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtWidgets import (QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QProgressBar,
+    QPushButton, QScrollArea, QTableView, QHeaderView, QWidget)
 from desktop_theme import card, label, set_tone
+from i18n import tr, display
+from presentation import plot_svg
+from result_model import ModuleResult, build_module, perflevel_table
 
-TITLES = {"cache_hierarchy": "缓存层级", "memory_bandwidth": "内存带宽", "inter_core": "核间通信",
-          "cpu_alu": "整数运算", "cpu_float": "浮点运算", "cpu_branch": "分支预测", "cpu_multi": "ComputeMark"}
-STATUS = {"running": "运行中", "passed": "完成", "failed": "失败", "unsupported": "不支持",
-          "interrupted": "已取消", "skipped": "已跳过", "timeout": "超时",
-          "build_failed": "构建失败", "invalid_report": "报告无效"}
+TITLES = {name: tr(name, "zh") for name in
+          ("cache_hierarchy", "memory_bandwidth", "inter_core", "cpu_alu", "cpu_float", "cpu_branch", "cpu_multi")}
+STATUS = {key: tr(key, "zh") for key in ("running", "passed", "failed", "unsupported", "interrupted", "skipped", "timeout", "build_failed", "invalid_report")}
+
+
+def supported(name):
+    return not (name == "inter_core" and sys.platform in {"darwin", "win32"})
+
+
+class ResultsTableModel(QAbstractTableModel):
+    def __init__(self, table, language, parent=None):
+        super().__init__(parent)
+        self.table, self.language = table, language
+
+    def rowCount(self, parent=None):
+        return len(self.table.rows)
+
+    def columnCount(self, parent=None):
+        return len(self.table.columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if index.isValid() and role in (Qt.DisplayRole, Qt.ToolTipRole):
+            return display(self.table.rows[index.row()][index.column()], self.language)
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Vertical:
+            return str(section + 1)
+        col = self.table.columns[section]
+        return display(col["label"], self.language) + (" (" + col["unit"] + ")" if col["unit"] else "")
+
+
+class SvgPlot(QSvgWidget):
+    def __init__(self, chart, language, theme, parent=None):
+        super().__init__(parent)
+        self.load(plot_svg(chart, language, theme).encode("utf-8"))
+        self.renderer().setAspectRatioMode(Qt.KeepAspectRatio)
+        self.setMinimumHeight(300 if chart.kind == "heatmap" else max(220, len(chart.labels) * 28 if chart.kind == "bar" else 220))
+        self.setMaximumHeight(760)
+        self.setAccessibleName(tr(chart.title, language))
+
+    def sizeHint(self):
+        return QSize(720, self.minimumHeight())
+
+    def resizeEvent(self, event):
+        size = self.renderer().defaultSize()
+        if size.width():
+            self.setMinimumHeight(min(760, max(220, round(self.width() * size.height() / size.width()))))
+        super().resizeEvent(event)
+
+
+class ResultView(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.model = None
+        self.language, self.theme = "en", "dark"
+
+    def render(self, model, language, theme):
+        position = self.verticalScrollBar().value()
+        self.model, self.language, self.theme = model, language, theme
+        previous = self.takeWidget()
+        if previous:
+            previous.deleteLater()
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        if model.status != "passed":
+            empty = label(tr(model.reason or "no_data", language), "muted")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        else:
+            if model.notice:
+                layout.addWidget(label(tr(model.notice, language), "muted"))
+            if model.kpis:
+                grid = QGridLayout()
+                for i, item in enumerate(model.kpis):
+                    widget, content = card()
+                    heading = label(display(item["label"], language), "muted")
+                    heading.setWordWrap(True)
+                    content.addWidget(heading)
+                    content.addWidget(label(display(item["value"], language), "metric"))
+                    unit = tr("points", language) if item["unit"] == "points" else item["unit"]
+                    content.addWidget(label(unit + " " + item.get("detail", ""), "muted"))
+                    grid.addWidget(widget, i // 4, i % 4)
+                layout.addLayout(grid)
+            if model.conditions:
+                conditions = label(" · ".join(display(k, language) + ": " + display(v, language) for k, v in model.conditions), "muted")
+                conditions.setWordWrap(True)
+                conditions.setTextFormat(Qt.PlainText)
+                layout.addWidget(conditions)
+            for chart in model.charts:
+                widget, content = card()
+                content.addWidget(label(tr(chart.title, language), "section"))
+                content.addWidget(SvgPlot(chart, language, theme))
+                layout.addWidget(widget)
+            for table in model.tables:
+                widget, content = card()
+                content.addWidget(label(tr(table.title, language), "section"))
+                view = QTableView()
+                view.setModel(ResultsTableModel(table, language, view))
+                view.setAccessibleName(tr(table.title, language))
+                view.setAlternatingRowColors(True)
+                view.verticalHeader().hide()
+                view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+                view.horizontalHeader().setStretchLastSection(True)
+                view.setMinimumHeight(min(360, 75 + 32 * len(table.rows)))
+                content.addWidget(view)
+                layout.addWidget(widget)
+        layout.addStretch()
+        self.setWidget(root)
+        self.verticalScrollBar().setValue(position)
+
+    def toPlainText(self):
+        # Useful to accessibility/acceptance checks; includes only localized display data.
+        if self.model is None:
+            return ""
+        m, lang = self.model, self.language
+        values = [tr(m.name, lang), tr(m.status, lang)]
+        values += [display(k["label"], lang) + " " + display(k["value"], lang) for k in m.kpis]
+        for table in m.tables:
+            values.extend(display(column["label"], lang) for column in table.columns)
+            values.extend(display(value, lang) for row in table.rows for value in row)
+        return "\n".join(values)
 
 
 class ModulePage(QWidget):
     def __init__(self, name, window):
         super().__init__()
-        self.name = name
-        self.html = None
+        self.name, self.window = name, window
+        self.html = self.log_path = None
+        self.model = ModuleResult(name, "not_run" if supported(name) else "unsupported")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 20, 0, 0)
-        layout.setSpacing(14)
-        heading = QHBoxLayout()
-        title = label(TITLES[name], "title")
-        title.setToolTip(TESTS[name]["description_zh"])
-        heading.addWidget(title)
-        heading.addStretch()
-        layout.addLayout(heading)
+        layout.setContentsMargins(0, 16, 0, 0)
+        self.title = label("", "title")
+        layout.addWidget(self.title)
         controls = QHBoxLayout()
-        self.run = QPushButton("运行测试")
+        self.run, self.cancel, self.open, self.log_button = (QPushButton() for _ in range(4))
         self.run.setProperty("role", "primary")
         self.run.clicked.connect(lambda: window.begin([name]))
-        self.cancel = QPushButton("取消")
-        self.cancel.setEnabled(False)
         self.cancel.clicked.connect(window.request_cancel)
-        self.open = QPushButton("查看报告")
-        self.open.setEnabled(False)
         self.open.clicked.connect(lambda: window.open_path(self.html))
-        for button in [self.run, self.cancel, self.open]:
+        self.log_button.clicked.connect(lambda: window.open_path(self.log_path))
+        self.run.setEnabled(supported(name))
+        for button in (self.cancel, self.open, self.log_button):
+            button.setEnabled(False)
+        for button in (self.run, self.cancel, self.open, self.log_button):
             controls.addWidget(button)
         controls.addStretch()
         layout.addLayout(controls)
-        summary_card, summary_layout = card()
-        summary_layout.addWidget(label("测试摘要", "section"))
+        self.summary = label("", "status")
+        self.summary.setWordWrap(True)
+        self.summary.setTextFormat(Qt.PlainText)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
-        summary_layout.addWidget(self.progress)
-        self.summary = QLabel("尚未运行")
-        self.summary.setObjectName("resultSummary")
-        self.summary.setWordWrap(True)
-        self.summary.setTextFormat(Qt.PlainText)
-        self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        summary_layout.addWidget(self.summary)
-        if name == "cpu_multi":
-            limitation = "固定标量评分 · 仅比较相同协议、编译器、线程数与调度策略的结果。"
-        else:
-            limitation = "诊断指标，不计综合分。"
-        self.limitation = label(limitation, "muted")
-        self.limitation.setWordWrap(True)
-        summary_layout.addWidget(self.limitation)
-        layout.addWidget(summary_card)
-        detail_heading = QHBoxLayout()
-        detail_heading.addWidget(label("详细结果", "section"))
-        detail_heading.addStretch()
-        layout.addLayout(detail_heading)
-        self.details = QTextBrowser()
-        self.details.setAccessibleName(f"{TITLES[name]}详细测试结果")
-        self.details.setOpenLinks(False)
-        self.details.setOpenExternalLinks(False)
-        self.details.document().setDocumentMargin(18)
-        self.details.setPlaceholderText("暂无结果")
+        layout.addWidget(self.summary)
+        layout.addWidget(self.progress)
+        self.details = ResultView()
         layout.addWidget(self.details, 1)
-        if name == "inter_core" and sys.platform in {"win32", "darwin"}:
-            self.run.setEnabled(False)
-            self.summary.setText("当前系统后端尚无经过验证的核间延迟矩阵，不支持运行。")
+        self.retranslate()
+
+    def retranslate(self):
+        lang = self.window.language
+        self.title.setText(tr(self.name, lang))
+        for button, key in ((self.run, "run"), (self.cancel, "cancel"), (self.open, "open_report"), (self.log_button, "open_log")):
+            button.setText(tr(key, lang))
+        self.summary.setText(tr(self.model.status, lang) +
+            (f" · {self.model.duration:.3f} s" if self.model.duration is not None else ""))
+        set_tone(self.summary, self.model.status)
+        self.details.render(self.model, lang, self.window.theme)
 
     def queued(self):
-        self.html = None
+        self.html = self.log_path = None
         self.open.setEnabled(False)
-        self.details.clear()
-        self.summary.setText("排队中 · 等待本次测试")
-        set_tone(self.summary, "queued")
+        self.log_button.setEnabled(False)
+        self.model = ModuleResult(self.name, "queued")
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
+        self.retranslate()
 
     def started(self):
-        self.html = None
-        self.open.setEnabled(False)
-        self.details.clear()
-        self.summary.setText("运行中；本次完成前不显示上次结果。")
-        set_tone(self.summary, "running")
-        self.progress.setRange(0, 0)  # engine supplies phases, not trustworthy ETA
+        self.model = ModuleResult(self.name, "running")
+        self.progress.setRange(0, 0)
+        self.retranslate()
 
     def completed(self, run_dir, data):
-        status = data["status"]
-        set_tone(self.summary, status)
+        self.log_path = run_dir / data.get("log", "")
+        self.log_button.setEnabled(self.log_path.is_file())
+        self.model = build_module(self.name, run_dir / "reports", data)
+        if self.name == "cache_hierarchy" and self.model.status == "passed":
+            try:
+                levels = perflevel_table(json.loads((run_dir / "manifest.json").read_text()))
+                if levels.rows:
+                    self.model.tables.insert(0, levels)
+            except (OSError, ValueError):
+                pass
         self.progress.setRange(0, 1)
-        self.progress.setValue(1 if status == "passed" else 0)
-        self.summary.setText(f"{STATUS.get(status, status)} · 运行 {run_dir.name}\n{data.get('message', '')}")
-        if status != "passed":
-            self.details.setPlainText("本次没有可用的完整结果。失败、取消或超时的部分数据不会生成评分。\n"
-                                      f"日志：{run_dir / data.get('log', '')}")
-            return
-        path = run_dir / "reports" / TESTS[self.name]["report"]
-        try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
-                markdown = stream.read(5_000_001)
-            if len(markdown) > 5_000_000:
-                markdown = markdown[:5_000_000] + "\n\n界面显示已截断；完整数据请打开该次报告。"
-            self.details.setMarkdown(markdown)
-            # Style real QTextTables directly: Markdown parsing does not apply
-            # every HTML/CSS rule. Preserve native selection and copying.
-            def style_tables(frame):
-                for child in frame.childFrames():
-                    if isinstance(child, QTextTable):
-                        fmt = child.format()
-                        fmt.setBorder(1)
-                        fmt.setBorderBrush(QColor("#3b4e66"))
-                        fmt.setCellPadding(8)
-                        fmt.setCellSpacing(0)
-                        child.setFormat(fmt)
-                    style_tables(child)
-            style_tables(self.details.document().rootFrame())
-            if self.name == "cpu_multi":
-                from compute_score import compute_mark_score
-                score = compute_mark_score(json.loads((path.parent / "compute_mark_v2.json").read_text(encoding="utf-8")))
-                self.summary.setText(f"单线程：{score.single_points:,} 分　多线程：{score.points:,} 分（{score.threads} 线程）\n"
-                                     f"整数 {score.integer_gops:.3f} Gop/s · FP64 {score.fp64_gflops:.3f} GFLOP/s\n"
-                                     f"调度策略：{score.placement_policy} · 波动判定：{'稳定' if score.stable else '偏大，请复测'}\n"
-                                     f"运行：{run_dir.name}")
-        except (OSError, ValueError, KeyError) as exc:
-            self.summary.setText(f"结果读取或评分校验失败：{exc}")
-            set_tone(self.summary, "invalid_report")
+        self.progress.setValue(1 if self.model.status == "passed" else 0)
+        self.retranslate()

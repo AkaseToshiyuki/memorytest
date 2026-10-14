@@ -18,6 +18,20 @@
  * the rationale on the value 256. */
 #define MAX_THREADS 256
 
+/* Also used by the bounded native regression harness. Zero keeps defaults. */
+static size_t cache_max_bytes;
+static int cache_thread_limit;
+static int cache_quick;
+
+static size_t cache_budget(void) {
+    size_t available = detect_available_memory();
+    /* Pointer chains and copy tests need auxiliary storage, not just a buffer. */
+    size_t budget = available / 4;
+    if (budget > 4 * GB) budget = 4 * GB;
+    if (cache_max_bytes && budget > cache_max_bytes) budget = cache_max_bytes;
+    return budget;
+}
+
 typedef struct {
     int thread_id;
     int num_threads;
@@ -560,31 +574,26 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
      * measure around the actual boundary, so the latency jump is large
      * (real cache miss) and ratio detection is reliable.
      *
-     * Falls back to a coarse 1MB→2GB scan if no priors are available
+     * Falls back to a coarse 4KB→budget scan if no priors are available
      * (e.g. auto-detection failed and user declined to supply). */
-    const int PTS_PER_SEGMENT = 15;
-    const int RAM_SEGMENT_PTS = 20;
+    const int PTS_PER_SEGMENT = cache_quick ? 3 : 15;
+    const int RAM_SEGMENT_PTS = cache_quick ? 3 : 20;
 
     int num_results = 0;
     int has_priors = (l1_size > 0 && l2_size > 0);
     int has_l3 = (l3_size > 0);
 
-    /* Safety cap: never allocate more than 70% of available system memory.
-     * On machines with ≤4 GB RAM, the old 4 GB upper bound would push the
-     * kernel into swapping or OOM.  This cap applies to both the RAM
-     * segment hi and the no-priors fallback loop.  If detection fails
-     * (returns 0), the cap is disabled — the machine has at least enough
-     * RAM to compile and run, so a single malloc() won't OOM. */
+    /* Require a known budget; auxiliary chains/copy buffers also consume RAM.
+     * Allocation can still fail or the OS can reclaim memory during a run. */
     size_t mem_avail = detect_available_memory();
-#ifdef __APPLE__
     if (!mem_avail) {
-        fprintf(stderr, "Cannot determine a safe macOS cache-scan memory budget\n");
+        fprintf(stderr, "Cannot determine a safe cache-scan memory budget\n");
         return 0;
     }
-#endif
-    __attribute__((unused)) size_t mem_cap = (mem_avail > 0) ? (mem_avail * 70 / 100) : 0;
+    size_t mem_cap = cache_budget();
+    if (mem_cap < 4096) return 0;
     if (mem_cap > 0) {
-        printf("[cache] Available memory: %.1f GB → test cap: %.1f GB (70%%)\n",
+        printf("[cache] Available memory: %.1f GB; working-set cap: %.1f GB\n",
                (double)mem_avail / GB, (double)mem_cap / GB);
     }
 
@@ -594,6 +603,8 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
         size_t _lo = (lo), _hi = (hi); \
         if (_lo < 4*1024) _lo = 4*1024;  /* never go below 4KB (cache-line noise) */ \
         if (_hi <= _lo) _hi = _lo * 2; \
+        if (_hi > mem_cap) _hi = mem_cap; \
+        if (_lo > _hi) break; \
         double ratio = pow((double)_hi / (double)_lo, 1.0 / ((pts) - 1)); \
         for (int k = 0; k < (pts) && num_results < max_results; k++) { \
             size_t sz = (size_t)((double)_lo * pow(ratio, k)); \
@@ -652,15 +663,12 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
             size_t hi = has_l3 ? (total_l3 * 4) : (4 * GB);
             if (hi < 4 * GB) hi = 4 * GB;
             if (mem_cap > 0 && hi > mem_cap) hi = mem_cap;
-            if (hi <= lo) hi = lo * 2;
             if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
         }
     } else {
-        /* No priors: fall back to coarse 1MB→4GB @ 1.20x. ~85 points.
-         * Upper bound is 4GB (or 70% of available memory) to ensure DRAM
-         * reach on large-LLC systems. */
-        size_t hi_limit = (mem_cap > 0) ? mem_cap : (4 * GB);
-        size_t size = 1 * MB;
+        /* No priors: a bounded 4KB→budget scan; no invented cache levels. */
+        size_t hi_limit = mem_cap;
+        size_t size = 4 * KB;
         while (size <= hi_limit && num_results < max_results) {
             char name[32];
             if (size < 1*MB) snprintf(name, sizeof(name), "%.1fKB", (double)size / KB);
@@ -688,7 +696,10 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
         size_t size = results[i].size;
 
         void *ptr = malloc(size);
-        if (!ptr) continue;
+        if (!ptr) {
+            fprintf(stderr, "Cache scan allocation failed (%zu bytes)\n", size);
+            return -1;
+        }
         /* Page-fault-in is now done inside measure_latency() — one byte
          * per 4KB page, avoiding the old memset() which pulled the entire
          * buffer into L3 and corrupted DRAM latency measurements. */
@@ -706,6 +717,12 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
         else if (size < 4 * MB) bw_threads = (threads > 4) ? 4 : threads;
         else if (size < 16 * MB) bw_threads = (threads > 8) ? 8 : threads;
         double bw = multi_bandwidth(ptr, size, bw_threads, bw_iter, multi_seq_read);
+
+        if (!isfinite(lat) || lat <= 0 || !isfinite(wr_lat) || wr_lat <= 0 || !isfinite(bw) || bw <= 0) {
+            free(ptr);
+            fprintf(stderr, "Cache measurement failed (%zu bytes)\n", size);
+            return -1;
+        }
 
         results[i].rd_lat = lat;
         results[i].wr_lat = wr_lat;
@@ -740,7 +757,7 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
 }
 
 
-void run_cache_hierarchy_test(void) {
+int run_cache_hierarchy_test(void) {
     printf("POINTER_CHASE_REWRITTEN\n");
     fflush(stdout);
     print_header("CACHE HIERARCHY TEST");
@@ -752,6 +769,7 @@ void run_cache_hierarchy_test(void) {
     long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
     int threads = (int)num_cpus;
     if (threads < 1) threads = 1;
+    if (cache_thread_limit > 0 && threads > cache_thread_limit) threads = cache_thread_limit;
     if (threads > MAX_THREADS) {
         fprintf(stderr, "[cache] %d cores detected, but MAX_THREADS=%d. "
                         "Clamping to %d threads.\n",
@@ -783,6 +801,7 @@ void run_cache_hierarchy_test(void) {
     CacheTestResult results[MAX_CACHE_TEST_SIZES];
     int num_results = run_cache_hierarchy_scan(results, MAX_CACHE_TEST_SIZES,
                                                 l1_size, l2_size, l3_size, threads);
+    if (num_results <= 0) return 1;
 
     /* ========== Boundary inference from latency transitions ==========
      *
@@ -989,13 +1008,7 @@ void run_cache_hierarchy_test(void) {
     pattern_names[0] = "L1";
     pattern_sizes[1] = l2_size;
     pattern_names[1] = "L2";
-    if (l3_size > 0) {
-        pattern_sizes[2] = l3_size;
-    } else {
-        /* Cannot detect L3, prompt user */
-        printf("[Warning] L3 size not detected, cannot run pattern comparison\n");
-        return;
-    }
+    pattern_sizes[2] = l3_size;
     pattern_names[2] = "L3";
 
     printf("%-10s | %-12s | %-12s | %s\n",
@@ -1005,6 +1018,8 @@ void run_cache_hierarchy_test(void) {
 
     for (int i = 0; i < 3; i++) {
         size_t size = pattern_sizes[i];
+        /* Missing levels are optional, not a reason to discard the scan. */
+        if (!size || size > cache_budget()) continue;
         void *ptr = malloc(size);
         if (!ptr) continue;
         memset(ptr, 0, size);
@@ -1097,6 +1112,7 @@ void run_cache_hierarchy_test(void) {
 
     for (int i = 0; i < num_bw; i++) {
         size_t size = bw_sizes[i];
+        if (!size || size > cache_budget()) continue;
         void *ptr = malloc(size);
         void *ptr2 = malloc(size);
         if (!ptr || !ptr2) {
@@ -1176,6 +1192,7 @@ void run_cache_hierarchy_test(void) {
         report_write(report, "|------|-------------|---------------|------------|\n");
 
         for (int i = 0; i < num_bw; i++) {
+            if (saved_read_bw[i] <= 0 || saved_write_bw[i] <= 0 || saved_copy_bw[i] <= 0) continue;
             report_write(report, "| %s | %.2f | %.2f | %.2f |\n",
                         bw_names[i], saved_read_bw[i], saved_write_bw[i], saved_copy_bw[i]);
         }
@@ -1193,16 +1210,21 @@ void run_cache_hierarchy_test(void) {
             report_write(report, "- DRAM: unknown\n\n");
         }
 
-        printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);
-        report_free(report);
+        if (report_finish(report) != 0) {
+            fprintf(stderr, "Cache report write failed\n");
+            return 1;
+        }
+        printf("\nReport written: reports/cache_hierarchy_report.md\n");
+        return 0;
     }
+    fprintf(stderr, "Cannot create cache report\n");
+    return 1;
 }
 
 int main(int argc, char *argv[]) {
     init_platform_layer();
     pmu_init_cache_counters();
     print_system_info();
-    run_cache_hierarchy_test();
-    return 0;
+    return run_cache_hierarchy_test();
 }

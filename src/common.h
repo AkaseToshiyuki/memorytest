@@ -183,6 +183,8 @@ void report_write(ReportContext *ctx, const char *fmt, ...);
 void report_section(ReportContext *ctx, const char *title);
 /* Report Generation */
 void report_free(ReportContext *ctx);
+/* Flush/close and free a report, returning failure on buffered I/O errors. */
+int report_finish(ReportContext *ctx);
 const char *report_get_filename(ReportContext *ctx);
 
 void report_write_system_info(ReportContext *ctx);

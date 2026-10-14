@@ -7,6 +7,14 @@ def main():
     for stream in (sys.stdout, sys.stderr):
         if stream is not None and hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    if len(sys.argv) > 1 and sys.argv[1] in {"--stress-worker", "--gpu-worker", "--sensor-worker"}:
+        if sys.argv[1] == "--stress-worker":
+            from run_stress import main as worker
+        elif sys.argv[1] == "--gpu-worker":
+            from stress_gpu import main as worker
+        else:
+            from telemetry import main as worker
+        return worker(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in {"--worker", "--cli"}:
         from run_benchmarks import main as worker
         return worker(sys.argv[2:])

@@ -79,6 +79,16 @@ void report_free(ReportContext *ctx) {
     }
 }
 
+int report_finish(ReportContext *ctx) {
+    if (!ctx || !ctx->fp) { report_free(ctx); return -1; }
+    int failed = ferror(ctx->fp) != 0;
+    if (fflush(ctx->fp) != 0) failed = 1;
+    if (fclose(ctx->fp) != 0) failed = 1;
+    ctx->fp = NULL;
+    free(ctx);
+    return failed ? -1 : 0;
+}
+
 const char *report_get_filename(ReportContext *ctx) {
     if (!ctx) return "";
     return ctx->filename;

@@ -11,6 +11,7 @@ reports/*.png
 reports/*.html
 reports/charts/
 reports/runs/
+reports/stress-runs/
 logs/
 *.log
 

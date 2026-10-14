@@ -1,0 +1,167 @@
+"""Shared, explicit UI vocabulary. Engine output is never a translation source."""
+import locale
+
+# Chinese, English. Keys are stable protocol/UI identifiers, not display strings.
+MESSAGES = {
+    "app_title": ("CPU 与内存测试", "CPU and memory tests"),
+    "home": ("主页", "Home"), "overview": ("性能概览", "Performance overview"),
+    "cache_group": ("缓存性能测试", "Cache performance"),
+    "memory_group": ("内存性能测试", "Memory performance"),
+    "core_group": ("核心性能测试", "Core performance"),
+    "cache_hierarchy": ("缓存层级", "Cache hierarchy"),
+    "memory_bandwidth": ("内存带宽", "Memory bandwidth"),
+    "inter_core": ("核间通信", "Inter-core communication"),
+    "cpu_alu": ("整数运算", "Integer operations"),
+    "cpu_float": ("浮点运算", "Floating-point operations"),
+    "cpu_branch": ("分支预测", "Branch prediction"),
+    "cpu_multi": ("ComputeMark", "ComputeMark"),
+    "run": ("运行测试", "Run test"), "run_group": ("运行本组", "Run group"),
+    "run_selected": ("运行所选", "Run selected"), "run_all": ("运行全部", "Run all"),
+    "cancel": ("取消", "Cancel"), "stop": ("停止", "Stop"), "start": ("开始", "Start"),
+    "open_report": ("查看报告", "Open report"), "open_folder": ("打开目录", "Open folder"),
+    "open_log": ("查看原始日志", "Open raw log"), "choose": ("选择…", "Choose…"),
+    "licenses": ("开源许可", "Open-source licenses"),
+    "language": ("语言", "Language"), "zh": ("中文", "Chinese"), "en": ("英文", "English"),
+    "theme": ("外观", "Appearance"), "dark": ("深色", "Dark"), "light": ("浅色", "Light"),
+    "config": ("运行配置", "Run settings"), "output": ("报告保存位置", "Report location"),
+    "threads": ("线程数", "Threads"), "all_available": ("全部可用", "All available"),
+    "compute_threads": ("ComputeMark 线程", "ComputeMark threads"),
+    "progress": ("已完成 {done} / {total} 项", "Completed {done} / {total}"),
+    "status": ("状态", "Status"), "ready": ("就绪", "Ready"),
+    "queued": ("排队中", "Queued"), "running": ("运行中", "Running"),
+    "passed": ("完成", "Completed"), "failed": ("失败", "Failed"),
+    "unsupported": ("当前平台不支持", "Unsupported on this platform"),
+    "interrupted": ("已取消", "Cancelled"), "skipped": ("已跳过", "Skipped"),
+    "timeout": ("超时", "Timed out"), "build_failed": ("构建失败", "Build failed"),
+    "invalid_report": ("报告无效", "Invalid report"),
+    "not_run": ("尚未运行", "Not run"), "no_data": ("暂无数据", "No data"),
+    "unavailable": ("不可用", "Unavailable"), "unknown": ("未知", "Unknown"),
+    "incomplete": ("部分测试未完成", "Incomplete run"),
+    "details": ("详细结果", "Detailed results"), "summary": ("关键指标", "Key measurements"),
+    "results": ("测量结果", "Measurements"), "system": ("系统信息", "System information"),
+    "conditions": ("测试条件", "Test conditions"), "run_id": ("运行编号", "Run ID"),
+    "duration": ("运行时长", "Duration"), "seconds": ("秒", "s"),
+    "exit_code": ("退出码", "Exit code"), "reason": ("原因", "Reason"),
+    "no_selection": ("请至少选择一项测试。", "Select at least one test."),
+    "busy": ("请先停止当前测试。", "Stop the current test first."),
+    "stopping": ("正在停止并保存结果…", "Stopping and saving results…"),
+    "worker_failed": ("工作进程异常退出，请查看原始日志。", "Worker exited unexpectedly. Open the raw log."),
+    "io_error": ("无法访问文件，请检查路径或权限。", "Cannot access the file. Check its path or permissions."),
+    "open_error": ("无法打开，请从报告目录手动访问。", "Cannot open. Access it from the report directory."),
+    "read_error": ("结果读取或校验失败。", "Result could not be read or validated."),
+    "missing_report": ("未生成结果报告。", "Result report was not produced."),
+    "no_complete": ("本次没有完整结果。", "No complete results for this run."),
+    "score_unavailable": ("ComputeMark 评分不可用", "ComputeMark unavailable"),
+    "cpu_model": ("处理器型号", "Processor"), "os": ("操作系统", "Operating system"),
+    "architecture": ("架构", "Architecture"), "logical": ("逻辑核心", "Logical cores"),
+    "physical": ("物理核心", "Physical cores"), "memory_total": ("物理内存", "Physical memory"),
+    "page_size": ("内存页大小", "Page size"), "performance": ("性能核", "Performance cores"),
+    "efficiency_cores": ("能效核", "Efficiency cores"), "cache_shared": ("共享核心数", "Sharing cores"),
+    "level": ("层级", "Level"), "tier": ("核心分组", "Core group"),
+    "l1d": ("一级数据缓存", "L1 data cache"), "l2": ("二级缓存", "L2 cache"),
+    "l3": ("三级缓存", "L3 cache"), "reported_cache": ("系统报告的缓存", "OS-reported caches"),
+    "workset": ("工作集", "Working set"), "read_latency": ("读取延迟", "Read latency"),
+    "write_latency": ("写入延迟", "Write latency"), "bandwidth": ("带宽", "Bandwidth"),
+    "cache_scan": ("工作集扫描", "Working-set scan"), "cache_bw": ("工作集带宽", "Working-set bandwidth"),
+    "operation": ("操作", "Operation"), "value": ("数值", "Value"),
+    "time": ("耗时", "Time"), "rate": ("吞吐量", "Throughput"),
+    "latency": ("延迟", "Latency"), "type": ("类型", "Type"),
+    "read": ("读取", "Read"), "write": ("写入", "Write"), "copy": ("复制", "Copy"),
+    "add": ("加法", "Add"), "sub": ("减法", "Subtract"), "mul": ("乘法", "Multiply"),
+    "div": ("除法", "Divide"), "mod": ("取模", "Modulo"), "sqrt": ("平方根", "Square root"),
+    "sin": ("正弦", "Sine"), "logarithm": ("对数", "Logarithm"), "pow": ("幂运算", "Power"),
+    "mixed": ("混合运算", "Mixed operations"),
+    "buffer_size": ("缓冲区大小", "Buffer size"),
+    "and": ("按位与", "Bitwise AND"), "or": ("按位或", "Bitwise OR"),
+    "xor": ("按位异或", "Bitwise XOR"), "shl": ("左移", "Shift left"),
+    "shr": ("右移", "Shift right"), "count": ("计数", "Count"),
+    "load_alu": ("加载与运算", "Load and arithmetic"), "fma": ("融合乘加", "Fused multiply-add"),
+    "dot": ("点积", "Dot product"), "float": ("单精度", "Single precision"),
+    "double": ("双精度", "Double precision"), "integer": ("整数", "Integer"),
+    "fp64": ("双精度浮点", "FP64"), "simd": ("SIMD", "SIMD"),
+    "typed_op": ("{type} {operation}", "{type} {operation}"),
+    "item_number": ("测量项 {number}", "Measurement {number}"),
+    "pattern": ("分支模式", "Branch pattern"), "always": ("始终跳转", "Always taken"),
+    "never": ("从不跳转", "Never taken"), "random50": ("随机 50%", "Random 50%"),
+    "pattern_n": ("周期模式 {number}", "Pattern {number}"),
+    "counter2": ("两位计数器", "2-bit counter"), "increasing": ("递增", "Increasing"),
+    "mispred": ("预测错误率", "Misprediction rate"), "source": ("数据来源", "Data source"),
+    "estimated": ("估算", "Estimated"), "measured": ("实测", "Measured"),
+    "cpi": ("每条指令周期数", "Cycles per instruction"), "ipc": ("每周期指令数", "Instructions per cycle"),
+    "speedup": ("加速比", "Speedup"), "efficiency": ("扩展效率", "Scaling efficiency"),
+    "scaling": ("多线程扩展", "Thread scaling"), "single_points": ("单线程评分", "Single-thread score"),
+    "multi_points": ("多线程评分", "Multi-thread score"), "points": ("分", "points"),
+    "single": ("单线程", "Single thread"), "multi": ("多线程", "Multiple threads"),
+    "placement": ("调度策略", "Placement policy"), "pinned": ("核心绑定", "Pinned cores"),
+    "process_group": ("进程组内核心绑定", "Pinned within process group"),
+    "qos": ("系统调度，用户交互优先级", "OS scheduled, user-initiated QoS"),
+    "compiler": ("编译器", "Compiler"), "protocol": ("协议", "Protocol"),
+    "core": ("核心", "Core"), "cas_latency": ("CAS 延迟", "CAS latency"),
+    "cas_throughput": ("CAS 吞吐量", "CAS throughput"),
+    "minimum": ("最小值", "Minimum"), "maximum": ("最大值", "Maximum"),
+    "average": ("平均值", "Average"), "current": ("当前值", "Current"),
+    "median": ("中位数", "Median"), "unit": ("单位", "Unit"),
+    "stress": ("压力测试", "Stress test"), "cpu": ("CPU", "CPU"), "fpu": ("FPU", "FPU"),
+    "cache": ("缓存", "Cache"), "ram": ("内存", "Memory"), "gpu": ("GPU", "GPU"),
+    "loads": ("负载模式", "Workloads"), "sensors": ("传感器", "Sensors"),
+    "monitoring": ("实时监控", "Live monitoring"), "statistics": ("统计数据", "Statistics"),
+    "manual_stop": ("手动停止", "Until stopped"), "minutes": ("分钟", "minutes"),
+    "time_limit": ("自动停止", "Stop after"), "memory_budget": ("内存预算", "Memory budget"),
+    "enhanced": ("增强监控（可选）", "Enhanced monitoring (optional)"),
+    "enhanced_hint": ("只读接入现有传感器；不安装驱动，不调整硬件。额外系统权限由用户单独配置，本程序不自动提权。", "Read existing sensors only; no driver installation or hardware control. Additional system permissions must be configured separately; this app never elevates automatically."),
+    "idle_load": ("空载监控中", "Monitoring without load"),
+    "stress_warning": ("持续高负载会增加发热和功耗，请保存工作并留意设备状态。", "Sustained load increases heat and power use. Save your work and monitor the device."),
+    "no_temperature": ("无可用温度读数，无法保证过热保护。", "No temperature readings; thermal protection is not guaranteed."),
+    "sensor_denied": ("部分传感器无读取权限。", "Some sensors require additional permission."),
+    "show": ("显示", "Show"), "elapsed": ("已运行", "Elapsed"),
+    "temperature": ("温度", "Temperature"), "utilization": ("利用率", "Utilization"),
+    "power": ("功耗", "Power"), "frequency": ("频率", "Frequency"),
+    "fan": ("风扇转速", "Fan speed"), "voltage": ("电压", "Voltage"),
+    "memory_usage": ("内存占用", "Memory usage"), "thermal_state": ("系统热状态", "Thermal state"),
+    "sensor_n": ("{kind} {number}", "{kind} {number}"),
+    "cpu_usage": ("CPU 利用率", "CPU utilization"), "gpu_usage": ("GPU 利用率", "GPU utilization"),
+    "cpu_frequency": ("CPU 频率", "CPU frequency"),
+    "mode_change": ("负载已更新", "Workloads updated"), "user_stop": ("手动停止", "Stopped by user"),
+    "duration_stop": ("达到设定时长", "Duration reached"),
+    "stopped": ("已停止", "Stopped"),
+    "thermal_stop": ("达到临界热状态", "Critical thermal state"),
+    "calculation_error": ("负载校验失败", "Workload verification failed"),
+    "memory_error": ("内存预算不足或分配失败", "Insufficient memory budget or allocation failed"),
+    "backend_error": ("负载后端异常", "Workload backend failed"),
+    "parent_exit": ("主程序已退出", "Application exited"),
+    "device_unavailable": ("未发现支持的设备或驱动", "No supported device or driver"),
+    "sensor_unavailable": ("传感器不可用", "Sensor unavailable"),
+    "export": ("导出报告", "Export report"), "events": ("会话事件", "Session events"),
+}
+
+
+def default_language():
+    try:
+        name = locale.getlocale()[0] or "en"
+    except (ValueError, TypeError):
+        name = "en"
+    return "zh" if name.lower().startswith("zh") else "en"
+
+
+def tr(key, language="en", **values):
+    template = MESSAGES[key][0 if language == "zh" else 1]
+    return template.format(**values)
+
+
+def ref(key, **values):
+    if key not in MESSAGES:
+        raise KeyError(key)
+    return {"key": key, "values": values}
+
+
+def display(value, language="en"):
+    if isinstance(value, dict) and "key" in value:
+        return tr(value["key"], language, **{key: display(item, language)
+                    for key, item in value.get("values", {}).items()})
+    if value is None:
+        return tr("unavailable", language)
+    if isinstance(value, float):
+        return f"{value:,.3f}".rstrip("0").rstrip(".")
+    if type(value) is int:
+        return f"{value:,}"
+    return str(value)

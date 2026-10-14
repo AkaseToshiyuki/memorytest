@@ -59,10 +59,10 @@ Ctrl-C 会停止当前进程组、标记剩余模块跳过，并尝试生成部�
 macOS 精确 CPU-ID 绑核/核间矩阵、Linux PMU 不可用；ComputeMark 使用有记录的 QoS 策略。
 `python3 run_benchmarks.py --system-info` 只查询硬件/大小核信息，不启动任何基准测试。
 
-HTML 表格与内联 SVG 仅需 Python 标准库；Matplotlib 只用于可选 PNG 图表。
-没有 Matplotlib 时仍展示核间原始矩阵。默认不显示旧的 `/100` 诊断评分。
+HTML 表格与内联 SVG 仅需 Python 标准库，包括核间热图和多线程扩展曲线。
+桌面和 HTML 共用 `result_model.py`，不显示旧的 `/100` 诊断评分。
 本次运行包含 `cpu_multi` 的合格 v2 原始采样时，显示实测单线程/多线程绝对分数；
-不接受旧 v1 推算输入。报告同时展示各模块可比性限制。详见 README 的评分与算法审计。
+不接受旧 v1 推算输入。报告仅显示数据、测试条件和状态；算法限制见 README。
 
 ```bash
 make report                              # 重生成最近一次归档 HTML
@@ -85,3 +85,27 @@ python3 report_html.py --run-dir reports/runs/<run-id> --module cpu_alu
 
 `generate_report.py` 保留兼容旧调用及图表辅助功能；
 新运行应使用 `run_benchmarks.py` 或 `make test`。
+
+## 0.1.1 regression and stress checks
+
+`python -m unittest discover -s tests -v` covers the new cache, presentation and
+stress checks as well as existing contracts. It does not run the legacy heavy
+top-level smoke/sanity/regression commands. Native CPU checks use at most two
+threads; the stress check uses one thread, 1 MiB, and a 1.2-second limit.
+
+- `test_cache_report.py`: bounded 128 KiB end-to-end cache scan; no L3, unknown cache
+  metadata, allocation failure, unknown available memory, creation/write failures.
+- `test_presentation.py`: hand-calculated values/units/SVG coordinates, stale-result
+  exclusion, all four language/theme combinations, state preservation, contrast,
+  independent plot/statistics windows. Optional Node check exercises offline JS
+  switches with localStorage denied; Node is not a packaged dependency.
+- `test_stress.py`: independent Python integer and Decimal closed-form references,
+  bounded native CPU/FPU/cache/RAM switching, sensor disappearance/permissions,
+  shared budgets, simulated GPU switching, thermal/fault/parent-exit cleanup.
+- Native desktop CI builds six targets and checks extracted installer startup,
+  heavyweight-dependency exclusion, idle resources and a monitoring-only session.
+  It does not certify real GPU stress, SMC access on every Mac, or Windows LHM.
+
+Verification on 2026-10-14 before installer CI: 87 discovered, 81 passed, 6
+platform-dependent checks skipped on Linux x64. Full native-GPU and physical Mac
+sensor coverage remain device-dependent; a successful build is not that coverage.

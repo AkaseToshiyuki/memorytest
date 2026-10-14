@@ -92,6 +92,21 @@ def main():
     if any(asset["bytes"] > 100 * 1024 * 1024 for asset in data["assets"]) or data["bundle_bytes"] > 250 * 1024 * 1024:
         raise RuntimeError("Desktop package exceeded 100 MiB compressed / 250 MiB bundle budget")
     check_install_payloads(info, data)
+    # Exercise the packaged supervisor/report imports without CPU/GPU load.
+    with tempfile.TemporaryDirectory(prefix="memorytest-packaged-monitor-") as directory:
+        check = subprocess.run([str(binary), "--stress-worker", "--no-load", "--duration", "1.2",
+                                "--threads", "1", "--memory-mib", "1", "--output-dir", directory],
+                               capture_output=True, text=True, timeout=30)
+        (info.parent / "stress-smoke.log").write_text(check.stdout + check.stderr, encoding="utf-8")
+        if check.returncode:
+            raise RuntimeError("Packaged monitor failed; see stress-smoke.log")
+        manifest = json.loads(next(Path(directory).glob("stress-runs/*/manifest.json")).read_text())
+        if manifest["status"] != "stopped" or manifest["reason"] != "duration_stop":
+            raise RuntimeError("Packaged monitor did not stop normally")
+        report = next(Path(directory).glob("stress-runs/*/stress_report.html"))
+        html = report.read_text(encoding="utf-8")
+        if 'lang="zh"' not in html or 'lang="en"' not in html or '<svg' not in html:
+            raise RuntimeError("Packaged bilingual sensor report missing")
     subprocess.run([sys.executable, str(ROOT / "packaging/measure_desktop.py"), str(binary),
                     "--output", str(info.parent / "resources.json")], check=True)
     print(f"Artifact checks passed: {info.parent}")

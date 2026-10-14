@@ -77,6 +77,9 @@ class WindowTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MainWindow()
+        self.window.language = "en"
+        self.window.theme = "dark"
+        self.window.retranslate()
         self.addCleanup(self.window.close)
 
     def drain_until(self, predicate, seconds=15):
@@ -88,7 +91,7 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(predicate())
 
     def test_idle_has_no_worker_and_bounded_log(self):
-        self.assertEqual(self.window.tabs.count(), 8)
+        self.assertEqual(self.window.tabs.count(), 5)
         self.assertEqual(self.window.process.state(), QProcess.NotRunning)
         self.assertFalse(self.window.cancel.isEnabled())
         for index in range(600):
@@ -146,7 +149,7 @@ class WindowTests(unittest.TestCase):
             page.started()
             self.assertEqual(page.progress.maximum(), 0)
             page.completed(root, {"status": "passed"})
-            self.assertIn("33,941", page.summary.text())
+            self.assertIn("33,941", page.details.toPlainText())
             self.assertIn("Integer", page.details.toPlainText())
             self.assertEqual(page.progress.value(), 1)
             self.assertEqual(page.summary.property("tone"), "passed")
@@ -171,7 +174,7 @@ class WindowTests(unittest.TestCase):
         self.window.handle_event({"type": "module", "module": "cpu_multi", "status": "passed"})
         self.window.handle_event({"type": "module", "module": "cpu_multi", "status": "passed"})
         self.assertEqual(self.window.progress.value(), 1)
-        self.assertEqual(self.window.labels["cpu_multi"].text(), "完成")
+        self.assertEqual(self.window.labels["cpu_multi"].text(), "Completed")
 
     @unittest.skipIf(os.name == "nt", "POSIX executable fixture; Windows lifecycle uses native subprocess test")
     def test_qprocess_cancel_and_close_leave_no_worker(self):

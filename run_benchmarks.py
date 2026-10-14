@@ -151,7 +151,7 @@ def environment_snapshot():
 
 
 def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip_charts=False, cpu_threads=None,
-              cancelled=None, event=None):
+              cancelled=None, event=None, language=None, theme="dark"):
     event = event or (lambda **data: None)
     output_dir = output_dir.resolve()
     bin_dir = bin_dir.resolve()
@@ -247,6 +247,9 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
                "--manifest", str(manifest_path), "--output", str(archive)]
     for name in modules:
         command.extend(["--module", name])
+    if language:
+        command.extend(["--language", language])
+    command.extend(["--theme", theme])
     if skip_charts:
         command.append("--skip-charts")
     # A cancellation still produces a report explaining missing/partial data.
@@ -284,6 +287,8 @@ def main(argv=None):
     parser.add_argument("--timeout", type=positive_seconds, help="per-module time limit in seconds")
     parser.add_argument("--skip-charts", action="store_true", help="omit optional matplotlib charts; keep inline SVG/tables")
     parser.add_argument("--cpu-threads", type=int, help="limit ComputeMark threads; default is all allowed logical CPUs")
+    parser.add_argument("--language", choices=["zh", "en"])
+    parser.add_argument("--theme", choices=["light", "dark"], default="dark")
     parser.add_argument("--cancel-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--events-jsonl", action="store_true", help=argparse.SUPPRESS)
@@ -306,7 +311,8 @@ def main(argv=None):
         print("@memorytest " + json.dumps(data, ensure_ascii=False), flush=True)
     return run_suite(select_modules(args.module, args.category), args.output_dir, args.bin_dir,
                      args.skip_build, args.timeout, args.skip_charts, args.cpu_threads,
-                     Cancellation(args.cancel_file, args.parent_pid), publish if args.events_jsonl else None)
+                     Cancellation(args.cancel_file, args.parent_pid), publish if args.events_jsonl else None,
+                     args.language, args.theme)
 
 
 if __name__ == "__main__":

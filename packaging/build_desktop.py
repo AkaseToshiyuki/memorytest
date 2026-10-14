@@ -73,6 +73,14 @@ def engines(directory, modules=None):
             ["-o", str(output), "-lm"] + (["-ladvapi32", "-static-libgcc"] if windows else []))
     if modules is None or "cpu_multi" in modules:
         run([directory / ("test_cpu_multi" + suffix), "--self-test"])
+    if modules is None:
+        run(compiler + ["-O2", "-std=c11", "-pthread", "-ffp-contract=off", str(ROOT / "src/stress_cpu.c"),
+                        "-lm", "-o", str(directory / ("stress_cpu" + suffix))] + (["-static-libgcc"] if windows else []))
+        run([directory / ("stress_cpu" + suffix), "--self-test"])
+        if darwin:
+            for name, framework in [("stress_metal", "Metal"), ("telemetry_macos", "IOKit")]:
+                run(compiler + ["-O2", "-fobjc-arc", str(ROOT / "src" / (name + ".m")),
+                                "-framework", "Foundation", "-framework", framework, "-o", str(directory / name)])
 
 
 def collect_licenses(directory):
@@ -85,6 +93,7 @@ def collect_licenses(directory):
             if notices.is_dir():
                 shutil.copytree(notices, directory / "Windows-toolchain", symlinks=False)
     shutil.copy2(ROOT / "LICENSE", directory / "MemoryTest-MIT.txt")
+    shutil.copy2(ROOT / "packaging/Stats-MIT.txt", directory / "Stats-MIT.txt")
     for name in ["PySide6-Essentials", "shiboken6", "psutil", "pyinstaller"]:
         distribution = importlib.metadata.distribution(name)
         for item in distribution.files or []:
@@ -153,6 +162,8 @@ def windows(bundle, staging, artifacts):
     target = artifacts / f"MemoryTest-{VERSION}-Windows-{architecture()}-Setup.exe"
     script = staging / "installer.nsi"
     script.write_text('Unicode true\n!include "MUI2.nsh"\nName "MemoryTest"\n'
+        f'!define MUI_ICON "{staging / "icons/memorytest.ico"}"\n'
+        f'!define MUI_UNICON "{staging / "icons/memorytest.ico"}"\n'
         f'OutFile "{target}"\nInstallDir "$LOCALAPPDATA\\Programs\\MemoryTest"\n'
         'RequestExecutionLevel user\nSetCompressor /SOLID lzma\n'
         '!insertmacro MUI_PAGE_DIRECTORY\n!insertmacro MUI_PAGE_INSTFILES\n'
@@ -220,9 +231,12 @@ def main():
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix="desktop-", dir=build))
+    from build_icons import build_icons
+    build_icons(staging / "icons")
     engines(staging / "engines")
     collect_licenses(staging / "licenses")
-    env = dict(os.environ, MEMORYTEST_ENGINE_DIR=str(staging / "engines"), MEMORYTEST_LICENSE_DIR=str(staging / "licenses"))
+    env = dict(os.environ, MEMORYTEST_ENGINE_DIR=str(staging / "engines"), MEMORYTEST_LICENSE_DIR=str(staging / "licenses"),
+               MEMORYTEST_ICON_DIR=str(staging / "icons"))
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--distpath", staging / "dist",
          "--workpath", staging / "pyinstaller", ROOT / "packaging/MemoryTest.spec"], cwd=ROOT, env=env)
     bundle = staging / "dist" / ("MemoryTest.app" if sys.platform == "darwin" else "MemoryTest")

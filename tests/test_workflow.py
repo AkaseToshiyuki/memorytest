@@ -69,8 +69,8 @@ class WorkflowTests(unittest.TestCase):
         return path.parent, json.loads(path.read_text())
 
     def assert_scope(self, content, modules):
-        for name, heading in HEADINGS.items():
-            self.assertEqual(f"<h2>{heading}</h2>" in content, name in modules, name)
+        for name in HEADINGS:
+            self.assertEqual(f'data-module="{name}"' in content, name in modules, name)
         self.assertNotIn("<h2>Overall Score</h2>", content)
         self.assertNotIn("/100", content)
         self.assertNotIn("{html.escape(title)}", content)
@@ -85,7 +85,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(list((path / "reports").glob("*.md"))), 7)
         report = (self.output / "benchmark_report.html").read_text()
         self.assert_scope(report, TESTS)
-        self.assertIn("CAS Latency (ns)", report)
+        self.assertIn("CAS latency", report)
         self.assertIn("20", report)
 
     def test_each_single_module_has_only_its_own_html(self):
@@ -122,7 +122,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((path / "cpu_alu" / "reports" / TESTS["cpu_alu"]["report"]).exists())
         report = (self.output / "selected_report.html").read_text()
         self.assertIn("Incomplete run", report)
-        self.assertIn("process exited with code 7", report)
+        self.assertIn("Exit code: 7", report)
         self.assertNotIn("Fixture CPU cpu_alu", report)
 
     def test_stale_files_and_previous_runs_are_never_reused(self):
@@ -152,7 +152,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         _, manifest = self.latest()
         self.assertEqual(manifest["modules"][0]["status"], "timeout")
-        self.assertIn("time limit exceeded", (self.output / "cpu_alu_report.html").read_text())
+        self.assertIn("Timed out", (self.output / "cpu_alu_report.html").read_text())
 
     def test_missing_executable_still_reports_failure(self):
         (self.bin / TESTS["cpu_alu"]["bin"]).unlink()
@@ -229,7 +229,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(manifest["success"])
         self.assertFalse(manifest["all_selected_passed"])
         self.assertFalse((path / "reports" / TESTS["inter_core"]["report"]).exists())
-        self.assertIn("Unsupported modules were not measured", (path / "selected_report.html").read_text())
+        self.assertIn('class="badge unsupported"', (path / "selected_report.html").read_text())
 
     def test_unsupported_only_is_not_a_pass(self):
         result = self.run_cli("-m", "inter_core", modes={"inter_core": "unsupported"})

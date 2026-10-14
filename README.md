@@ -1,7 +1,9 @@
 # Memorytest — Portable Memory & CPU Benchmark Suite
 
 A CPU/memory microbenchmark suite with Linux, macOS and Windows backends and a
-Qt Widgets desktop. V0.1.0 desktop releases target x64 and ARM64 on all three OSes.
+Qt Widgets desktop. Published V0.1.0 releases target x64 and ARM64 on all three OSes.
+The 0.1.1 working branch adds grouped results, bilingual themes and supervised stress
+sessions; it is a test build, not a published release.
 Linux CLI additionally contains RISC-V and PowerPC code paths.
 Architecture code paths are not a certification of equal workloads or measurement
 validity. macOS source adaptation and cross-build checks do not replace native Mac
@@ -21,7 +23,7 @@ make test
 ```
 
 A C compiler and Python 3.10+ are sufficient for HTML tables and inline SVG charts.
-Matplotlib is optional for PNG heatmaps and scaling charts.
+Heatmaps and scaling charts are also inline SVG; Matplotlib is not needed.
 
 ### macOS / Apple Silicon
 
@@ -242,8 +244,9 @@ application-performance score. Semantic operations are not retired instructions.
 Architecture-independent C and reference checks establish a protocol; they do not
 substitute for real ARM64/RISC-V/PowerPC hardware validation.
 
-Default HTML hides the legacy 0–100 grades; `--legacy-scores` explicitly requests
-them. Every module report includes its audit scope and limitations.
+HTML displays validated ComputeMark v2 points only. The deprecated `--legacy-scores`
+flag is accepted but does not restore old grades. Algorithm limitations remain in
+this README; the result UI shows data, conditions and concise status only.
 
 Protocol references: [GCC optimization/FP semantics](https://gcc.gnu.org/onlinedocs/gcc-15.1.0/gcc/Optimize-Options.html),
 [POSIX monotonic clocks](https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html),
@@ -320,7 +323,7 @@ cd memorytest
 make test
 ```
 
-仅需 C 编译器和 Python 3.10+ 即可生成 HTML 表格与内联 SVG。Matplotlib 仅用于可选 PNG 热图和扩展性曲线。
+仅需 C 编译器和 Python 3.10+ 即可生成 HTML 表格与内联 SVG，包括热图与扩展曲线；不需要 Matplotlib。
 
 ## 测试架构
 
@@ -515,6 +518,78 @@ P1 修核间绑定与完成协议；P2 再统一缓存实验协议、平台覆�
 验收口径：独立 Python uint64 掩码算术和 binary64 参考；CPU v2 原生有限核运行、
 计数/公式独立复算、错误数据拒绝、线程创建/绑核故障注入、时钟参考检查；
 流程夹具验证选中模块与报告隔离。没有运行全套重内存/核间硬件测试。
+
+## 0.1.1 测试版本
+
+本轮仅交付工作分支、验证记录和测试构件；没有创建 0.1.1 标签或 Release，
+也不会自动替换 V0.1.0 资产。三大界面分组是缓存、内存、核心性能测试，
+原 CLI 模块 ID 和 `memory` / `cpu` 分类语义不变。
+
+桌面原生图表与离线 HTML 使用同一结构化结果模型，支持中文／英文和浅色／深色。
+默认中文系统用中文，其他系统用英文；默认深色，选择会保存。结果页只显示实测指标、
+测试条件、曲线、表格和简短状态，原始引擎日志单独打开。Mac 无 L3 不再导致缓存报告
+提前丢失；缺失缓存数据不推算，性能核／能效核缓存保留系统报告值。
+
+压力测试在独立进程中运行，不能与基准测试同时启动，也不生成性能评分。
+CPU、FPU、缓存、内存共用一套线程预算；GPU 使用 Metal（macOS）或设备驱动的
+OpenCL（Windows/Linux），找不到 GPU 后端时禁用，不回退到 CPU 冒充 GPU。
+默认仅 CPU、手动停止；运行中切换负载立即生效，全取消则仅监控。
+内存默认可用内存 25%、最多 2 GiB，调整上限 50% 并扣除缓存／GPU 分配预算。
+
+```bash
+# 只探测能力，不启动压力负载
+python desktop_app.py --stress-worker --probe
+# 有限验收示例：单线程、1 MiB、5 秒；不默认执行
+python desktop_app.py --stress-worker --mode cpu --threads 1 --memory-mib 1 --duration 5
+```
+
+监控每秒采样，图表只保留最近十分钟；Min/Max/Avg 使用本会话全部有效样本。
+隐藏曲线不改变统计，缺失读数显示不可用而不是零。完整样本与负载切换保存在
+`stress-runs/<run-id>/samples.jsonl` 和 `manifest.json`，可以导出自包含 HTML。
+
+| 系统 | 普通权限 | 主动开启的增强读取 |
+|---|---|---|
+| Linux | 系统负载、内存、频率、可读 hwmon/DRM | 可读 RAPL 能耗；受限路径保持不可用 |
+| macOS | 系统负载、内存、可用频率、系统临界热状态 | 只读 SMC 温度区域、已识别功耗／电压和风扇转速；不是单核温度 |
+| Windows | 系统负载、内存、可用频率 | 接入已经运行的 LibreHardwareMonitor WMI 数据源 |
+
+增强监控不安装驱动、不写 SMC、不控制风扇／频率／电压，不自动提权。
+如已有数据源需要额外权限，由用户在系统或该数据源中单独授权；拒绝权限时保留普通
+监控。SMC 为机型相关私有接口，兼容性参考 [Stats](https://github.com/exelban/stats)，
+协议参考许可随包提供。没有温度数据时不承诺过热保护；可靠临界信号、计算错误和
+工作进程异常会停止负载，关窗与父进程退出会清理子进程。
+
+四个 SVG 图标方向和浅／深／小尺寸预览在 `packaging/icon-concepts/`。
+用户已选定 04「脉冲」，正式源文件为 `packaging/memorytest.svg`；构建脚本生成
+Windows ICO、macOS ICNS 及多尺寸 PNG，并接入应用与安装包。
+检查范围与精确测试结果见 [TEST_LAYERS.md](TEST_LAYERS.md)。
+
+### macOS 严格核间矩阵调研
+
+结论：当前证据不足以支持把 macOS 普通用户态线程往返测量标为指定 CPU-ID 对的严格
+矩阵。因此 0.1.1 仍明确显示不支持；没有新增要求降低系统安全性的代码。
+以下为源码／接口证据与工程判断，不是 Mac 私有接口的真机验证。
+
+| 路线 | CPU-ID 绑定与执行核心验证 | 兼容性和分发判断 |
+|---|---|---|
+| 公开 Mach affinity / QoS | affinity tag 表达共享缓存偏好，不是 CPU 编号；QoS 表达调度需求，不保证 P 核或某个核 | 可用于调度条件记录，不能承诺指定核对。Apple Silicon 的公开 XNU ARM affinity 集合数为 0，相关策略可返回不支持 |
+| 私有线程策略与核心编号读取 | 所检查私有策略主要是 QoS／实时约束；`_os_cpu_number()` 能提供瞬时编号，但源码明确不是稳定 ABI。能读到编号不等于能绑定，也不能仅靠采样两端编号相同排除中途迁移 | 可作为后续诊断实验，需按 OS／架构验证；未找到已验证可随普通桌面包分发的严格绑定路径 |
+| 开发／调试内核及内核内部接口 | XNU 的 `thread_bind` 能指定处理器；开发／调试条件编译的 `sysctl_thread_bind_cpuid` 路径还会触发调度切换。这不证明普通发布内核暴露该能力 | 需要专用环境、版本耦合与失败清理；第三方内核扩展还涉及授权、重启和 Apple Silicon 的安全策略成本，不纳入普通测试包 |
+
+证据固定到 XNU `f6217f891ac0bb64f3d375211650a4c1ff8ca1ea`：
+[公开策略定义](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/thread_policy.h)、
+[ARM affinity](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/arm/cpu_affinity.h)、
+[策略拒绝路径](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/thread_policy.c)、
+[私有线程策略](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/mach/thread_policy_private.h)、
+[内部核心编号读取](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/os/tsd.h)、
+[内核绑定与调试路径](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/sched_prim.c)。
+平台语义另见 [Apple affinity 说明](https://developer.apple.com/library/archive/releasenotes/Performance/RN-AffinityAPI/index.html)、
+[Apple Silicon 调度说明](https://developer.apple.com/videos/play/tech-talks/110147/) 和
+[Apple 扩展分发要求](https://support.apple.com/guide/deployment/system-extensions-in-macos-depa5fb8376f/web)。
+
+如以后开展严格矩阵实验，验收必须同时具备目标 CPU-ID 的绑定成功证据、独立的执行
+核心／迁移验证、完整核对覆盖、可取消超时与解绑清理，并记录 OS build 和机型。
+仅有两个线程、不同 affinity tag、较低方差或首尾相同核心编号均不足以替代这些条件。
 
 ## V0.1.0 desktop distributions
 

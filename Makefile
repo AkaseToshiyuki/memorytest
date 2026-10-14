@@ -32,7 +32,7 @@ CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result $(
 LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
-VERSION = 0.1.0
+VERSION = 0.1.1
 MODULE_ARGS = $(foreach m,$(MODULE) $(MODULES),--module "$(m)") $(if $(CATEGORY),--category "$(CATEGORY)")
 
 # Test categories
