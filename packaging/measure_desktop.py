@@ -40,11 +40,8 @@ def main():
             raise RuntimeError("GUI failed to exit")
     with tempfile.TemporaryDirectory(prefix="memorytest-packaged-run-") as directory:
         root = Path(directory)
-        engine = binary.parent / "_internal/bin"
-        if not engine.is_dir():
-            engine = binary.parent.parent / "Resources/bin"  # PyInstaller macOS bundle
         command = [str(binary), "--worker", "--skip-build", "--skip-charts", "--module", "cpu_multi",
-                   "--cpu-threads", "2", "--bin-dir", str(engine), "--output-dir", str(root)]
+                   "--cpu-threads", "2", "--output-dir", str(root)]
         run = subprocess.run(command, capture_output=True, text=True, timeout=90)
         if run.returncode:
             raise RuntimeError(run.stdout + run.stderr)

@@ -162,6 +162,7 @@ def windows(bundle, staging, artifacts):
         'CreateDirectory "$SMPROGRAMS\\MemoryTest"\n'
         'CreateShortcut "$SMPROGRAMS\\MemoryTest\\MemoryTest.lnk" "$INSTDIR\\MemoryTest.exe"\n'
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MemoryTest" "DisplayName" "MemoryTest"\n'
+        f'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MemoryTest" "DisplayVersion" "{VERSION}"\n'
         'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MemoryTest" "UninstallString" \'"$INSTDIR\\Uninstall.exe"\'\n'
         'SectionEnd\nSection "Uninstall"\n'
         'Delete "$SMPROGRAMS\\MemoryTest\\MemoryTest.lnk"\nRMDir "$SMPROGRAMS\\MemoryTest"\n'
