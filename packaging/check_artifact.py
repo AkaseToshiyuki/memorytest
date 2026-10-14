@@ -8,6 +8,8 @@ import sys
 import tempfile
 import zipfile
 import plistlib
+import shutil
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,7 +57,25 @@ def check_install_payloads(info, data):
                 try:
                     smoke(installed / "MemoryTest.exe")
                 finally:
-                    subprocess.run([str(installed / "Uninstall.exe"), "/S", f"_?={installed}"], check=True, timeout=60)
+                    # Match NSIS's documented external-copy + _?= protocol so
+                    # its original executable is not locked during removal.
+                    # https://nsis.sourceforge.io/Docs/AppendixD.html
+                    uninstaller = root / "uninstall-check.exe"
+                    shutil.copy2(installed / "Uninstall.exe", uninstaller)
+                    subprocess.run([str(uninstaller), "/S", f"_?={installed}"], check=True, timeout=60)
+                    if (installed / "MemoryTest.exe").exists() or (installed / "_internal").exists():
+                        raise RuntimeError("Uninstaller left the installed application behind")
+                    # Windows/ARM64 emulation and AV can briefly retain the
+                    # image handle after process exit. Retry only this known
+                    # temporary executable, never hide a cleanup failure.
+                    for attempt in range(50):
+                        try:
+                            uninstaller.unlink()
+                            break
+                        except PermissionError:
+                            if attempt == 49:
+                                raise
+                            time.sleep(0.1)
 
 
 def main():

@@ -44,7 +44,7 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="memorytest-workflow-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()  # macOS /var is a /private/var alias
         self.bin = self.root / "bin"
         self.bin.mkdir()
         fixture = ROOT / "tests" / "fake_benchmark.py"

@@ -95,6 +95,31 @@ class WindowTests(unittest.TestCase):
             self.window.log.appendPlainText(str(index))
         self.assertLessEqual(self.window.log.document().blockCount(), 500)
 
+    def test_default_theme_and_report_are_dark(self):
+        from PySide6.QtGui import QPalette
+        from desktop_theme import BACKGROUND, TEXT
+        self.assertTrue(self.app.property("memorytestDarkTheme"))
+        self.assertEqual(self.app.palette().color(QPalette.Window).name(), BACKGROUND)
+        self.assertEqual(self.app.palette().color(QPalette.Text).name(), TEXT)
+        self.assertLess(self.window.pages["cpu_multi"].details.palette().color(QPalette.Base).lightness(), 50)
+        self.assertEqual(self.window.run_all.property("role"), "primary")
+        from PySide6.QtWidgets import QLabel
+        from app_version import RELEASE_TAG
+        labels = self.window.findChildren(QLabel)
+        self.assertFalse(any(item.text() == "MT" for item in labels))
+        self.assertEqual([item for item in labels if item.text() == RELEASE_TAG], [self.window.version])
+
+    def test_compact_layout_keeps_primary_controls_visible(self):
+        self.window.resize(880, 720)
+        self.window.show()
+        self.app.processEvents()
+        from PySide6.QtCore import QPoint
+        for widget in (self.window.run_all, self.window.cancel, self.window.output,
+                       self.window.progress, self.window.licenses):
+            bottom_right = widget.mapTo(self.window, widget.rect().bottomRight())
+            self.assertTrue(self.window.rect().contains(bottom_right), widget.text() if hasattr(widget, "text") else str(widget))
+            self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
+
     def test_single_tab_runs_only_its_module(self):
         with patch.object(self.window, "begin") as begin:
             self.window.pages["cpu_alu"].run.click()
@@ -124,6 +149,10 @@ class WindowTests(unittest.TestCase):
             self.assertIn("33,941", page.summary.text())
             self.assertIn("Integer", page.details.toPlainText())
             self.assertEqual(page.progress.value(), 1)
+            self.assertEqual(page.summary.property("tone"), "passed")
+            page.queued()
+            self.assertNotIn("33,941", page.summary.text())
+            self.assertNotIn("Integer", page.details.toPlainText())
             # A failed rerun must not keep old points or old result tables visible.
             page.started()
             page.completed(root, {"status": "interrupted"})
