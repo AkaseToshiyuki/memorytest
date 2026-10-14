@@ -209,7 +209,9 @@ int main(int argc, char **argv) {
     fcntl(connection, F_SETFD, FD_CLOEXEC);
 #endif
     struct sockaddr_in address = {0}; address.sin_family = AF_INET;
-    address.sin_port = htons((unsigned short)port); address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((unsigned short)port);
+    /* 127.0.0.1; INADDR_LOOPBACK is hidden by strict POSIX mode on macOS. */
+    address.sin_addr.s_addr = htonl(0x7f000001u);
     if (connect(connection, (struct sockaddr *)&address, sizeof(address))) { close_socket(connection); return 3; }
     char greeting[96];
     int length = snprintf(greeting, sizeof(greeting), "MTMON/1 %s\nready\n", argv[2]);
