@@ -114,7 +114,7 @@ class Child:
 
 def run_session(output, bin_dir, modes, threads, memory_mib, duration=0, enhanced=False,
                 control=None, parent_pid=None, language=None, theme="dark", event=emit,
-                capability_data=None, child_factory=Child, provider_command=None):
+                capability_data=None, child_factory=Child, provider_command=None, privileged_samples=None):
     caps = capability_data or capabilities(bin_dir)
     modes = validate_modes(modes, caps["modes"])
     if not 1 <= threads <= caps["threads"] or memory_mib < 1:
@@ -171,6 +171,8 @@ def run_session(output, bin_dir, modes, threads, memory_mib, duration=0, enhance
         binary = Path(bin_dir) / ("stress_cpu.exe" if os.name == "nt" else "stress_cpu")
         children["cpu"] = child_factory("cpu", [str(binary), str(threads), str(memory_mib)], directory, events)
         command = provider_command or (app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--bin-dir", str(bin_dir)] + (["--enhanced"] if enhanced else []))
+        if privileged_samples and not provider_command:
+            command += ["--privileged-samples", str(privileged_samples)]
         children["sensors"] = child_factory("sensors", command, directory, events)
         change(modes)
         with (directory / "samples.jsonl").open("w", encoding="utf-8") as samples:
@@ -284,6 +286,7 @@ def main(argv=None):
     parser.add_argument("--memory-mib", type=int)
     parser.add_argument("--duration", type=float, default=0)
     parser.add_argument("--enhanced", action="store_true")
+    parser.add_argument("--privileged-samples", type=Path)
     parser.add_argument("--control", type=Path)
     parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports")
@@ -299,7 +302,7 @@ def main(argv=None):
         return run_session(args.output_dir, args.bin_dir, [] if args.no_load else args.mode or ["cpu"], args.threads or caps["threads"],
                            args.memory_mib if args.memory_mib is not None else max(1, caps["default_memory_mib"]),
                            args.duration, args.enhanced, args.control, args.parent_pid, args.language, args.theme,
-                           capability_data=caps)
+                           capability_data=caps, privileged_samples=args.privileged_samples)
     except ValueError as exc:
         parser.error(str(exc))
 

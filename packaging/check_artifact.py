@@ -36,7 +36,18 @@ def check_install_payloads(info, data):
                 mounted = subprocess.check_output(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", str(package)])
                 mounts = [entry["mount-point"] for entry in plistlib.loads(mounted)["system-entities"] if "mount-point" in entry]
                 try:
-                    smoke(Path(mounts[0]) / "MemoryTest.app/Contents/MacOS/MemoryTest")
+                    mounted_app = Path(mounts[0]) / "MemoryTest.app"
+                    smoke(mounted_app / "Contents/MacOS/MemoryTest")
+                    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(mounted_app)], check=True, timeout=30)
+                    # Also validate the copied app and native Cocoa startup.
+                    # This does not simulate a browser's quarantine metadata.
+                    copied_app = root / "MemoryTest.app"
+                    shutil.copytree(mounted_app, copied_app, symlinks=True)
+                    cocoa_env = dict(os.environ, QT_QPA_PLATFORM="cocoa")
+                    subprocess.run([str(copied_app / "Contents/MacOS/MemoryTest"), "--idle-seconds", "2"],
+                                   env=cocoa_env, check=True, timeout=30)
+                    subprocess.run(["/usr/bin/open", "-n", "-W", str(copied_app), "--args", "--idle-seconds", "2"],
+                                   env=cocoa_env, check=True, timeout=30)
                 finally:
                     for mount in mounts:
                         subprocess.run(["hdiutil", "detach", mount], check=True)

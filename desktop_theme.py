@@ -1,6 +1,7 @@
 """Native themes sharing the report/plot color tokens."""
 from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QStyleFactory
+from desktop_widgets import AccessibleStyle
 from presentation import THEMES
 
 BACKGROUND, TEXT = THEMES["dark"]["background"], THEMES["dark"]["text"]
@@ -8,7 +9,9 @@ BACKGROUND, TEXT = THEMES["dark"]["background"], THEMES["dark"]["text"]
 
 def apply_theme(theme="dark"):
     app = QApplication.instance()
-    app.setStyle("Fusion")
+    if not app.property("memorytestAccessibleStyle"):
+        app.setStyle(AccessibleStyle(QStyleFactory.create("Fusion")))
+        app.setProperty("memorytestAccessibleStyle", True)
     p = THEMES[theme]
     palette = QPalette()
     roles = {QPalette.Window: "background", QPalette.WindowText: "text", QPalette.Base: "base",
@@ -47,11 +50,19 @@ QPushButton[role="primary"] {{ background: {p['accent']}; color: {p['background'
 QPushButton[role="quiet"] {{ background: transparent; color: {p['muted']}; }}
 QPushButton:disabled, QComboBox:disabled, QSpinBox:disabled, QCheckBox:disabled {{ color: {p['disabled']}; background: {p['base']}; }}
 QLineEdit, QSpinBox, QPlainTextEdit, QTextBrowser, QTableView {{ background: {p['base']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 5px; padding: 6px; selection-background-color: {p['selection']}; selection-color: {p['text']}; }}
-QSpinBox {{ padding-right: 22px; }}
+QSpinBox {{ padding-right: 34px; }}
+QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: 30px; height: 19px; background: {p['button']}; border-left: 1px solid {p['border']}; }}
+QSpinBox::up-button {{ subcontrol-position: top right; border-bottom: 1px solid {p['border']}; }}
+QSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {p['selection']}; }}
+QSpinBox::up-arrow, QSpinBox::down-arrow {{ width: 0; height: 0; }}
+QPushButton[role="stress-tab"] {{ background: transparent; border: none; border-left: 1px solid {p['border']}; border-radius: 0; padding: 10px 14px; }}
+QPushButton[role="stress-tab"]:checked {{ color: {p['accent']}; border-bottom: 2px solid {p['accent']}; }}
 QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']}; selection-background-color: {p['selection']}; }}
 QHeaderView::section {{ background: {p['button']}; color: {p['text']}; border: none; padding: 8px; }}
 QTableView {{ gridline-color: {p['border']}; }}
 QCheckBox {{ spacing: 8px; min-height: 22px; }}
+QCheckBox::indicator, QTableView::indicator {{ width: 20px; height: 20px; }}
 QProgressBar {{ background: {p['base']}; border: 1px solid {p['border']}; border-radius: 4px; text-align: center; min-height: 18px; max-height: 18px; }}
 QProgressBar::chunk {{ background: {p['selection']}; }}
 QScrollArea {{ border: none; background: transparent; }}

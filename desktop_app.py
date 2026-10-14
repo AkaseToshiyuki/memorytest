@@ -7,6 +7,9 @@ def main():
     for stream in (sys.stdout, sys.stderr):
         if stream is not None and hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    if len(sys.argv) > 1 and sys.argv[1] == "--hardware-info":
+        from system_info import main as hardware
+        return hardware()
     if len(sys.argv) > 1 and sys.argv[1] in {"--stress-worker", "--gpu-worker", "--sensor-worker"}:
         if sys.argv[1] == "--stress-worker":
             from run_stress import main as worker
@@ -30,6 +33,8 @@ def main():
     from desktop_window import MainWindow
     window = MainWindow()
     window.show()
+    if "--smoke-gui" not in sys.argv and "--idle-seconds" not in sys.argv:
+        QTimer.singleShot(600, window.probe_monitor_access)
     if "--smoke-gui" in sys.argv:
         QTimer.singleShot(300, app.quit)
     if "--idle-seconds" in sys.argv:

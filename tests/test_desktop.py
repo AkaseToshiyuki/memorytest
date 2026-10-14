@@ -76,7 +76,7 @@ class WindowTests(unittest.TestCase):
         QCoreApplication.setApplicationName("MemoryTestTest")
 
     def setUp(self):
-        self.window = MainWindow()
+        self.window = MainWindow(autodetect=False)
         self.window.language = "en"
         self.window.theme = "dark"
         self.window.retranslate()

@@ -97,6 +97,7 @@ jobs:
           python -m unittest discover -s tests -p test_cache_report.py -v
           python -m unittest discover -s tests -p test_presentation.py -v
           python -m unittest discover -s tests -p test_stress.py -v
+          python -m unittest discover -s tests -p test_monitoring.py -v
       - name: Workflow and platform contracts
         if: runner.os != 'Windows'
         run: |
@@ -114,6 +115,12 @@ jobs:
           name: MemoryTest-test-${{ matrix.label }}-unsigned
           path: release/desktop/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-preview-${{ matrix.label }}
+          path: build/ui-revision/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

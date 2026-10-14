@@ -21,12 +21,25 @@ def main():
     binary = args.binary.resolve()
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     results = {"display_mode": "offscreen", "binary": str(binary)}
-    with subprocess.Popen([str(binary), "--idle-seconds", "15"], env=env,
+    with subprocess.Popen([str(binary), "--idle-seconds", "25"], env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
         time.sleep(2)
         if process.poll() is not None:
             raise RuntimeError(process.stderr.read().decode(errors="replace"))
         sample = psutil.Process(process.pid)
+        results["startup_children_at_2s"] = len(sample.children(recursive=True))
+        # The one-shot hardware overview can use system_profiler/CIM for 10s.
+        # Do not mislabel that discovery work as steady-state idle overhead.
+        settle_start = time.monotonic()
+        quiet_samples = 0
+        while time.monotonic() - settle_start < 12:
+            quiet_samples = quiet_samples + 1 if not sample.children(recursive=True) else 0
+            if quiet_samples >= 2:
+                break
+            time.sleep(.5)
+        results["discovery_settle_seconds_after_2s"] = time.monotonic() - settle_start
+        if quiet_samples < 2:
+            raise RuntimeError("Hardware discovery did not settle before idle measurement")
         results["idle_rss_bytes"] = sample.memory_info().rss
         results["idle_children"] = len(sample.children(recursive=True))
         before = sample.cpu_times()
@@ -36,7 +49,7 @@ def main():
         elapsed = time.monotonic() - start
         results["idle_cpu_percent_one_core"] = max(0, 100 * ((after.user - before.user) + (after.system - before.system)) / elapsed)
         results["idle_sample_seconds"] = elapsed
-        if process.wait(timeout=15) != 0:
+        if process.wait(timeout=25) != 0:
             raise RuntimeError("GUI failed to exit")
     with tempfile.TemporaryDirectory(prefix="memorytest-packaged-run-") as directory:
         root = Path(directory)

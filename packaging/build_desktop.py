@@ -74,6 +74,8 @@ def engines(directory, modules=None):
     if modules is None or "cpu_multi" in modules:
         run([directory / ("test_cpu_multi" + suffix), "--self-test"])
     if modules is None:
+        run(compiler + ["-O2", "-std=c11", str(ROOT / "src/telemetry_privileged.c"),
+                        "-o", str(directory / ("telemetry_privileged" + suffix))] + (["-lws2_32", "-static-libgcc"] if windows else []))
         run(compiler + ["-O2", "-std=c11", "-pthread", "-ffp-contract=off", str(ROOT / "src/stress_cpu.c"),
                         "-lm", "-o", str(directory / ("stress_cpu" + suffix))] + (["-static-libgcc"] if windows else []))
         run([directory / ("stress_cpu" + suffix), "--self-test"])

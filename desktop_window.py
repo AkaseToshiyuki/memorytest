@@ -4,22 +4,23 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QUrl, QTranslator, QLibraryInfo
+from PySide6.QtCore import Qt, QProcess, QSettings, QStandardPaths, QUrl, QTranslator, QLibraryInfo, QTimer
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QGridLayout, QMessageBox)
 from benchmark_registry import ROOT, TESTS
 from process_control import app_command
 from desktop_results import ModulePage, supported
 from desktop_theme import apply_theme, card, label, set_tone
-from i18n import tr, default_language
+from desktop_widgets import ReadableSpinBox, ElidingLabel
+from i18n import tr, display, default_language
 from result_model import GROUPS, ModuleResult
 from app_version import RELEASE_TAG
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, autodetect=True):
         super().__init__()
         icon_path = ROOT / "icons/memorytest.svg"
         if not icon_path.is_file():
@@ -85,9 +86,28 @@ class MainWindow(QMainWindow):
         heading = QHBoxLayout()
         heading.addWidget(self.text("overview", "title"))
         heading.addStretch()
-        self.stress_button = self.button("stress", lambda: self.tabs.setCurrentWidget(self.stress_page))
-        heading.addWidget(self.stress_button)
         layout.addLayout(heading)
+        self.hardware_info = {}
+        self.hardware_card, hardware_body = card()
+        hardware_body.setSpacing(4)
+        hardware_body.addWidget(self.text("system", "section"))
+        hardware_grid = QGridLayout()
+        hardware_grid.setHorizontalSpacing(18)
+        hardware_grid.setVerticalSpacing(5)
+        self.hardware_labels = {}
+        for index, key in enumerate(("cpu_model", "physical", "memory_total", "nominal_frequency", "memory_rate", "gpu")):
+            column, row = index % 3, (index // 3) * 2
+            hardware_grid.addWidget(self.text(key, "muted"), row, column)
+            value = ElidingLabel()
+            value.setMinimumWidth(0)
+            self.hardware_labels[key] = value
+            hardware_grid.addWidget(value, row + 1, column)
+            hardware_grid.setColumnStretch(column, 1)
+        hardware_body.addLayout(hardware_grid)
+        layout.addWidget(self.hardware_card)
+        self.hardware_process = QProcess(self)
+        self.hardware_process.finished.connect(self.hardware_finished)
+        self.hardware_process.errorOccurred.connect(lambda *_: self.refresh_hardware())
         columns = QHBoxLayout()
         module_card, module_layout = card()
         self.modules, self.labels = {}, {}
@@ -115,7 +135,7 @@ class MainWindow(QMainWindow):
         config_card, config = card()
         config.addWidget(self.text("config", "section"))
         config.addWidget(self.text("compute_threads", "muted"))
-        self.threads = QSpinBox()
+        self.threads = ReadableSpinBox()
         self.threads.setRange(0, min(262144, os.cpu_count() or 1))
         config.addWidget(self.threads)
         config.addWidget(self.text("output", "muted"))
@@ -150,12 +170,14 @@ class MainWindow(QMainWindow):
         row.addStretch()
         self.status = label("", "status")
         self.status.setWordWrap(True)
-        row.addWidget(self.status)
+        self.status.setMaximumWidth(230)
+        footer.insertWidget(1, self.status)
         progress_layout.addLayout(row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        progress_layout.addWidget(self.progress)
+        self.progress.setFixedWidth(200)
+        footer.insertWidget(2, self.progress)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
@@ -178,11 +200,106 @@ class MainWindow(QMainWindow):
         from desktop_stress import StressPage
         self.stress_page = StressPage(self)
         self.tabs.addTab(self.stress_page, "")
+        self.tabs.tabBar().setTabVisible(4, False)
+        self.stress_button = self.button("stress", lambda: self.tabs.setCurrentWidget(self.stress_page))
+        self.stress_button.setCheckable(True)
+        self.stress_button.setProperty("role", "stress-tab")
+        self.tabs.setCornerWidget(self.stress_button, Qt.TopRightCorner)
+        self.tabs.currentChanged.connect(lambda index: self.stress_button.setChecked(index == 4))
+        from monitor_access import MonitorAccess
+        self.monitor_access = MonitorAccess()
+        self.permission_probe = QProcess(self)
+        self.permission_probe.finished.connect(self.monitor_probe_finished)
+        self.authorization_timer = QTimer(self)
+        self.authorization_timer.timeout.connect(self.monitor_authorized)
         self.open_report.setEnabled(False)
         self.language_combo.currentIndexChanged.connect(self.preferences_changed)
         self.theme_combo.currentIndexChanged.connect(self.preferences_changed)
         self.retranslate()
         self.refresh_controls()
+        if autodetect:
+            QTimer.singleShot(0, self.load_hardware)
+
+    def probe_monitor_access(self):
+        if self.closing or self.settings.value("monitorPermissionAskedV2", False, type=bool):
+            return
+        command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--once", "--enhanced", "--bin-dir", str(ROOT / "bin")]
+        self.permission_probe.start(command[0], command[1:])
+
+    def monitor_probe_finished(self, *_):
+        if self.closing:
+            return
+        try:
+            sample = json.loads(bytes(self.permission_probe.readAllStandardOutput())[:131072])
+        except (ValueError, TypeError):
+            return
+        self.settings.setValue("monitorPermissionAskedV2", True)
+        if sample.get("needs_admin"):
+            self.request_monitor_access(explain=True)
+
+    def request_monitor_access(self, explain=False):
+        if self.monitor_access.status == "ready":
+            self.stress_page.sync_access()
+            return
+        if explain:
+            answer = QMessageBox.question(self, tr("monitor_permission_title", self.language),
+                tr("monitor_permission_body", self.language), QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+        if not self.monitor_access.available():
+            self.stress_page.access_status_key = "monitor_unavailable"
+            self.stress_page.retranslate()
+            return
+        self.monitor_access.start()
+        self.stress_page.access_status_key = "monitor_authorizing"
+        self.stress_page.retranslate()
+        self.authorization_timer.start(200)
+
+    def monitor_authorized(self):
+        status = self.monitor_access.status
+        if status == "authorizing":
+            return
+        if self.closing:
+            self.authorization_timer.stop()
+            return
+        key = "monitor_authorized" if status == "ready" else "monitor_failed" if status == "error" else "monitor_denied"
+        if status == "ready":
+            self.authorization_timer.setInterval(1000)
+        else:
+            self.authorization_timer.stop()
+        if self.stress_page.access_status_key == key:
+            return
+        self.stress_page.access_status_key = key
+        self.stress_page.enhanced.setChecked(status == "ready")
+        self.stress_page.sync_access()
+        self.stress_page.retranslate()
+
+    def load_hardware(self):
+        if self.closing:
+            return
+        command = app_command("hardware-info")
+        self.hardware_process.start(command[0], command[1:])
+
+    def hardware_finished(self, *_):
+        try:
+            data = bytes(self.hardware_process.readAllStandardOutput())
+            self.hardware_info = json.loads(data[:65536])
+        except (ValueError, TypeError):
+            self.hardware_info = {}
+        self.refresh_hardware()
+
+    def refresh_hardware(self):
+        for key, widget in self.hardware_labels.items():
+            value = self.hardware_info.get(key)
+            text = str(value) if value is not None else tr("hardware_missing", self.language)
+            if key == "physical" and value is not None:
+                text = tr("core_summary", self.language, physical=value, logical=self.hardware_info.get("logical", "—"))
+                if "performance" in self.hardware_info or "efficiency_cores" in self.hardware_info:
+                    text += " · " + tr("hybrid_summary", self.language, p=self.hardware_info.get("performance", "—"), e=self.hardware_info.get("efficiency_cores", "—"))
+            elif key == "memory_total" and value is not None:
+                text += " GiB"
+            widget.setText(text)
+            widget.setToolTip(text)
 
     def text(self, key, role):
         widget = label("", role)
@@ -249,6 +366,7 @@ class MainWindow(QMainWindow):
         for page in self.pages.values():
             page.retranslate()
         self.stress_page.retranslate()
+        self.refresh_hardware()
 
     def open_path(self, path):
         if path and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
@@ -411,6 +529,10 @@ class MainWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event):
+        self.closing = True
+        if self.hardware_process.state() != QProcess.NotRunning:
+            self.stress_page.kill_tree(self.hardware_process)
+            self.hardware_process.waitForFinished(1000)
         if self.benchmark_active or self.stress_active:
             self.closing = True
             if self.benchmark_active:
@@ -419,5 +541,10 @@ class MainWindow(QMainWindow):
                 self.stress_page.stop()
             event.ignore()
         else:
+            self.authorization_timer.stop()
+            if self.permission_probe.state() != QProcess.NotRunning:
+                self.stress_page.kill_tree(self.permission_probe)
+                self.permission_probe.waitForFinished(1000)
+            self.monitor_access.close()
             self.stress_page.shutdown()
             event.accept()

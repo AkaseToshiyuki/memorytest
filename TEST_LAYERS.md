@@ -102,12 +102,28 @@ threads; the stress check uses one thread, 1 MiB, and a 1.2-second limit.
 - `test_stress.py`: independent Python integer and Decimal closed-form references,
   bounded native CPU/FPU/cache/RAM switching, sensor disappearance/permissions,
   shared budgets, simulated GPU switching, thermal/fault/parent-exit cleanup.
+- `test_monitoring.py`: independent E/P/native-cluster output fixtures and unit
+  conversions, SMC generation-specific region names, hardware-vs-OS frequency
+  provenance, hardware overview missing fields, stale sensor expiry, fixed-command
+  authorization quoting, IPC rejection, pause and parent-exit cleanup. The Linux
+  bridge test reads existing sensors as the current user; it does not elevate.
+- Presentation regression includes fixed checkbox/equal initial column widths,
+  user resizing, larger spin targets, 1–10-minute plot bounds, all temperature
+  series, permission refusal/failure, and compact home/stress screenshots in all
+  four language/theme combinations (`build/ui-revision/`).
 - Native desktop CI builds six targets and checks extracted installer startup,
-  heavyweight-dependency exclusion, idle resources and a monitoring-only session.
+  heavyweight-dependency exclusion, idle resources after one-shot discovery and
+  a monitoring-only session. macOS additionally verifies bundle signatures and
+  a copied application's Cocoa/LaunchServices startup; this does not reproduce
+  browser quarantine or third-party archive-tool metadata.
   It does not certify real GPU stress, SMC access on every Mac, or Windows LHM.
 
-Verification on 2026-10-14 before installer CI: 89 discovered, 83 passed, 6
-platform-dependent checks skipped on Linux x64 (27.445 seconds). An additional
+Revision verification on 2026-10-14 before installer CI: 107 discovered, 101
+passed, 6 platform-dependent checks skipped on Linux x64 (55.044 seconds).
+Subsequent focused checks cover the final small UI/encoding changes and two
+additional hardware-overview fixtures: monitoring 15/15 (1.701 seconds),
+presentation 14/14 (9.427 seconds); strict C11 helper compilation also passed.
+During the preceding implementation, an additional
 1.5-second OpenCL-only session on a Tesla P4 completed with validated dispatch
 heartbeats and a duration stop. This is not long-duration stability coverage.
 Metal, physical Mac sensor access and Windows GPU/sensor coverage remain

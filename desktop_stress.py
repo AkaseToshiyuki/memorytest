@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QPushButton, QScr
 
 from benchmark_registry import ROOT
 from desktop_theme import label
+from desktop_widgets import ReadableSpinBox
 from i18n import display, tr
 from presentation import THEMES, curve_color
 from process_control import app_command
@@ -25,6 +27,7 @@ class LivePlot(QWidget):
         self.window = window
         self.samples = deque(maxlen=601)
         self.catalog, self.visible, self.colors = {}, set(), {}
+        self.window_seconds = 300
         self.setMinimumHeight(230)
 
     def append(self, elapsed, values):
@@ -38,28 +41,44 @@ class LivePlot(QWidget):
         self.setMinimumHeight(max(230, len(units) * 235))
         self.update()
 
+    def set_window_minutes(self, minutes):
+        self.window_seconds = min(10, max(1, int(minutes))) * 60
+        self.update()
+
+    def visible_samples(self):
+        start = max(0, self.samples[-1][0] - self.window_seconds) if self.samples else 0
+        return [(elapsed, values) for elapsed, values in self.samples if elapsed >= start]
+
+    def panel_units(self):
+        order = {"°C": 0, "%": 1, "MHz": 2, "W": 3, "V": 4, "RPM": 5}
+        return sorted({self.catalog[key]["unit"] for key in self.visible if key in self.catalog}, key=lambda unit: (order.get(unit, 99), unit))
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         palette = THEMES[self.window.theme]
         painter.fillRect(self.rect(), QColor(palette["surface"]))
         selected = [key for key in self.catalog if key in self.visible]
-        units = list(dict.fromkeys(self.catalog[key]["unit"] for key in selected))
+        units = self.panel_units()
         if not units or not self.samples:
             painter.setPen(QColor(palette["muted"]))
             painter.drawText(self.rect(), Qt.AlignCenter, tr("no_data", self.window.language))
             return
-        start = max(0, self.samples[-1][0] - 600)
+        samples = self.visible_samples()
+        start = max(0, self.samples[-1][0] - self.window_seconds)
         end = max(start + 1, self.samples[-1][0])
         for panel, unit in enumerate(units):
+            if not event.rect().intersects(QRectF(0, panel * 235, self.width(), 235).toRect()):
+                continue
             ids = [key for key in selected if self.catalog[key]["unit"] == unit]
             top, bottom = panel * 235 + 45, panel * 235 + 195
             left, right = 65, max(100, self.width() - 20)
-            numbers = [values[key] for _, values in self.samples for key in ids if isinstance(values.get(key), (int, float)) and math.isfinite(values[key])]
+            numbers = [values[key] for _, values in samples for key in ids if isinstance(values.get(key), (int, float)) and math.isfinite(values[key])]
             maximum = max(numbers, default=1) or 1
             minimum = min(0, min(numbers, default=0))
             painter.setPen(QColor(palette["text"]))
-            painter.drawText(QRectF(12, panel * 235 + 4, 75, 25), Qt.AlignLeft, unit)
+            title = tr(self.catalog[ids[0]]["kind"], self.window.language) + " · " + unit
+            painter.drawText(QRectF(12, panel * 235 + 4, self.width() - 24, 25), Qt.AlignLeft, title)
             for i in range(4):
                 y = bottom - (bottom - top) * i / 3
                 painter.setPen(QColor(palette["border"]))
@@ -73,7 +92,11 @@ class LivePlot(QWidget):
             for key in ids:
                 painter.setPen(QPen(QColor(curve_color(self.colors[key], self.window.theme)), 1.8))
                 path, connected = QPainterPath(), False
-                for elapsed, values in self.samples:
+                previous_elapsed = None
+                for elapsed, values in samples:
+                    if previous_elapsed is not None and elapsed - previous_elapsed > 2.5:
+                        connected = False
+                    previous_elapsed = elapsed
                     value = values.get(key)
                     if not isinstance(value, (int, float)) or not math.isfinite(value):
                         connected = False
@@ -100,9 +123,11 @@ class StressPage(QWidget):
         self.status_key = "ready"
         self.has_temperature = False
         self.permission_denied = False
+        self.access_status_key = "monitor_standard"
         self.catalog, self.stats = {}, {}
         self.preview_stats = Statistics()
         self.preview_counter = 0
+        self.preview_started = time.monotonic()
         self.preview_restart = False
         self.bindings, self.buffers = [], {}
         layout = QVBoxLayout(self)
@@ -126,7 +151,7 @@ class StressPage(QWidget):
         modes.addStretch()
         layout.addLayout(modes)
         config = QHBoxLayout()
-        self.threads, self.memory, self.duration = QSpinBox(), QSpinBox(), QSpinBox()
+        self.threads, self.memory, self.duration = (ReadableSpinBox() for _ in range(3))
         self.threads.setRange(1, 256)
         self.memory.setRange(1, 2048)
         self.memory.setSuffix(" MiB")
@@ -149,22 +174,44 @@ class StressPage(QWidget):
             control.addWidget(widget)
         control.addStretch()
         layout.addLayout(control)
+        monitor = QHBoxLayout()
+        window_label = label("", "muted")
+        self.bindings.append((window_label, "plot_window"))
+        monitor.addWidget(window_label)
+        self.window_minutes = ReadableSpinBox()
+        self.window_minutes.setRange(1, 10)
+        self.window_minutes.setValue(5)
+        self.window_minutes.setFixedWidth(170)
+        monitor.addWidget(self.window_minutes)
+        monitor.addStretch()
+        layout.addLayout(monitor)
         self.status = label("", "status")
         layout.addWidget(self.status)
         self.warning = label("", "muted")
         self.warning.setWordWrap(True)
         layout.addWidget(self.warning)
+        self.access_status = label("", "muted")
+        self.access_status.setWordWrap(True)
+        layout.addWidget(self.access_status)
         splitter = QSplitter(Qt.Vertical)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.plot = LivePlot(window)
+        self.window_minutes.valueChanged.connect(self.plot.set_window_minutes)
         scroll.setWidget(self.plot)
         splitter.addWidget(scroll)
         self.table = QTableWidget(0, 7)
         self.table.verticalHeader().hide()
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setMinimumSectionSize(48)
+        self.table.setColumnWidth(0, 52)
+        self.columns_initialized = False
+        self.columns_user_resized = False
+        self.adjusting_columns = False
+        self.table.horizontalHeader().sectionResized.connect(self.column_resized)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.itemChanged.connect(self.sensor_toggled)
         splitter.addWidget(self.table)
@@ -194,7 +241,9 @@ class StressPage(QWidget):
         self.enhanced.setToolTip(tr("enhanced_hint", lang))
         self.duration.setSpecialValueText(tr("manual_stop", lang))
         self.duration.setSuffix(" " + tr("minutes", lang) if self.duration.value() else "")
+        self.window_minutes.setSuffix(" " + tr("minutes", lang))
         self.status.setText(tr(self.status_key, lang))
+        self.access_status.setText(tr(self.access_status_key, lang))
         self.warning.setText(tr("stress_warning", lang) + (" " + tr("no_temperature", lang) if not self.has_temperature else "") +
                              (" " + tr("sensor_denied", lang) if self.permission_denied else ""))
         self.table.setHorizontalHeaderLabels([tr(key, lang) for key in ("show", "sensors", "unit", "current", "minimum", "maximum", "average")])
@@ -211,15 +260,39 @@ class StressPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not self.columns_initialized:
+            QTimer.singleShot(0, self.equalize_columns)
         if self.caps is None and self.probe.state() == QProcess.NotRunning:
             command = app_command("stress-worker") + ["--probe", "--bin-dir", str(ROOT / "bin")]
             self.probe.start(command[0], command[1:])
         self.start_preview()
+        self.sync_access()
         self.refresh_controls()
+
+    def equalize_columns(self):
+        if self.columns_initialized or self.table.viewport().width() < 100:
+            return
+        width = max(48, (self.table.viewport().width() - self.table.columnWidth(0)) // 6)
+        self.adjusting_columns = True
+        for column in range(1, 7):
+            self.table.setColumnWidth(column, width)
+        self.adjusting_columns = False
+        self.columns_initialized = True
+
+    def column_resized(self, section, *_):
+        if section and self.columns_initialized and not self.adjusting_columns:
+            self.columns_user_resized = True
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "table") and not self.columns_user_resized:
+            self.columns_initialized = False
+            QTimer.singleShot(0, self.equalize_columns)
 
     def hideEvent(self, event):
         self.stop_preview()
         super().hideEvent(event)
+        self.sync_access()
 
     def start_preview(self):
         if self.active or self.run_dir or self.preview.state() != QProcess.NotRunning or not self.isVisible():
@@ -227,6 +300,7 @@ class StressPage(QWidget):
         command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--bin-dir", str(ROOT / "bin")]
         if self.enhanced.isChecked():
             command.append("--enhanced")
+            command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
         self.buffers[self.preview] = b""
         self.preview.start(command[0], command[1:])
 
@@ -235,11 +309,19 @@ class StressPage(QWidget):
             self.preview.terminate()
 
     def enhanced_changed(self):
+        if self.enhanced.isChecked():
+            self.window.request_monitor_access()
+        self.sync_access()
         self.preview_restart = self.preview.state() != QProcess.NotRunning
         if self.preview_restart:
             self.stop_preview()
         else:
             self.start_preview()
+
+    def sync_access(self):
+        if hasattr(self.window, "monitor_access"):
+            self.window.monitor_access.set_active(self.enhanced.isChecked() and
+                (self.active or (self.isVisible() and not self.run_dir)))
 
     def preview_finished(self, *_):
         if self.preview_restart:
@@ -263,7 +345,7 @@ class StressPage(QWidget):
                     if not self.active:
                         self.preview_stats.sample(data["values"])
                         self.preview_counter += 1
-                        self.sample(dict(data, statistics=self.preview_stats.rows, elapsed=self.preview_counter))
+                        self.sample(dict(data, statistics=self.preview_stats.rows, elapsed=time.monotonic() - self.preview_started))
                 elif raw.startswith("@memorytest "):
                     self.handle(json.loads(raw[12:]))
             except (ValueError, KeyError, TypeError):
@@ -294,6 +376,7 @@ class StressPage(QWidget):
             self.retranslate()
 
     def sample(self, data):
+        old_keys = set(self.catalog)
         self.catalog.update(data.get("catalog", {}))
         self.stats = data.get("statistics", {})
         self.has_temperature = data.get("has_temperature", False)
@@ -301,17 +384,24 @@ class StressPage(QWidget):
         for key, item in self.catalog.items():
             if key not in self.plot.colors:
                 self.plot.colors[key] = len(self.plot.colors)
-                if len(self.plot.visible) < 6 and (item["kind"] == "utilization" or
-                    not any(self.catalog[k]["kind"] == item["kind"] for k in self.plot.visible)):
-                    self.plot.visible.add(key)
+                self.plot.visible.add(key)
         self.plot.catalog = self.catalog
         self.plot.append(data["elapsed"], data["values"])
         self.elapsed.setText(f'{int(data["elapsed"])//60}:{int(data["elapsed"])%60:02d}')
-        self.retranslate()
+        # No widget relabelling, geometry negotiation or full retranslation at 1 Hz.
+        self.status.setText(tr(self.status_key, self.window.language))
+        self.warning.setText(tr("stress_warning", self.window.language) +
+            (" " + tr("no_temperature", self.window.language) if not self.has_temperature else "") +
+            (" " + tr("sensor_denied", self.window.language) if self.permission_denied else ""))
+        self.refresh_table()
+        if old_keys != set(self.catalog):
+            self.plot.refresh()
 
     def refresh_table(self):
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.catalog))
+        self.table.setUpdatesEnabled(False)
+        if self.table.rowCount() != len(self.catalog):
+            self.table.setRowCount(len(self.catalog))
         for row, (key, sensor) in enumerate(self.catalog.items()):
             checkbox = self.table.item(row, 0)
             if checkbox is None:
@@ -327,10 +417,14 @@ class StressPage(QWidget):
                 if item is None:
                     item = QTableWidgetItem()
                     self.table.setItem(row, column, item)
-                item.setText(value)
+                if item.text() != value:
+                    item.setText(value)
+                if column == 1:
+                    item.setToolTip(value + "\n" + key)
                 if column == 1:
                     item.setForeground(QColor(curve_color(self.plot.colors.get(key, 0), self.window.theme)))
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
 
     def sensor_toggled(self, item):
         if item.column() != 0:
@@ -391,6 +485,8 @@ class StressPage(QWidget):
             command.append("--no-load")
         if self.enhanced.isChecked():
             command.append("--enhanced")
+            command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
+        self.sync_access()
         self.process.start(command[0], command[1:])
         self.retranslate()
 
@@ -434,6 +530,7 @@ class StressPage(QWidget):
             self.control.cleanup()
             self.control = None
         self.window.set_stress_running(False)
+        self.sync_access()
         self.retranslate()
 
     def export(self):
@@ -441,7 +538,8 @@ class StressPage(QWidget):
             try:
                 from stress_report import build_stress_report
                 self.report = self.run_dir / "stress_report.html"
-                build_stress_report(self.run_dir, self.report, self.window.language, self.window.theme)
+                build_stress_report(self.run_dir, self.report, self.window.language, self.window.theme,
+                                    window_seconds=self.plot.window_seconds)
                 self.window.open_path(self.report)
             except (OSError, ValueError):
                 self.status_key = "io_error"

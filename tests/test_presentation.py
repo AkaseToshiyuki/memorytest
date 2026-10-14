@@ -112,7 +112,7 @@ class NativePresentationTests(unittest.TestCase):
         QCoreApplication.setApplicationName("MemoryTestPresentationTest")
 
     def setUp(self):
-        self.window = MainWindow()
+        self.window = MainWindow(autodetect=False)
         self.addCleanup(self.window.close)
 
     def test_language_theme_preserve_selection_running_state_and_result(self):
@@ -197,6 +197,111 @@ class NativePresentationTests(unittest.TestCase):
         self.assertFalse(page.plot.visible)
         self.assertEqual(page.stats["s"]["average"], 20)
         self.assertEqual(page.plot.colors["s"], 3)
+
+    def test_monitoring_window_temperature_order_and_all_sensors(self):
+        page = self.window.stress_page
+        catalog = {"u": {"label": ref("cpu_usage"), "kind": "utilization", "unit": "%"},
+                   "f": {"label": ref("cpu_active_frequency"), "kind": "frequency", "unit": "MHz"}}
+        catalog.update({f"t{i}": {"label": ref("identified_sensor", name=ref("thermal_zone"), identity=f"T{i}"),
+                                  "kind": "temperature", "unit": "°C"} for i in range(30)})
+        values = {key: 40 for key in catalog}
+        page.sample({"catalog": catalog, "values": values, "elapsed": 0})
+        self.assertEqual(page.plot.panel_units(), ["°C", "%", "MHz"])
+        self.assertTrue(set(catalog) <= page.plot.visible)
+        for elapsed in range(1, 1001):
+            page.plot.append(elapsed, values)
+        self.assertEqual(page.window_minutes.value(), 5)
+        self.assertEqual(page.plot.visible_samples()[0][0], 700)
+        page.window_minutes.setValue(1)
+        self.assertEqual(page.plot.visible_samples()[0][0], 940)
+        page.window_minutes.setValue(10)
+        self.assertEqual(page.plot.visible_samples()[0][0], 400)
+        page.window_minutes.setValue(999)
+        self.assertEqual(page.window_minutes.value(), 10)
+        self.assertLessEqual(len(page.plot.samples), 601)
+
+    def test_monitor_columns_controls_and_four_visual_combinations(self):
+        from PySide6.QtCore import QPoint, QProcess
+        from PySide6.QtWidgets import QHeaderView, QStyle, QStyleOptionSpinBox
+        from benchmark_registry import ROOT
+        page = self.window.stress_page
+        page.caps = {"modes": {"cpu": True}, "threads": 1}
+        page.run_dir = Path("/fixture")  # No real preview or capability probe.
+        page.threads.setValue(1)
+        for item in page.modes.values():
+            item.setEnabled(True)
+        page.sample({"catalog": {"temperature": {"label": ref("identified_sensor", name=ref("p_zone"), identity="Tp01"),
+            "kind": "temperature", "unit": "°C"}}, "values": {"temperature": 42}, "elapsed": 1,
+            "has_temperature": True,
+            "statistics": {"temperature": dict(current=42, minimum=40, maximum=44, average=42)}})
+        self.window.resize(880, 720)
+        self.window.show()
+        self.window.stress_button.click()
+        self.app.processEvents()
+        self.assertTrue(page.isVisible())
+        self.assertEqual(self.window.process.state(), QProcess.NotRunning)
+        self.assertEqual(page.table.horizontalHeader().sectionResizeMode(0), QHeaderView.Fixed)
+        widths = [page.table.columnWidth(column) for column in range(1, 7)]
+        self.assertLessEqual(max(widths) - min(widths), 1)
+        for spin in (page.threads, page.memory, page.duration, page.window_minutes):
+            option = QStyleOptionSpinBox()
+            spin.initStyleOption(option)
+            rect = spin.style().subControlRect(QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxUp, spin)
+            self.assertGreaterEqual(rect.width(), 28)
+            self.assertGreaterEqual(rect.height(), 18)
+        page.table.horizontalHeader().resizeSection(1, 207)
+        page.refresh_table(); self.window.resize(1120, 850); self.app.processEvents()
+        self.assertEqual(page.table.columnWidth(1), 207)
+        evidence = ROOT / "build/ui-revision"
+        evidence.mkdir(parents=True, exist_ok=True)
+        for language in ("zh", "en"):
+            for theme in ("dark", "light"):
+                self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
+                self.window.theme_combo.setCurrentIndex(self.window.theme_combo.findData(theme))
+                self.app.processEvents()
+                self.window.grab().save(str(evidence / f"stress-{language}-{theme}.png"))
+                for widget in (page.start_button, page.enhanced, page.window_minutes):
+                    self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
+
+    def test_hardware_card_at_compact_window_in_all_themes(self):
+        from PySide6.QtCore import QPoint
+        from benchmark_registry import ROOT
+        self.window.hardware_info = {"cpu_model": "Example processor with a very long model name 123456789",
+            "physical": 12, "logical": 16, "performance": 8, "efficiency_cores": 4,
+            "memory_total": 24.0, "nominal_frequency": "3200 MHz", "memory_rate": "6400 MT/s",
+            "gpu": "Example integrated GPU / Example additional discrete graphics device"}
+        self.window.resize(880, 720)
+        self.window.show()
+        self.window.tabs.setCurrentIndex(0)
+        evidence = ROOT / "build/ui-revision"
+        evidence.mkdir(parents=True, exist_ok=True)
+        for language in ("zh", "en"):
+            for theme in ("dark", "light"):
+                self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
+                self.window.theme_combo.setCurrentIndex(self.window.theme_combo.findData(theme))
+                self.window.retranslate()
+                self.app.processEvents()
+                self.window.grab().save(str(evidence / f"home-{language}-{theme}.png"))
+                for widget in self.window.hardware_labels.values():
+                    self.assertTrue(widget.text())
+                    self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(widget.width(), widget.height()))))
+
+    def test_permission_decline_keeps_benchmarks_unprivileged(self):
+        from PySide6.QtWidgets import QMessageBox
+        with patch("desktop_window.QMessageBox.question", return_value=QMessageBox.No), \
+             patch.object(self.window.monitor_access, "start") as start:
+            self.window.request_monitor_access(explain=True)
+            start.assert_not_called()
+        self.assertFalse(self.window.stress_page.enhanced.isChecked())
+        self.assertFalse(self.window.benchmark_active)
+
+    def test_authorized_helper_failure_is_not_shown_as_ready(self):
+        self.window.monitor_access.status = "error"
+        self.window.stress_page.access_status_key = "monitor_authorized"
+        self.window.monitor_authorized()
+        self.assertEqual(self.window.stress_page.access_status_key, "monitor_failed")
+        self.assertFalse(self.window.stress_page.enhanced.isChecked())
+        self.assertFalse(self.window.authorization_timer.isActive())
 
 
 if __name__ == "__main__":

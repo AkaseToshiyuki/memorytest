@@ -44,12 +44,23 @@ static int call(io_connect_t connection, SensorPacket *request, SensorPacket *re
     return status == KERN_SUCCESS && bytes == sizeof(*response) && response->result == 0 ? 0 : -1;
 }
 
+typedef struct { uint32_t key, size, type; } SensorMetadata;
+static SensorMetadata metadata[257];
+static unsigned metadata_count;
+
 static double read_sensor(io_connect_t connection, uint32_t key) {
     SensorPacket request = {0}, response = {0};
-    request.key = key; request.command = 9;
-    if (call(connection, &request, &response) || response.info.size > 32 || !response.info.size) return NAN;
-    uint32_t type = response.info.type;
-    request.info.size = response.info.size; request.command = 5;
+    request.key = key;
+    SensorMetadata *entry = NULL;
+    for (unsigned i = 0; i < metadata_count; ++i) if (metadata[i].key == key) { entry = &metadata[i]; break; }
+    if (!entry) {
+        request.command = 9;
+        if (call(connection, &request, &response) || response.info.size > 32 || !response.info.size || metadata_count >= 257) return NAN;
+        entry = &metadata[metadata_count++];
+        *entry = (SensorMetadata){key, response.info.size, response.info.type};
+    }
+    uint32_t type = entry->type;
+    request.info.size = entry->size; request.command = 5;
     if (call(connection, &request, &response)) return NAN;
     if (type == keycode("flt ") && request.info.size == 4) {
         float value; memcpy(&value, response.bytes, 4); return value;
@@ -71,9 +82,10 @@ int main(int argc, char **argv) {
         BOOL enhanced = argc > 2 && !strcmp(argv[2], "--enhanced");
         io_connect_t connection = 0;
         NSMutableArray<NSString *> *keys = [NSMutableArray array];
-        if (enhanced) {
+        kern_return_t open_status = KERN_SUCCESS;
+        {
             io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
-            if (service) { IOServiceOpen(service, mach_task_self_, 0, &connection); IOObjectRelease(service); }
+            if (service) { open_status = IOServiceOpen(service, mach_task_self_, 0, &connection); IOObjectRelease(service); }
             if (connection) {
                 double reported = read_sensor(connection, keycode("#KEY"));
                 unsigned count = isfinite(reported) && reported > 0 ? MIN((unsigned)reported, 8192u) : 0;
@@ -82,17 +94,22 @@ int main(int argc, char **argv) {
                     request.command = 8; request.index = i;
                     if (call(connection, &request, &response)) continue;
                     char key[5] = {(char)(response.key >> 24), (char)(response.key >> 16), (char)(response.key >> 8), (char)response.key, 0};
-                    if (known_sensor(key)) {
+                    if (known_sensor(key) && (enhanced || key[0] == 'T')) {
                         NSString *name = [NSString stringWithUTF8String:key];
                         if (name) [keys addObject:name];
                     }
                 }
             }
         }
+        unsigned cycle = 0;
+        unsigned retry_after[256] = {0};
         while (getppid() == parent) {
             @autoreleasepool {
                 NSMutableArray *sensors = [NSMutableArray array];
+                unsigned index = 0;
                 for (NSString *name in keys) {
+                    unsigned sensor_index = index++;
+                    if (cycle < retry_after[sensor_index]) continue;
                     const char *key = name.UTF8String;
                     double value = read_sensor(connection, keycode(key));
                     NSString *kind = key[0] == 'T' ? @"temperature" : key[0] == 'P' ? @"power" : key[0] == 'V' ? @"voltage" : @"fan";
@@ -100,12 +117,15 @@ int main(int argc, char **argv) {
                     double maximum = key[0] == 'T' ? 150 : key[0] == 'V' ? 100 : 30000;
                     if (isfinite(value) && value > 0 && value < maximum)
                         [sensors addObject:@{@"id": [@"smc:" stringByAppendingString:name], @"kind": kind, @"unit": unit, @"value": @(value)}];
+                    else retry_after[sensor_index] = cycle + 30;
                 }
                 NSDictionary *sample = @{@"sensors": sensors, @"thermal_critical": @(NSProcessInfo.processInfo.thermalState == NSProcessInfoThermalStateCritical),
-                                          @"permission_denied": @(enhanced && !connection)};
+                                          @"permission_denied": @(open_status == kIOReturnNotPrivileged),
+                                          @"smc_available": @(connection != 0)};
                 NSData *data = [NSJSONSerialization dataWithJSONObject:sample options:0 error:nil];
                 fwrite(data.bytes, 1, data.length, stdout); puts(""); fflush(stdout);
             }
+            ++cycle;
             sleep(1);
         }
         if (connection) IOServiceClose(connection);

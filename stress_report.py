@@ -1,6 +1,7 @@
 """Offline stress report; bounded plot samples, full-session statistics from the archive."""
 import html
 import json
+from collections import deque
 from pathlib import Path
 from i18n import display, ref, tr
 from presentation import plot_svg
@@ -8,25 +9,24 @@ from report_view import document, table_html
 from result_model import Chart, Table, column
 
 
-def build_stress_report(directory, output=None, language=None, theme="dark"):
+def build_stress_report(directory, output=None, language=None, theme="dark", window_seconds=None):
     directory = Path(directory)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     samples_path = directory / "samples.jsonl"
     samples = []
     if samples_path.is_file():
-        # A manual session may run for days. Do not load its full time series into RAM.
+        # Keep only the bounded live window; statistics remain full-session.
         with samples_path.open() as stream:
-            count = sum(1 for _ in stream)
-        stride = max(1, (count + 1199) // 1200)
-        with samples_path.open() as stream:
-            for index, line in enumerate(stream):
-                if index % stride == 0 or index == count - 1:
-                    samples.append(json.loads(line))
+            samples = [json.loads(line) for line in deque(stream, maxlen=601)]
+        seconds = min(600, max(60, window_seconds or manifest.get("plot_window_seconds", 300)))
+        cutoff = samples[-1]["elapsed"] - seconds if samples else 0
+        samples = [sample for sample in samples if sample["elapsed"] >= cutoff]
     catalog, stats = manifest.get("catalog", {}), manifest.get("statistics", {})
     rows = [[item["label"], item["unit"], *[stats.get(key, {}).get(field) for field in ("current", "minimum", "maximum", "average")]] for key, item in catalog.items()]
     table = Table("statistics", [column(key) for key in ("sensors", "unit", "current", "minimum", "maximum", "average")], rows)
     charts = []
-    for unit in dict.fromkeys(item["unit"] for item in catalog.values()):
+    order = {"°C": 0, "%": 1, "MHz": 2, "W": 3, "V": 4, "RPM": 5}
+    for unit in sorted({item["unit"] for item in catalog.values()}, key=lambda value: (order.get(value, 99), value)):
         series = [{"label": item["label"], "values": [sample["values"].get(key) for sample in samples]} for key, item in catalog.items() if item["unit"] == unit]
         for start in range(0, len(series), 3):
             xs = [round(sample["elapsed"], 1) for sample in samples]
