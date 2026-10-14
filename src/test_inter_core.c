@@ -71,7 +71,7 @@ typedef struct {
     pthread_t       thread;
     int             core_id;       /* the core this worker is pinned to */
     int             target_core;   /* the peer's core for the current task */
-    worker_state_t  state;         /* non-atomic: only master writes before ready_to_run */
+    _Atomic worker_state_t state;  /* accessed with the C11 atomic load/store API */
     worker_role_t   state_role;    /* ping/pong — read by worker after wake */
     /* Results from the last completed task. */
     double          samples[NUM_SAMPLES]; /* latency in ns per sample */

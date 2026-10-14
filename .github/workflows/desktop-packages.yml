@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package:
     strategy:
@@ -76,7 +80,7 @@ jobs:
         run: echo "MAKENSIS=$(cygpath -m /ucrt64/bin/makensis.exe)" >> "$GITHUB_ENV"
       - name: Linux native GUI runtime
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+        run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Isolated Python dependencies
         run: python -m pip install -r packaging/requirements-desktop.txt
       - name: Independent kernel references and bounded native score

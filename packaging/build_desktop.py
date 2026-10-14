@@ -44,9 +44,10 @@ def engines(directory, modules=None):
     directory.mkdir(parents=True, exist_ok=True)
     compiler = shlex.split(os.environ.get("CC", "clang" if sys.platform == "darwin" else "gcc"))
     macros = run(compiler + ["-dM", "-E", "-"], input="", text=True, capture_output=True).stdout
-    clang = "__clang__" in macros
-    windows = "_WIN32" in macros
-    darwin = "__APPLE__" in macros
+    defined = {line.split()[1] for line in macros.splitlines() if line.startswith("#define ")}
+    clang = "__clang__" in defined
+    windows = "_WIN32" in defined
+    darwin = "__APPLE__" in defined
     if windows != (os.name == "nt") or darwin != (sys.platform == "darwin"):
         raise RuntimeError("Desktop bundling requires a native compiler on the target OS")
     suffix = ".exe" if windows else ""

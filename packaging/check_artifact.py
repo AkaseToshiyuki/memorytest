@@ -5,8 +5,57 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import tempfile
+import zipfile
+import plistlib
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def smoke(binary):
+    subprocess.run([str(binary), "--smoke-gui"], check=True, timeout=30,
+                   env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+    subprocess.run([str(binary), "--cli", "--list"], check=True, timeout=15)
+
+
+def check_install_payloads(info, data):
+    """Test the actual container contents, not only PyInstaller's staging tree."""
+    for asset in data["assets"]:
+        package = info.parent / asset["file"]
+        with tempfile.TemporaryDirectory(prefix="memorytest-installer-") as directory:
+            root = Path(directory)
+            if package.suffix == ".deb":
+                subprocess.run(["dpkg-deb", "--extract", str(package), str(root)], check=True)
+                smoke(root / "opt/memorytest/MemoryTest")
+            elif package.suffix == ".rpm":
+                subprocess.run(["bsdtar", "-xf", str(package), "-C", str(root)], check=True)
+                smoke(root / "opt/memorytest/MemoryTest")
+            elif package.suffix == ".dmg":
+                mounted = subprocess.check_output(["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", str(package)])
+                mounts = [entry["mount-point"] for entry in plistlib.loads(mounted)["system-entities"] if "mount-point" in entry]
+                try:
+                    smoke(Path(mounts[0]) / "MemoryTest.app/Contents/MacOS/MemoryTest")
+                finally:
+                    for mount in mounts:
+                        subprocess.run(["hdiutil", "detach", mount], check=True)
+            elif package.suffix == ".zip":
+                with zipfile.ZipFile(package) as archive:
+                    archive.extractall(root)  # archive just created by this build
+                smoke(root / "MemoryTest/MemoryTest.exe")
+            elif package.name.endswith(".tar.gz"):
+                import tarfile
+                with tarfile.open(package) as archive:
+                    archive.extractall(root, filter="data")
+                smoke(root / "MemoryTest/MemoryTest")
+            elif package.suffix == ".exe" and os.environ.get("GITHUB_ACTIONS") == "true":
+                # CI-only: temporary per-user install and uninstall. User data is
+                # not touched; do not alter a developer's existing installation.
+                installed = root / "MemoryTest"
+                subprocess.run([str(package), "/S", f"/D={installed}"], check=True, timeout=120)
+                try:
+                    smoke(installed / "MemoryTest.exe")
+                finally:
+                    subprocess.run([str(installed / "Uninstall.exe"), "/S", f"_?={installed}"], check=True, timeout=60)
 
 
 def main():
@@ -20,8 +69,9 @@ def main():
     if prohibited:
         raise RuntimeError(f"Unexpected heavyweight runtime: {prohibited[:10]}")
     # Resource budgets are package guards, not claims about every machine's RSS.
-    if data["package_bytes"] > 100 * 1024 * 1024 or data["bundle_bytes"] > 250 * 1024 * 1024:
+    if any(asset["bytes"] > 100 * 1024 * 1024 for asset in data["assets"]) or data["bundle_bytes"] > 250 * 1024 * 1024:
         raise RuntimeError("Desktop package exceeded 100 MiB compressed / 250 MiB bundle budget")
+    check_install_payloads(info, data)
     subprocess.run([sys.executable, str(ROOT / "packaging/measure_desktop.py"), str(binary),
                     "--output", str(info.parent / "resources.json")], check=True)
     print(f"Artifact checks passed: {info.parent}")

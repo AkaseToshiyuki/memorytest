@@ -22,8 +22,9 @@
 CC ?= gcc
 HOST_CC ?= $(CC)
 COMPILER_DEFINES := $(shell $(CC) -dM -E - </dev/null)
-IS_DARWIN := $(findstring __APPLE__,$(COMPILER_DEFINES))
-IS_WINDOWS := $(findstring _WIN32,$(COMPILER_DEFINES))
+COMPILER_TARGET := $(shell $(CC) -dumpmachine)
+IS_DARWIN := $(findstring darwin,$(COMPILER_TARGET))$(findstring macos,$(COMPILER_TARGET))
+IS_WINDOWS := $(findstring windows,$(COMPILER_TARGET))$(findstring mingw,$(COMPILER_TARGET))
 IS_CLANG := $(findstring __clang__,$(COMPILER_DEFINES))
 NATIVE_CPU_FLAG := $(if $(findstring __aarch64__,$(COMPILER_DEFINES)),-mcpu=native,-march=native)
 QUALIFIER_WARNING := $(if $(IS_CLANG),-Wno-incompatible-pointer-types-discards-qualifiers,-Wno-discarded-qualifiers)
