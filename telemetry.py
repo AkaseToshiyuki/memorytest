@@ -121,7 +121,7 @@ class Provider:
             frequency = psutil.cpu_freq()
             if frequency and frequency.current > 0:
                 self.put(readings, "cpu:frequency", "frequency", "MHz", frequency.current, "cpu_frequency")
-        except (OSError, NotImplementedError):
+        except (AttributeError, OSError, NotImplementedError):
             pass
         critical = self.linux(readings) if sys.platform.startswith("linux") else False
         if sys.platform == "win32":

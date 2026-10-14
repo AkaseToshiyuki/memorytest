@@ -113,6 +113,8 @@ class WindowTests(unittest.TestCase):
         self.assertEqual([item for item in labels if item.text() == RELEASE_TAG], [self.window.version])
 
     def test_compact_layout_keeps_primary_controls_visible(self):
+        from PySide6.QtGui import QFontDatabase
+        self.assertTrue(QFontDatabase.families(), "Qt has no fonts; configure QT_QPA_FONTDIR for offscreen Windows")
         self.window.module_status["inter_core"] = "unsupported"
         self.window.retranslate()
         self.window.resize(880, 720)

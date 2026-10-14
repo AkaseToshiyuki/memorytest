@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,14 @@ CAPS = {"modes": dict.fromkeys(MODES, True), "threads": 2}
 
 
 class StressDataTests(unittest.TestCase):
+    def test_missing_optional_frequency_api_keeps_basic_monitoring(self):
+        system = SimpleNamespace(cpu_percent=lambda interval: 12.5,
+                                 virtual_memory=lambda: SimpleNamespace(percent=25))
+        with tempfile.TemporaryDirectory() as directory, patch("telemetry.psutil", system), patch("telemetry.sys.platform", "darwin"):
+            sample = Provider(bin_dir=Path(directory)).sample()
+        self.assertEqual(sample["values"], {"cpu:usage": 12.5, "memory:usage": 25})
+        self.assertNotIn("cpu:frequency", sample["catalog"])
+
     def test_all_valid_samples_not_visible_window_or_missing_zero(self):
         stats = Statistics()
         for value in [2, 8, None, float("nan"), True, 20]:

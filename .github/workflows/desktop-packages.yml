@@ -78,6 +78,11 @@ jobs:
       - name: NSIS host tool path (payload keeps its native architecture)
         if: runner.os == 'Windows'
         run: echo "MAKENSIS=$(cygpath -m /ucrt64/bin/makensis.exe)" >> "$GITHUB_ENV"
+      - name: System fonts for Qt offscreen acceptance
+        if: runner.os == 'Windows'
+        # The offscreen Windows plugin uses FreeType, not the native font database.
+        # Point it at existing system fonts; do not bundle or download extra fonts.
+        run: python -c 'import os; print("QT_QPA_FONTDIR=" + os.path.join(os.environ["WINDIR"], "Fonts"))' >> "$GITHUB_ENV"
       - name: Linux native GUI runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0

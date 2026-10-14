@@ -106,8 +106,8 @@ threads; the stress check uses one thread, 1 MiB, and a 1.2-second limit.
   heavyweight-dependency exclusion, idle resources and a monitoring-only session.
   It does not certify real GPU stress, SMC access on every Mac, or Windows LHM.
 
-Verification on 2026-10-14 before installer CI: 88 discovered, 82 passed, 6
-platform-dependent checks skipped on Linux x64 (27.573 seconds). An additional
+Verification on 2026-10-14 before installer CI: 89 discovered, 83 passed, 6
+platform-dependent checks skipped on Linux x64 (27.445 seconds). An additional
 1.5-second OpenCL-only session on a Tesla P4 completed with validated dispatch
 heartbeats and a duration stop. This is not long-duration stability coverage.
 Metal, physical Mac sensor access and Windows GPU/sensor coverage remain
