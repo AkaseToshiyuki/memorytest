@@ -47,7 +47,7 @@ jobs:
             cc: clang
             python_arch: arm64
             msystem: CLANGARM64
-            msys_packages: mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-nsis
+            msys_packages: mingw-w64-clang-aarch64-clang mingw-w64-ucrt-x86_64-nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -71,6 +71,9 @@ jobs:
           msystem: ${{ matrix.msystem }}
           path-type: inherit
           install: ${{ matrix.msys_packages }}
+      - name: NSIS host tool path (payload keeps its native architecture)
+        if: runner.os == 'Windows'
+        run: echo "MAKENSIS=$(cygpath -m /ucrt64/bin/makensis.exe)" >> "$GITHUB_ENV"
       - name: Linux native GUI runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y rpm libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0

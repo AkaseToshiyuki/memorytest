@@ -23,6 +23,24 @@ HEADINGS = {
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_report_reader_caches_per_render_without_cross_run_leakage(self):
+        import report_html
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / "first", root / "second"
+            first.mkdir(); second.mkdir()
+            (first / "cpu_alu_report.md").write_text("# First\n")
+            (second / "cpu_alu_report.md").write_text("# Second\n")
+            report_html._report_cache.clear()
+            with patch.object(report_html, "REPORTS", first):
+                self.assertEqual(report_html._read_report("cpu_alu"), "# First\n")
+                (first / "cpu_alu_report.md").write_text("# Changed\n")
+                self.assertEqual(report_html._read_report("cpu_alu"), "# First\n")
+                report_html.build_html(None, ["cpu_alu"])
+                self.assertEqual(report_html._read_report("cpu_alu"), "# Changed\n")
+            with patch.object(report_html, "REPORTS", second):
+                self.assertEqual(report_html._read_report("cpu_alu"), "# Second\n")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="memorytest-workflow-")
         self.addCleanup(self.temp.cleanup)

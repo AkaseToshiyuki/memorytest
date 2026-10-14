@@ -77,6 +77,12 @@ def engines(directory, modules=None):
 def collect_licenses(directory):
     directory.mkdir()
     collect_qt_notices(directory / "Qt-upstream", ROOT / "build/license-cache")
+    if os.name == "nt":
+        compiler = shutil.which(shlex.split(os.environ.get("CC", "gcc"))[0])
+        if compiler:
+            notices = Path(compiler).resolve().parent.parent / "share/licenses"
+            if notices.is_dir():
+                shutil.copytree(notices, directory / "Windows-toolchain", symlinks=False)
     shutil.copy2(ROOT / "LICENSE", directory / "MemoryTest-MIT.txt")
     for name in ["PySide6-Essentials", "shiboken6", "psutil", "pyinstaller"]:
         distribution = importlib.metadata.distribution(name)

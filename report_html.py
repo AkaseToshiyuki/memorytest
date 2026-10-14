@@ -221,6 +221,34 @@ def _parse_all_tables(text: str) -> list:
 
 
 # ============================================================================
+# Report file reader with cache — each report is read from disk at most once
+# ============================================================================
+
+_report_cache: dict = {}
+
+def _read_report(stem: str) -> str:
+    """Read a report markdown file, returning '' if it doesn't exist.
+
+    The stem is the report name without _report.md suffix, e.g.
+    "cache_hierarchy" for reports/cache_hierarchy_report.md.
+
+    Reads are cached in-process so every section that needs data from the
+    same report shares a single disk I/O.
+    """
+    global _report_cache
+    p = REPORTS / f"{stem}_report.md"
+    key = p.resolve()
+    if key in _report_cache:
+        return _report_cache[key]
+    if not p.exists():
+        _report_cache[key] = ""
+        return ""
+    text = p.read_text(encoding="utf-8", errors="replace")
+    _report_cache[key] = text
+    return text
+
+
+# ============================================================================
 # HTML rendering
 # ============================================================================
 
@@ -398,9 +426,8 @@ def _png_data_uri(path: Path) -> str | None:
 
 def _collect_cache_chart_data() -> list:
     """Extract size vs RdLat for SVG line chart from cache_hierarchy report."""
-    p = REPORTS / "cache_hierarchy_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cache_hierarchy")
+    if not text: return []
     tbl = _find_data_table_after(text, "RdLat(ns)")
     if not tbl: return []
     headers, rows = tbl
@@ -426,9 +453,8 @@ def _collect_cache_kpis() -> list:
     **measured latency boundary** (the `Inferred` column of the
     "Inferred vs Reported" table) — NOT from system-detected cache sizes.
     """
-    p = REPORTS / "cache_hierarchy_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cache_hierarchy")
+    if not text: return []
     tbl = _find_data_table_after(text, "RdLat(ns)")
     if not tbl: return []
     headers, rows = tbl
@@ -481,12 +507,10 @@ def _system_info_html(modules=None) -> str:
 
     Uses the first available selected report; every binary writes these fields.
     """
-    p = next((REPORTS / TESTS[name]["report"]
-              for name in (TESTS if modules is None else modules)
-              if (REPORTS / TESTS[name]["report"]).is_file()), None)
-    if p is None:
+    text = next((value for name in (TESTS if modules is None else modules)
+                 if (value := _read_report(TESTS[name]["report"].removesuffix("_report.md")))), "")
+    if not text:
         return '<div class="card"><h2>System Information</h2><p class="no-data">No report available</p></div>'
-    text = p.read_text()
     # Find the table that follows "## System Configuration"
     tbl = _find_data_table_after(text, "Item")
     if not tbl:
@@ -513,9 +537,8 @@ def _collect_bw_chart_data() -> list:
     header mentions `Bandwidth` if the canonical table is absent, and to
     a textual summary (`Read: 1234.56 MB/s`) as a last resort.
     """
-    p = REPORTS / "memory_bandwidth_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("memory_bandwidth")
+    if not text: return []
     # 1) Try the canonical "Bandwidth (MB/s)" table first
     tbl = _find_data_table_after(text, "Bandwidth (MB/s)")
     if not tbl:
@@ -559,9 +582,8 @@ def _collect_branch_chart_data() -> list:
     the branch condition is tautological; they are still emitted (with a
     `*` suffix in the label) so the bar chart shows the lower bound.
     """
-    p = REPORTS / "cpu_branch_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_branch")
+    if not text: return []
     tbl = _find_data_table_after(text, "Pattern")
     if not tbl: return []
     headers, rows = tbl
@@ -590,9 +612,8 @@ def _collect_alu_kpis() -> list:
     (max IPC, average IPC, # operations). Falls back to empty list
     when no data is available.
     """
-    p = REPORTS / "cpu_alu_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_alu")
+    if not text: return []
     tbl = _find_data_table_after(text, "IPC")
     if not tbl: return []
     headers, rows = tbl
@@ -619,9 +640,8 @@ def _collect_alu_kpis() -> list:
 
 def _collect_simd_kpis() -> list:
     """KPI cards for the SIMD/Float section. Returns ns/op stats for SIMD ops only."""
-    p = REPORTS / "cpu_float_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_float")
+    if not text: return []
     tbl = _find_data_table_after(text, "ns/op")
     if not tbl: return []
     headers, rows = tbl
@@ -654,9 +674,8 @@ def _collect_bw_kpis() -> list:
     Returns per-operation (Read/Write/Copy) bandwidth as KPI cards.
     Falls back to text-summary parsing if the canonical table is absent.
     """
-    p = REPORTS / "memory_bandwidth_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("memory_bandwidth")
+    if not text: return []
     pts = _collect_bw_chart_data()
     if pts: return [(op, f"{v:.1f}", "MB/s") for op, v in pts]
     return []
@@ -669,9 +688,8 @@ def _collect_intercore_kpis() -> list:
     when natural clusters exist (auto-detected from latency gaps).
     On uniform systems (one cluster), all pairs are intra-cluster.
     """
-    p = REPORTS / "inter_core_latency_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("inter_core_latency")
+    if not text: return []
     import re
     matrix_rows = []
     seen_indices = set()
@@ -736,9 +754,8 @@ def _collect_multi_kpis() -> list:
     best speedup achieved, the best efficiency, and the operation that
     achieved the best speedup.
     """
-    p = REPORTS / "cpu_multi_core_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_multi_core")
+    if not text: return []
     tbl = _find_data_table_after(text, "Speedup")
     if not tbl: return []
     headers, rows = tbl
@@ -775,9 +792,8 @@ def _collect_branch_kpis() -> list:
     Distinguishes patterns with real branches (ns > 0) from those the
     compiler statically folded (ns == 0). Returns (label, value, unit).
     """
-    p = REPORTS / "cpu_branch_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_branch")
+    if not text: return []
     tbl = _find_data_table_after(text, "Pattern")
     if not tbl: return []
     headers, rows = tbl
@@ -832,9 +848,8 @@ def _bandwidth_table_html(text: str) -> str | None:
 
 
 def _collect_alu_chart_data() -> list:
-    p = REPORTS / "cpu_alu_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_alu")
+    if not text: return []
     # The 2nd table (skip System Config). Look for the per-op header.
     tbl = _find_data_table_after(text, "IPC") or _find_data_table(text, skip_first=True)
     if not tbl: return []
@@ -852,9 +867,8 @@ def _collect_alu_chart_data() -> list:
 
 
 def _collect_simd_chart_data() -> list:
-    p = REPORTS / "cpu_float_report.md"
-    if not p.exists(): return []
-    text = p.read_text()
+    text = _read_report("cpu_float")
+    if not text: return []
     # The 2nd table (skip System Config).
     tbl = _find_data_table_after(text, "ns/op") or _find_data_table(text, skip_first=True)
     if not tbl: return []
@@ -978,6 +992,7 @@ def _run_status_html(modules, manifest):
 
 
 def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scores=False) -> str:
+    _report_cache.clear()  # one read per file per render, never stale across reruns
     modules = list(TESTS if modules is None else modules)
     title = TESTS[modules[0]]["name"] + " Report" if len(modules) == 1 else "Memory & CPU Benchmark Report"
     parts = ['<!DOCTYPE html>', '<html lang="en">', '<head>',
@@ -1118,7 +1133,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
         # Also include the table
         p = REPORTS / "cache_hierarchy_report.md"
         if p.exists():
-            text = p.read_text()
+            text = _read_report(p.name.removesuffix("_report.md"))
             tbl = _find_data_table_after(text, "RdLat(ns)")
             if tbl:
                 parts.append(_table_html(*tbl))
@@ -1180,7 +1195,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
                                         title="Multi-channel memory bandwidth"))
         p = REPORTS / "memory_bandwidth_report.md"
         if p.exists():
-            tbl_html = _bandwidth_table_html(p.read_text())
+            tbl_html = _bandwidth_table_html(_read_report("memory_bandwidth"))
             if tbl_html:
                 parts.append(tbl_html)
         if bw_kpis and len(bw_kpis) >= 3:
@@ -1230,7 +1245,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
         ic_report = REPORTS / TESTS["inter_core"]["report"]
         if ic_report.is_file():
             for label, table in zip(["CAS Latency (ns)", "CAS Throughput (Mops/s)"],
-                                    _parse_all_tables(ic_report.read_text(encoding="utf-8"))[1:3]):
+                                    _parse_all_tables(_read_report("inter_core_latency"))[1:3]):
                 parts.append(f'<h3>{label}</h3><div style="overflow-x:auto">{_table_html(*table)}</div>')
         tp_heatmap = CHARTS / "inter_core_throughput.png"
         tp_uri = _png_data_uri(tp_heatmap)
@@ -1285,7 +1300,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
                                          title="Integer operation throughput"))
         p = REPORTS / "cpu_alu_report.md"
         if p.exists():
-            text = p.read_text()
+            text = _read_report(p.name.removesuffix("_report.md"))
             tbl = _find_data_table_after(text, "IPC")
             if tbl:
                 parts.append(_table_html(*tbl))
@@ -1346,7 +1361,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
                                          title="SIMD (128-bit NEON) latency per op"))
         p = REPORTS / "cpu_float_report.md"
         if p.exists():
-            text = p.read_text()
+            text = _read_report(p.name.removesuffix("_report.md"))
             tbl = _find_data_table_after(text, "ns/op")
             if tbl:
                 parts.append(_table_html(*tbl))
@@ -1399,7 +1414,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
             parts.append('<p class="no-data">Optional chart unavailable; results are shown in the table below</p>')
         p = REPORTS / "cpu_multi_core_report.md"
         if p.exists():
-            text = p.read_text()
+            text = _read_report(p.name.removesuffix("_report.md"))
             topology = _find_data_table_after(text, "CPUs sharing L2")
             if topology:
                 parts.append('<h3>macOS CPU performance levels</h3><p>OS names and counts, not guaranteed worker placement; zero fields are unknown.</p>')
@@ -1444,7 +1459,7 @@ def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scor
         )
         p = REPORTS / "cpu_branch_report.md"
         if p.exists():
-            text = p.read_text()
+            text = _read_report(p.name.removesuffix("_report.md"))
             # The header is `| Pattern | Category | ...` (newer) or
             # `| Operation | Pattern | ...` (older). Try "Pattern" first
             # (always present, always a column) then fall back.
