@@ -27,7 +27,8 @@ static size_t cache_budget(void) {
     size_t available = detect_available_memory();
     /* Pointer chains and copy tests need auxiliary storage, not just a buffer. */
     size_t budget = available / 4;
-    if (budget > 4 * GB) budget = 4 * GB;
+    /* unsigned long is only 32 bits on Windows (LLP64). */
+    if (budget > 4 * (size_t)GB) budget = 4 * (size_t)GB;
     if (cache_max_bytes && budget > cache_max_bytes) budget = cache_max_bytes;
     return budget;
 }
@@ -660,8 +661,8 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
             size_t total_l3 = global_cache_config.l3_total_size;
             if (total_l3 == 0) total_l3 = l3_size;
             size_t lo = has_l3 ? (total_l3 > 0 ? total_l3 + (total_l3 / 4) : l3_size * 2) : l2_size * 2;
-            size_t hi = has_l3 ? (total_l3 * 4) : (4 * GB);
-            if (hi < 4 * GB) hi = 4 * GB;
+            size_t hi = has_l3 ? (total_l3 * 4) : (4 * (size_t)GB);
+            if (hi < 4 * (size_t)GB) hi = 4 * (size_t)GB;
             if (mem_cap > 0 && hi > mem_cap) hi = mem_cap;
             if (lo < hi) GEN_SEGMENT(lo, hi, RAM_SEGMENT_PTS, "RAM");
         }

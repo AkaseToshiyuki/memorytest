@@ -133,12 +133,13 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(next(root.glob("stress-runs/*/stress_report.html")).is_file())
         return code, manifest, sent, emitted, created
 
-    def test_hot_switch_monitor_only_gpu_and_stop(self):
+    def test_hot_switch_monitor_only_gpu_and_stop_with_same_file_timestamp(self):
         def change(data, control):
             if data.get("event") == "mode_change":
                 modes = data["modes"]
                 request = {"modes": []} if modes == ["cpu"] else {"modes": ["ram", "gpu"]} if not modes else {"stop": True}
                 control.write_text(json.dumps(request))
+                os.utime(control, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
         code, manifest, sent, events, children = self.session(callback=change)
         self.assertEqual(code, 0)
         self.assertEqual(sent, ["1", "0", "8"])
@@ -176,11 +177,13 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual((code, manifest["reason"]), (0, "parent_exit"))
 
     def test_malformed_hot_request_fails_closed(self):
-        def bad(data, control):
-            if data.get("event") == "mode_change":
-                control.write_text('{"modes":["disk"]}')
-        code, manifest, *_ = self.session(callback=bad)
-        self.assertEqual((code, manifest["status"]), (1, "failed"))
+        for request in ['{"modes":["disk"]}', '[]', '{', ' ' * 65537]:
+            with self.subTest(request=request[:30]):
+                def bad(data, control):
+                    if data.get("event") == "mode_change":
+                        control.write_text(request)
+                code, manifest, *_ = self.session(callback=bad)
+                self.assertEqual((code, manifest["status"]), (1, "failed"))
 
 
 class NativeStressTests(unittest.TestCase):

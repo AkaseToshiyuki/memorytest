@@ -183,11 +183,18 @@ def run_session(output, bin_dir, modes, threads, memory_mib, duration=0, enhance
                     reason = "duration_stop"
                     break
                 if control and Path(control).is_file():
-                    stamp = Path(control).stat().st_mtime_ns
-                    if stamp != last_control:
+                    # Consecutive writes can share a timestamp on some filesystems.
+                    # Compare the small atomic request itself, not its mtime.
+                    with Path(control).open(encoding="utf-8") as request:
+                        command_text = request.read(65537)
+                    if len(command_text) > 65536:
+                        raise ValueError("oversized control request")
+                    if command_text != last_control:
                         # UI writes atomically; a malformed request fails the session closed.
-                        command = json.loads(Path(control).read_text(encoding="utf-8"))
-                        last_control = stamp
+                        command = json.loads(command_text)
+                        if not isinstance(command, dict):
+                            raise ValueError("invalid control request")
+                        last_control = command_text
                         if command.get("stop"):
                             reason = "user_stop"
                             break
