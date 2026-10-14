@@ -7,8 +7,8 @@ Smoke、sanity、regression 是可选开发检查，不是用户跑分层级。
 
 | Module | 内容 | Group |
 |---|---|---|
-| `cache_hierarchy` | L1/L2/L3/内存延迟与带宽 | memory |
-| `memory_bandwidth` | 内存读取、写入、复制吞吐量 | memory |
+| `cache_hierarchy` | 缓存带宽、依赖链延迟、层级跃迁检测 | memory |
+| `memory_bandwidth` | 读写／复制／Scale／Add／Triad／步长带宽与依赖链延迟 | memory |
 | `inter_core` | 核间延迟矩阵与 CAS 吞吐量 | memory |
 | `cpu_alu` | CPU 整数运算 | cpu |
 | `cpu_float` | CPU 浮点与 SIMD 运算 | cpu |
@@ -128,3 +128,38 @@ During the preceding implementation, an additional
 heartbeats and a duration stop. This is not long-duration stability coverage.
 Metal, physical Mac sensor access and Windows GPU/sensor coverage remain
 device-dependent; a successful build is not that coverage.
+
+### diagnostic-v2 follow-up checks (2026-10-14)
+
+- `test_diagnostic_kernels.py`: independent Decimal/float32 references for every
+  floating result lane, uint64 ALU references, exact operation counts and timing
+  divisors; conditional-branch outcomes and x86 disassembly. Reports use a shortened
+  1-ms target / 3 samples in tests, not the production 150-ms / 5-sample default.
+- `test_memory_kernels.py`: independently calculated values for all 65 elements,
+  useful-byte counts including stride tails, a complete 65-node cycle, common-time
+  accounting with two workers and 384 KiB allocation, partial creation/allocation failure.
+- `test_cache_report.py`: three output sections, synthetic sustained-jump versus
+  single-spike/noisy-overlap fixtures, plus the existing bounded failure cases.
+- `test_intercore_protocol.py`: Linux only, two workers, 80 small redispatches and
+  exact completed CAS/sample counts; no whole-machine matrix or placement certification.
+- GPU mock checks verify nonblocking read ordering, bounded slot recycling,
+  corruption rejection and drain-before-release. FPU references check all 16/32 lanes.
+- Native/HTML cache-part separation and tab selection survive language/theme
+  changes. Twelve new fixture screenshots are in `build/ui-revision/cache-*.png`.
+
+Local full suite: **125 discovered, 119 passed, 6 platform-dependent skips,
+107.035 seconds**, using `.venv-desktop/bin/python`; log
+`/tmp/memorytest-algorithms-all-tests.log`. The system Conda Qt installation lacks
+an ICNS reader; its icon test failure is not used as the desktop acceptance result.
+
+Production-default single-thread run of ALU, float and branch: all three passed
+(12.121 s, 21.375 s, 8.169 s respectively); raw samples/reports are under
+`build/validation-algorithms/runs/20261014-200738-u0ob7g18/`. Both sqrt rows are nonzero;
+all branch rows retain measured work. Sample spread is reported, not guaranteed zero.
+No default-size memory/cache scan was launched during this verification.
+
+OpenCL-only Tesla P4 follow-up: 1.5-second configured limit, 2.636-second total
+including cleanup, two validated-completion heartbeats, normal duration stop.
+Evidence: `build/validation-algorithms-gpu/stress-runs/20261014-200015-nasa2bmh/`.
+This does not validate M4 Pro Metal utilization or prolonged thermal behavior.
+Native six-target installer CI must still pass for this revision before handoff.

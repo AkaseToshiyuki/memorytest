@@ -31,6 +31,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <math.h>
 
 #if defined(__APPLE__) || defined(_WIN32)
 /* Affinity tags are not CPU IDs. A per-core matrix without verified pinning
@@ -43,12 +44,17 @@ int main(void) {
 #else
 
 /* ===== Tunables (compile-time; runtime scaling for big machines below) ===== */
-#define NUM_SAMPLES             10      /* samples per pair for latency */
-#define ROUND_TRIPS_PER_SAMPLE  10000   /* CAS round-trips per sample */
-#define BW_ITERATIONS_DEFAULT   100000  /* bandwidth CAS per pair */
-#define BW_ITERATIONS_LARGE     50000   /* used when nproc > 64 */
+#ifndef NUM_SAMPLES
+#define NUM_SAMPLES             15      /* measured latency samples, after warmup */
+#endif
+#ifndef ROUND_TRIPS_PER_SAMPLE
+#define ROUND_TRIPS_PER_SAMPLE  20000   /* CAS round-trips per sample */
+#endif
+#define BW_ITERATIONS_DEFAULT   200000  /* bandwidth CAS per pair */
+#define BW_ITERATIONS_LARGE     100000  /* used when nproc > 64 */
 #define BW_MIN_DURATION_NS      20000000 /* target ≥20ms per pair (less clock noise) */
-#define BW_WARMUP_ITERS         2000    /* warmup before timing bandwidth */
+#define BW_WARMUP_ITERS         10000   /* separate discarded dispatch */
+#define BW_SAMPLES              5
 
 /* Runtime-scaled BW iterations (set in main) */
 static int g_bw_iterations = BW_ITERATIONS_DEFAULT;
@@ -158,7 +164,7 @@ static void *worker_main(void *arg) {
             w->n_samples = 0;
             _Atomic uint8_t *target_flag = flag_of(w->target_core);
 
-            for (int s_idx = 0; s_idx < NUM_SAMPLES; s_idx++) {
+            for (int s_idx = -2; s_idx < NUM_SAMPLES; s_idx++) {
                 uint64_t t0 = get_time_ns();
                 for (int i = 0; i < ROUND_TRIPS_PER_SAMPLE; i++) {
                     /* Both ping and pong alternate: one side does 1→0,
@@ -181,7 +187,7 @@ static void *worker_main(void *arg) {
                     }
                 }
                 uint64_t t1 = get_time_ns();
-                w->samples[w->n_samples++] =
+                if (s_idx >= 0) w->samples[w->n_samples++] =
                     (double)(t1 - t0) / ROUND_TRIPS_PER_SAMPLE / 2.0;
             }
         } else if (s == WORKER_BUSY_BANDWIDTH) {
@@ -193,24 +199,6 @@ static void *worker_main(void *arg) {
              * Protocol: PING (1→0) → PONG (0→1) → PING (1→0) → ...
              * Total successful CAS across both workers = 2 × g_bw_iterations. */
             _Atomic uint8_t *target_flag = flag_of(w->target_core);
-            /* Warmup — prime caches/MESI state (both roles alternate). */
-            for (int i = 0; i < BW_WARMUP_ITERS; i++) {
-                if (w->state_role == ROLE_PING) {
-                    uint8_t expected = 1;
-                    while (!atomic_compare_exchange_weak_explicit(
-                            target_flag, &expected, 0,
-                            memory_order_relaxed, memory_order_relaxed)) {
-                        expected = 1;
-                    }
-                } else {
-                    uint8_t expected = 0;
-                    while (!atomic_compare_exchange_weak_explicit(
-                            target_flag, &expected, 1,
-                            memory_order_relaxed, memory_order_relaxed)) {
-                        expected = 0;
-                    }
-                }
-            }
             w->cas_ops = 0;
             for (int i = 0; i < g_bw_iterations; i++) {
                 if (w->state_role == ROLE_PING) {
@@ -236,8 +224,8 @@ static void *worker_main(void *arg) {
         /* Signal done. The master reads w->done_flag to know this worker
          * has finished; we don't need a global counter because the
          * master knows exactly which 2 workers it dispatched. */
-        atomic_store_explicit(&w->done_flag, 1, memory_order_release);
         atomic_store_explicit(&w->ready_to_run, 0, memory_order_release);
+        atomic_store_explicit(&w->done_flag, 1, memory_order_release);
     }
     return NULL; /* unreachable */
 }
@@ -276,28 +264,14 @@ static inline void wake_worker(worker_t *w) {
     pthread_mutex_unlock(&w->mu);
 }
 
-/* Wait for worker `w` to finish its current task (done_flag = 1).
- * After returning, also atomically resets done_flag → 0 so the
- * worker's own ready_to_run reset (which happens immediately
- * after setting done=1) has time to land before the master peeks
- * at it on the next dispatch. The reset is racy but bounded: the
- * master does a single CAS, and the worker's reset is a store,
- * so at worst the master sees ready=1 for one extra iteration
- * (and the dispatch_pair will simply retry). */
+/* Completion is published AFTER clearing ready_to_run. The acquire load
+ * observes both result writes and the cleared flag before the next dispatch. */
 static inline void wait_for_done(worker_t *w) {
     while (atomic_load_explicit(&w->done_flag, memory_order_acquire) == 0) {
         struct timespec ts = {0, 1000};
         nanosleep(&ts, NULL);
     }
-    /* Consume the done signal so the worker doesn't have to. */
     atomic_store_explicit(&w->done_flag, 0, memory_order_release);
-    /* Brief barrier: yield to let the worker's `ready_to_run = 0`
-     * store propagate to our cache before the next dispatch_pair()
-     * reads it. This is a workaround for a benign race; the
-     * dispatch_pair stale check would just see ready=1 and skip
-     * the pair, which is observable as a 0 in the matrix. The yield
-     * here reduces the window to "essentially never". */
-    sched_yield();
 }
 
 /* Dispatch a (i, j) pair task and wait for both workers to complete.
@@ -359,6 +333,13 @@ static void dispatch_pair(int i, int j, worker_state_t mode) {
     wait_for_done(wj);
 }
 
+static void warm_pair_bandwidth(int i, int j) {
+    int saved = g_bw_iterations;
+    g_bw_iterations = BW_WARMUP_ITERS;
+    dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
+    g_bw_iterations = saved;
+}
+
 /* ===== Statistics ===== */
 
 static int compare_doubles(const void *a, const void *b) {
@@ -390,7 +371,7 @@ static int run_pair_latency(int i, int j, double *p25, double *med, double *p75)
     memcpy(sorted, g_workers[i].samples, n * sizeof(double));
     qsort(sorted, (size_t)n, sizeof(double), compare_doubles);
 
-    /* Trim 5% top/bottom (NUM_SAMPLES=10, so trim 0; do nothing). */
+    /* Trim 5% from each end when the sample count permits it. */
     double trimmed[NUM_SAMPLES];
     int n_trim;
     trim_outliers(sorted, n, trimmed, &n_trim);
@@ -543,6 +524,7 @@ void run_inter_core_latency_test(void) {
         else if (n * n > 1000) bw_cap = 400000;
         else                   bw_cap = 800000;
         int cal_pair_i = 0, cal_pair_j = (n > 1) ? 1 : 0;
+        warm_pair_bandwidth(cal_pair_i, cal_pair_j);
         while (g_bw_iterations < bw_cap) {
             uint64_t t0 = get_time_ns();
             dispatch_pair(cal_pair_i, cal_pair_j, WORKER_BUSY_BANDWIDTH);
@@ -564,11 +546,16 @@ void run_inter_core_latency_test(void) {
             if (i == j) {
                 printf("%5s", "-");
             } else {
-                uint64_t t0 = get_time_ns();
-                dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
-                uint64_t t1 = get_time_ns();
-                double dur_s = (double)(t1 - t0) / 1e9;
-                double mops = (double)(g_bw_iterations * 2) / dur_s / 1e6;
+                warm_pair_bandwidth(i, j);
+                double samples[BW_SAMPLES];
+                for (unsigned sample = 0; sample < BW_SAMPLES; ++sample) {
+                    uint64_t t0 = get_time_ns();
+                    dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
+                    uint64_t elapsed = get_time_ns() - t0;
+                    samples[sample] = elapsed ? (double)(g_workers[i].cas_ops + g_workers[j].cas_ops) * 1000.0 / elapsed : NAN;
+                }
+                qsort(samples, BW_SAMPLES, sizeof(double), compare_doubles);
+                double mops = samples[BW_SAMPLES / 2];
                 M->bw_mops[i*n+j] = mops;
                 printf("%5.1f", mops);
             }
@@ -740,6 +727,8 @@ void run_inter_core_latency_test(void) {
         report_write(report, "- Synchronization: CAS busy-wait (atomic compare_exchange)\n");
         report_write(report, "- Worker pool: one persistent thread per core, pinned via set_cpu_affinity\n");
         report_write(report, "- Matrix measured once; reused for console / JSON / Markdown\n");
+        report_write(report, "- Latency: two discarded warmup batches, %d measured batches of %d round trips\n", NUM_SAMPLES, ROUND_TRIPS_PER_SAMPLE);
+        report_write(report, "- Throughput: discarded warmup dispatch, median of %d measured dispatches\n", BW_SAMPLES);
         report_write(report, "- Outlier filter: 5% trim + 3×median cap, then p25/median/p75\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));

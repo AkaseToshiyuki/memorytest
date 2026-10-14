@@ -14,6 +14,21 @@ static size_t test_available(void) { return available; }
 #undef detect_available_memory
 
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "transitions")) {
+        CacheTestResult rows[5];
+        double values[] = {2, 2, 4, 4.2, 4.1};
+        for (unsigned i = 0; i < 5; ++i) {
+            rows[i] = (CacheTestResult){.size = (8 * KB) << i, .ns = values[i],
+                .latency = {1, (uint64_t)(values[i] * 256), (uint64_t)(values[i] * 250), (uint64_t)(values[i] * 262)}};
+        }
+        if (!cache_transition(rows, 5, 2) || cache_transition(rows, 5, 1) || cache_transition(rows, 5, 4)) return 1;
+        rows[3].ns = 2; /* single-point spike must not become a cache boundary */
+        if (cache_transition(rows, 5, 2)) return 2;
+        rows[3].ns = 4.2;
+        rows[1].latency.max_ns = 1200; /* overlapping noisy samples */
+        if (cache_transition(rows, 5, 2)) return 3;
+        return 0;
+    }
     global_system_config.detected = 1;
     global_system_config.cpu_cores = 1;
     global_system_config.cpu_cores_physical = 1;

@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
             body = QVBoxLayout(page)
             children = QTabWidget()
             children.setDocumentMode(True)
+            children.setTabBarAutoHide(True)
             body.addWidget(children)
             self.group_tabs[group] = children
             self.tabs.addTab(page, "")
@@ -239,7 +240,9 @@ class MainWindow(QMainWindow):
 
     def request_monitor_access(self, explain=False):
         if self.monitor_access.status == "ready":
+            self.stress_page.enhanced.setChecked(True)
             self.stress_page.sync_access()
+            self.stress_page.refresh_controls()
             return
         if explain:
             answer = QMessageBox.question(self, tr("monitor_permission_title", self.language),
@@ -270,7 +273,10 @@ class MainWindow(QMainWindow):
         if self.stress_page.access_status_key == key:
             return
         self.stress_page.access_status_key = key
-        self.stress_page.enhanced.setChecked(status == "ready")
+        if status == "ready":
+            self.stress_page.enhanced.setChecked(True)
+        elif not self.monitor_access.authorized:
+            self.stress_page.enhanced.setChecked(False)
         self.stress_page.sync_access()
         self.stress_page.retranslate()
 

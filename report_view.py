@@ -3,7 +3,7 @@ import html
 import json
 from i18n import tr, display, default_language
 from presentation import THEMES, curve_color, plot_svg
-from result_model import GROUPS, load_results, system_data
+from result_model import GROUPS, load_results, system_data, cache_parts
 
 
 def table_html(table, language):
@@ -14,6 +14,9 @@ def table_html(table, language):
 
 
 def module_html(result, language):
+    if result.name == "cache_hierarchy" and result.status == "passed":
+        return (f'<div id="{language}-cache_hierarchy" data-module="cache_hierarchy">' +
+                "".join(module_html(part, language) for part in cache_parts(result)) + "</div>")
     esc = lambda value: html.escape(display(value, language))
     bits = [f'<section class="card" id="{language}-{result.name}" data-module="{result.name}">',
             f'<header><h2>{tr(result.name, language)}</h2><span class="badge {result.status}">{tr(result.status, language)}</span></header>']

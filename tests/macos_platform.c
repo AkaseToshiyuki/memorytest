@@ -33,7 +33,12 @@ int main(void) {
     }
     void *buffer = malloc(16 * KB);
     if (!buffer) return 5;
-    double latency = measure_latency(buffer, 16 * KB, 32768);
+    chain_build(buffer, 16 * KB);
+    ChainWork work = {buffer, 16 * KB, (uintptr_t)buffer};
+    if (chain_work(&work, 128)) return 6;
+    uint64_t start = get_time_ns();
+    if (chain_work(&work, 128)) return 6;
+    double latency = (double)(get_time_ns() - start) / 32768;
     free(buffer);
     if (!isfinite(latency) || latency <= 0) return 6;
     /* Exercises partial creation/abort separately in test_compute. */

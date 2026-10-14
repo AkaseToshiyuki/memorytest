@@ -164,23 +164,28 @@ Hardware discovery uses the following sources; some legacy fallback values remai
 
 ### Latency (Pointer Chase)
 
-A true serial dependency chain: each load produces the address for the next load, defeating the CPU's out-of-order engine and memory-level parallelism. This measures *real* load-to-use latency per cache level.
+A serial dependency chain makes each load produce the next address. Diagnostic v2
+uses one randomized permutation cycle with a node every 64 bytes over the full
+listed working set, with no auxiliary permutation allocation or sparse-chain shortcut.
 
-- ≤ 16 MB buffers: Fisher-Yates shuffle, full permutation array
-- > 16 MB buffers: LCG-generated indices with bitset deduplication (prevents self-loops)
+### Warmup and hierarchy detection
 
-### Eviction Strategy (Boundary Detection)
-
-| Buffer size | Between-run eviction | Effect |
-|-------------|---------------------|--------|
-| ≤ L3 | Only before run 1 | Warm cache for runs 2..N — measures true cache-hit latency |
-| > L3 | Every run | Cold cache every run — measures true DRAM latency |
-
-This *selective eviction* preserves the natural latency curve across cache boundaries, enabling accurate L1→L2→L3→DRAM transition detection. Prior versions evicted every run for all sizes, collapsing small-buffer latencies to L2 values and preventing boundary discovery.
+Ordinary OS pages, a complete warm traversal and discarded calibration precede
+five equal-work samples. The default minimum warmup is 50 ms and the per-sample
+target is 150 ms. Results use the median and include the sample range/median.
+No privileged flush is used. Hierarchy detection reports sustained latency-jump
+intervals separately from OS-reported cache sizes; TLB, page and scheduling
+effects can also cause transitions. Old eviction-based results are incompatible.
 
 ### Bandwidth
 
-Buffer size is automatically scaled to 4× total L3 (minimum 1 GB, capped at 8 GB) to guarantee the working set exceeds the last-level cache. Multi-threaded sequential access saturates all memory channels.
+Cache bandwidth uses one thread and equal total working sets for read/write/copy.
+Memory diagnostics add scale, add, triad, 64/256-byte-stride reads and dependent-load
+latency. Useful bytes are divided by one common worker interval, in decimal MB/s;
+no inferred cache-line or write-allocation traffic is counted. Three memory arrays
+default to 256 MiB each (increased for reported large caches, capped at 2 GiB each)
+and together use at most half of observed available memory. Cache residency and
+OS/NUMA placement remain measurement conditions, not guaranteed DRAM saturation.
 
 ## Validation
 
@@ -406,23 +411,23 @@ make distclean    # 删除二进制和报告
 
 ### 延迟（指针追踪）
 
-真正的串行依赖链：每次加载产生下一次加载的地址，击败 CPU 的乱序引擎和内存级并行。测量真实的各级缓存加载延迟。
+每次加载产生下一次加载的地址。diagnostic-v2 在完整工作集上每隔 64 字节布置一个
+节点，组成覆盖所有节点的单一随机环；不再按大小改用稀疏链，也不需要额外排列数组。
 
-- ≤ 16 MB 缓冲区：Fisher-Yates 洗牌，全排列数组
-- > 16 MB 缓冲区：LCG 生成索引 + 位集去重（防止自环）
+### 预热与层级检测
 
-### 逐出策略（边界检测）
-
-| 缓冲区大小 | 轮间逐出 | 效果 |
-|-----------|----------|------|
-| ≤ L3 | 仅首次运行前 | 第 2..N 次热缓存 — 测量真实缓存命中延迟 |
-| > L3 | 每轮 | 每轮冷缓存 — 测量真实 DRAM 延迟 |
-
-此选择性逐出保留了跨缓存边界的自然延迟曲线，实现准确的 L1→L2→L3→DRAM 转换检测。
+使用普通系统页，先完成全链预热和不计入结果的校准，再采集 5 次等工作量样本。
+默认最低预热 50 ms、单次目标 150 ms，记录中位数与极差／中位数。不执行特权清缓存。
+层级检测输出持续的延迟跃迁区间，系统报告的容量单列；TLB、分页及调度也可能造成
+跃迁，不能据此保证精确缓存容量。旧逐出协议的结果不能与新协议直接混用。
 
 ### 带宽
 
-缓冲区自动缩放至 4× 总 L3（最小 1 GB，最大 8 GB），确保工作集超出末级缓存。多线程顺序访问饱和所有内存通道。
+缓存带宽使用单线程，读取／写入／复制的总工作集保持一致。内存测试增加缩放、相加、
+Triad、64／256 字节步长读取与依赖链延迟。带宽按共同计时窗口内的有效字节数计算，
+单位为十进制 MB/s，不推算缓存行或写分配流量。三个内存数组默认各 256 MiB，针对
+较大已知缓存适当增大、每个最多 2 GiB，合计不超过检测到的可用内存的一半。
+缓存驻留、系统／NUMA 调度仍影响结果，不能保证所有工作集都来自 DRAM 或跑满全部通道。
 
 ## 实测数据
 
@@ -480,6 +485,8 @@ Linux 单线程使用第一个允许的 CPU；macOS 由系统调度，不保证�
 
 ## 跨平台与算法审计（2026-10-14）
 
+以下记录首次审计时的状态；浮点、分支、内存、缓存及采样的后续修复见下方追加章节。
+
 结论：**存在多架构代码，不等于所有模块具备跨硬件可比性。**
 本轮实现 CPU 评分修正及公共计时/探测修正；其他模块按以下结论保留为诊断工具，
 没有把待修复的算法问题标成已解决。
@@ -520,6 +527,25 @@ P1 修核间绑定与完成协议；P2 再统一缓存实验协议、平台覆�
 流程夹具验证选中模块与报告隔离。没有运行全套重内存/核间硬件测试。
 
 ## 0.1.1 测试版本
+
+### 追加的测试方法修订（diagnostic-v2）
+
+- 缓存页和 HTML 分为缓存带宽、缓存延迟、缓存层级检测三部分；原 `cache_hierarchy`
+  模块 ID 保持兼容，层级检测复用本次延迟样本，不重复跑一次测量。
+- 浮点保留每个平方根／除法结果，限制每块数据范围，修正 SIMD 标量分量计数，
+  不支持的 SIMD 不再输出空操作。分支使用固定长序列和真实条件跳转；耗时不是
+  预测准确率，没有硬件计数器就不显示虚构错误率。当前显式分支内核支持 x64／ARM64。
+- 整数、浮点、分支、内存和缓存使用校准、预热、5 次样本中位数；报告与界面共用同一批
+  样本。核间延迟增至 15 个批次并丢弃两批预热，吞吐量取 5 次中位数，修正完成通知竞态。
+  核间的 CPU ID／拓扑／绑定限制仍需单独验证，Mac／Windows 仍不输出不可靠矩阵。
+- 不再用标称 MHz 生成 CPI／IPC。以上均为诊断工作负载，不能视为峰值执行单元性能。
+  ComputeMark v2 的工作内核、评分公式及既有校准／预热／中位数协议保持不变。
+- FPU 压力使用 8 条独立向量链（NEON FMA、SSE2 或运行时检查后的 AVX2 FMA），
+  每个分量仍按独立参考校验。Metal／OpenCL 保留 3 个有界待执行批次，逐批完成校验；
+  不增加 CPU 回退或多显卡聚合。授权成功后隐藏重复授权选项，采样故障提供重试。
+
+本地数值、计数、退出、采样和界面验证见 `TEST_LAYERS.md`。M4 Pro 实际 GPU 利用率、
+FPU 功耗及长时间稳定性仍需新安装包真机测试；不能从编译通过或其他 GPU 的短时运行推断。
 
 本轮仅交付工作分支、验证记录和测试构件；没有创建 0.1.1 标签或 Release，
 也不会自动替换 V0.1.0 资产。三大界面分组是缓存、内存、核心性能测试，

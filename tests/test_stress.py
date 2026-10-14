@@ -10,7 +10,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from benchmark_registry import ROOT
 from i18n import ref
@@ -98,6 +98,55 @@ class StressDataTests(unittest.TestCase):
             (node / "temp1_input").write_text("100000")
             (node / "temp1_crit").write_text("99000")
             self.assertTrue(Provider(sysfs=Path(directory)).linux({}))
+
+
+class GPUQueueTests(unittest.TestCase):
+    def test_bounded_pipeline_recycles_only_validated_completed_slot(self):
+        from collections import deque
+        import ctypes as C
+        from stress_gpu import OpenCL
+        backend = OpenCL.__new__(OpenCL)
+        slots = [{"seed": i, "output": (C.c_uint * 16)(*range(16)), "event": C.c_void_p(i)} for i in range(1, 4)]
+        backend.slots = deque(slots)
+        backend.expected = {i: tuple(range(16)) for i in range(1, 4)}
+        backend.lib = SimpleNamespace(clWaitForEvents=Mock(return_value=0), clReleaseEvent=Mock(return_value=0))
+        backend.submit = Mock()
+        backend.step()
+        backend.submit.assert_called_once_with(slots[0])
+        self.assertIs(backend.slots[0], slots[1])
+        self.assertEqual(len(backend.slots), 3)
+        self.assertFalse(slots[0]["event"].value)
+        slots[1]["output"][7] = 99
+        with self.assertRaisesRegex(RuntimeError, "calculation_error"):
+            backend.step()
+        self.assertEqual(backend.submit.call_count, 1)
+
+    def test_read_is_nonblocking_enqueued_before_next_dispatch_and_close_drains(self):
+        import ctypes as C
+        from collections import deque
+        from stress_gpu import OpenCL, GRID_SIZE
+        backend = OpenCL.__new__(OpenCL)
+        calls = []
+        def record(name):
+            def call(*args):
+                calls.append((name, args))
+                return 0
+            return call
+        backend.lib = SimpleNamespace(**{name: record(name) for name in (
+            "clSetKernelArg", "clEnqueueNDRangeKernel", "clEnqueueReadBuffer", "clFlush", "clFinish",
+            "clReleaseEvent", "clReleaseMemObject", "clReleaseKernel", "clReleaseProgram", "clReleaseCommandQueue", "clReleaseContext")})
+        backend.queue, backend.kernel, backend.program, backend.context = 1, 2, 3, 4
+        backend.next_seed = 1
+        slot = {"buffer": 5, "output": (C.c_uint * 16)(), "event": C.c_void_p(6)}
+        backend.slots = deque([slot])
+        backend.submit(slot)
+        self.assertEqual([name for name, _ in calls], ["clSetKernelArg", "clSetKernelArg", "clEnqueueNDRangeKernel", "clEnqueueReadBuffer", "clFlush"])
+        self.assertEqual(calls[2][1][4]._obj.value, GRID_SIZE)
+        self.assertEqual(calls[3][1][2], 0)  # CL_FALSE, not a blocking host read
+        calls.clear()
+        backend.close()
+        self.assertEqual(calls[0][0], "clFinish")
+        self.assertEqual(len(backend.slots), 0)
 
 
 class SupervisorTests(unittest.TestCase):
@@ -214,6 +263,10 @@ class NativeStressTests(unittest.TestCase):
             factor = Decimal("1.0000001") ** 65536
             expected = Decimal("6.5") * factor - 4
         self.assertLess(abs(Decimal(str(measured["float"])) - expected), Decimal("1e-9"))
+        self.assertIn(len(measured["lanes"]), (16, 32))
+        for index, actual in enumerate(measured["lanes"]):
+            expected_lane = (Decimal(index + 1) / 4 + 1) * factor - 1
+            self.assertLess(abs(Decimal(str(actual)) - expected_lane), Decimal("1e-9"))
 
     def test_one_thread_one_mib_hot_switch_and_eof_cleanup(self):
         process = subprocess.Popen([str(self.binary), "1", "1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -23,6 +23,7 @@ class CacheReportTests(unittest.TestCase):
                    "detect_windows.c" if windows else "detect_macos.c" if sys.platform == "darwin" else "detect.c",
                    "pmu_macos.c" if windows or sys.platform == "darwin" else "pmu.c"]
         command = shlex.split(os.environ.get("CC", "cc")) + ["-O2", "-std=c11", "-pthread",
+                    "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000", "-DBENCH_SAMPLES=3",
                     str(ROOT / "tests/cache_regression.c"),
                     *[str(ROOT / "src" / name) for name in sources], "-lm", "-o", str(cls.binary)]
         if windows:
@@ -48,7 +49,8 @@ class CacheReportTests(unittest.TestCase):
                 path = root / "reports/cache_hierarchy_report.md"
                 self.assertIsNone(validate_report(path))
                 text = path.read_text()
-                self.assertIn("Cache Hierarchy Scan", text)
+                for section in ("Cache Bandwidth Test", "Cache Latency Test", "Cache Hierarchy Detection"):
+                    self.assertIn(section, text)
                 self.assertNotIn("| L3 |", text)
                 from result_model import build_module
                 from report_view import build_report
@@ -62,6 +64,10 @@ class CacheReportTests(unittest.TestCase):
 
     def test_no_l3_still_writes_scan(self):
         self.run_case("no_l3")
+
+    def test_synthetic_transitions_require_persistence_and_separated_ranges(self):
+        result = subprocess.run([str(self.binary), "transitions"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_sparse_scan_still_writes_data_without_inference(self):
         self.run_case("sparse")

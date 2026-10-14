@@ -40,3 +40,8 @@ jobs:
         run: make check-workflow
       - name: Native macOS public APIs and bounded memory/cache checks
         run: make check-platform
+      - name: Bounded diagnostic kernels and common-window accounting
+        run: |
+          python -m unittest discover -s tests -p test_diagnostic_kernels.py -v
+          python -m unittest discover -s tests -p test_memory_kernels.py -v
+          python -m unittest discover -s tests -p test_intercore_protocol.py -v

@@ -1,6 +1,7 @@
 """Driver-provided OpenCL 1.2 GPU compute. Never selects a CPU OpenCL device."""
 import ctypes as C
 import ctypes.util
+from collections import deque
 import json
 import os
 import sys
@@ -15,6 +16,9 @@ __kernel void burn(__global uint *out, uint seed) {
     out[i] = x;
 }
 """
+GRID_SIZE = 262144
+IN_FLIGHT = 3
+SEED_COUNT = 64
 
 
 def reference(index, seed):
@@ -30,7 +34,8 @@ class OpenCL:
         if not path:
             raise RuntimeError("device_unavailable")
         self.lib = (C.WinDLL if os.name == "nt" else C.CDLL)(path)
-        self.context = self.queue = self.program = self.kernel = self.buffer = None
+        self.context = self.queue = self.program = self.kernel = None
+        self.slots = deque()
         self.bind("clGetPlatformIDs", C.c_int, C.c_uint, C.POINTER(C.c_void_p), C.POINTER(C.c_uint))
         self.bind("clGetDeviceIDs", C.c_int, C.c_void_p, C.c_uint64, C.c_uint, C.POINTER(C.c_void_p), C.POINTER(C.c_uint))
         self.bind("clGetDeviceInfo", C.c_int, C.c_void_p, C.c_uint, C.c_size_t, C.c_void_p, C.POINTER(C.c_size_t))
@@ -43,7 +48,10 @@ class OpenCL:
         self.bind("clSetKernelArg", C.c_int, C.c_void_p, C.c_uint, C.c_size_t, C.c_void_p)
         self.bind("clEnqueueNDRangeKernel", C.c_int, C.c_void_p, C.c_void_p, C.c_uint, C.c_void_p, C.POINTER(C.c_size_t), C.c_void_p, C.c_uint, C.c_void_p, C.c_void_p)
         self.bind("clEnqueueReadBuffer", C.c_int, C.c_void_p, C.c_void_p, C.c_uint, C.c_size_t, C.c_size_t, C.c_void_p, C.c_uint, C.c_void_p, C.c_void_p)
-        for suffix in ("MemObject", "Kernel", "Program", "CommandQueue", "Context"):
+        self.bind("clWaitForEvents", C.c_int, C.c_uint, C.POINTER(C.c_void_p))
+        self.bind("clFlush", C.c_int, C.c_void_p)
+        self.bind("clFinish", C.c_int, C.c_void_p)
+        for suffix in ("Event", "MemObject", "Kernel", "Program", "CommandQueue", "Context"):
             self.bind("clRelease" + suffix, C.c_int, C.c_void_p)
         count = C.c_uint()
         self.check(self.lib.clGetPlatformIDs(0, None, C.byref(count)))
@@ -84,22 +92,52 @@ class OpenCL:
         self.check(self.lib.clBuildProgram(self.program, 1, C.byref(self.device), b"-cl-std=CL1.2", None, None))
         self.kernel = self.lib.clCreateKernel(self.program, b"burn", C.byref(error))
         self.check(error.value)
-        self.buffer = self.lib.clCreateBuffer(self.context, 2, 65536 * 4, None, C.byref(error))
-        self.check(error.value)
-        pointer = C.c_void_p(self.buffer)
-        self.check(self.lib.clSetKernelArg(self.kernel, 0, C.sizeof(pointer), C.byref(pointer)))
+        # Fixed rotating seeds permit independent checks without a Python
+        # reference loop in the hot path. Three 1-MiB GPU buffers are bounded.
+        self.expected = {seed: tuple(reference(i, seed) for i in range(16))
+                         for seed in range(1, SEED_COUNT + 1)}
+        self.next_seed = 1
+        for _ in range(IN_FLIGHT):
+            buffer = self.lib.clCreateBuffer(self.context, 2, GRID_SIZE * 4, None, C.byref(error))
+            slot = {"buffer": buffer, "output": (C.c_uint * 16)(), "event": C.c_void_p()}
+            self.slots.append(slot)
+            self.check(error.value)
+            self.submit(slot)
 
-    def step(self, seed):
-        seed_arg, size = C.c_uint(seed), C.c_size_t(65536)
+    def submit(self, slot):
+        pointer = C.c_void_p(slot["buffer"])
+        self.check(self.lib.clSetKernelArg(self.kernel, 0, C.sizeof(pointer), C.byref(pointer)))
+        slot["seed"] = self.next_seed
+        self.next_seed = self.next_seed % SEED_COUNT + 1
+        seed_arg, size = C.c_uint(slot["seed"]), C.c_size_t(GRID_SIZE)
         self.check(self.lib.clSetKernelArg(self.kernel, 1, C.sizeof(seed_arg), C.byref(seed_arg)))
         self.check(self.lib.clEnqueueNDRangeKernel(self.queue, self.kernel, 1, None, C.byref(size), None, 0, None, None))
-        output = (C.c_uint * 16)()
-        self.check(self.lib.clEnqueueReadBuffer(self.queue, self.buffer, 1, 0, C.sizeof(output), output, 0, None, None))
-        if any(value != reference(index, seed) for index, value in enumerate(output)):
+        # Enqueue the nonblocking read immediately after its kernel; waiting on
+        # this event will not wait for the later two kernels in the queue.
+        self.check(self.lib.clEnqueueReadBuffer(self.queue, slot["buffer"], 0, 0,
+                   C.sizeof(slot["output"]), slot["output"], 0, None, C.byref(slot["event"])))
+        self.check(self.lib.clFlush(self.queue))
+
+    def step(self):
+        slot = self.slots[0]
+        self.check(self.lib.clWaitForEvents(1, C.byref(slot["event"])))
+        if tuple(slot["output"]) != self.expected[slot["seed"]]:
             raise RuntimeError("calculation_error")
+        self.check(self.lib.clReleaseEvent(slot["event"]))
+        slot["event"] = C.c_void_p()
+        self.submit(slot)
+        self.slots.rotate(-1)
 
     def close(self):
-        for attr, suffix in (("buffer", "MemObject"), ("kernel", "Kernel"), ("program", "Program"), ("queue", "CommandQueue"), ("context", "Context")):
+        if self.queue:
+            self.lib.clFinish(self.queue)  # host read destinations must stay alive
+        for slot in self.slots:
+            if slot["event"]:
+                self.lib.clReleaseEvent(slot["event"])
+            if slot["buffer"]:
+                self.lib.clReleaseMemObject(slot["buffer"])
+        self.slots.clear()
+        for attr, suffix in (("kernel", "Kernel"), ("program", "Program"), ("queue", "CommandQueue"), ("context", "Context")):
             if getattr(self, attr, None):
                 getattr(self.lib, "clRelease" + suffix)(getattr(self, attr))
                 setattr(self, attr, None)
@@ -121,10 +159,9 @@ def main(argv=None):
             parser.error("a supervising parent is required")
         backend.initialize()
         cancelled = Cancellation(parent_pid=args.parent_pid)
-        seed, heartbeat = 1, 0
+        heartbeat = 0
         while not cancelled():
-            backend.step(seed)
-            seed = (seed + 1) & 0xffffffff
+            backend.step()
             now = time.monotonic()
             if now - heartbeat >= 1:
                 print("ready", flush=True)

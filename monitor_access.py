@@ -126,6 +126,7 @@ class MonitorAccess:
         self.directory = tempfile.TemporaryDirectory(prefix="memorytest-monitor-")
         self.samples_path = Path(self.directory.name) / "sample.json"
         self.status = "not_requested"
+        self.authorized = False
         self.active = False
         self.process = self.connection = self.server = self.thread = None
         self.stop_event = threading.Event()
@@ -213,6 +214,7 @@ class MonitorAccess:
                     peer.close()
                     continue
                 self.connection = peer
+                self.authorized = True
                 self.status = "ready"
                 peer.sendall(b"1" if self.active else b"0")
                 self._read(peer)

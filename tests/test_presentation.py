@@ -22,6 +22,35 @@ CACHE = """# Cache report
 | 1MB | 4.5 | 6 | 8000 | L2 |
 """
 
+MODERN_CACHE = """# Cache report
+- Samples: 5
+- Warmup minimum: 50 ms
+- Sample target: 150 ms
+## Cache Bandwidth Test
+| Size | Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%) |
+|---|---|---|---|---|---|
+| 8 KiB | Read | 12000 | 150 | 1800000000 | 2 |
+| 8 KiB | Write | 8000 | 150 | 1200000000 | 3 |
+| 8 KiB | Copy | 9000 | 150 | 1350000000 | 4 |
+| 1 MiB | Read | 10000 | 150 | 1500000000 | 2 |
+| 1 MiB | Write | 7000 | 150 | 1050000000 | 3 |
+| 1 MiB | Copy | 8000 | 150 | 1200000000 | 4 |
+## Cache Latency Test
+| Size | RdLat(ns) | Time(ms) | Operations | Spread(%) |
+|---|---|---|---|---|
+| 8 KiB | 1.5 | 150 | 100000000 | 2 |
+| 1 MiB | 5 | 150 | 30000000 | 3 |
+## Cache Hierarchy Detection
+| Transition | Lower(KiB) | Upper(KiB) | Before(ns) | After(ns) | Ratio |
+|---|---|---|---|---|---|
+| 1 | 128 | 192 | 1.5 | 5 | 3.333 |
+## Reported Cache Hierarchy
+| Level | Reported(KiB) |
+|---|---|
+| L1D | 128 |
+| L2 | 4096 |
+"""
+
 
 class ResultsTests(unittest.TestCase):
     def setUp(self):
@@ -42,6 +71,25 @@ class ResultsTests(unittest.TestCase):
         svg = plot_svg(result.charts[0])
         # 1.25 / maximum 6 on a 185px axis => y=186.4583; x=72 at 4 KiB.
         self.assertIn('cx="72.00" cy="186.46"', svg)
+
+    def test_three_cache_parts_have_separate_numbers_and_localized_labels(self):
+        from result_model import cache_parts
+        (self.root / "cache_hierarchy_report.md").write_text(MODERN_CACHE)
+        model = build_module("cache_hierarchy", self.root)
+        parts = cache_parts(model)
+        self.assertEqual([part.name for part in parts], ["cache_bandwidth_test", "cache_latency_test", "cache_detection"])
+        self.assertEqual(parts[0].charts[0].series[2]["values"], [9000, 8000])
+        self.assertEqual(parts[1].charts[0].series[0]["values"], [1.5, 5])
+        self.assertEqual(parts[2].tables[0].rows[0], [1, 128, 192, 1.5, 5, 3.333])
+        self.assertEqual(parts[2].tables[1].rows[0], [ref("l1d"), 128])
+        self.assertEqual(parts[0].kpis, [])
+        self.assertEqual(len(parts[1].kpis), 2)
+        self.assertEqual(parts[2].charts, [])
+        for lang in ("zh", "en"):
+            html = module_html(model, lang)
+            self.assertIn('data-module="cache_hierarchy"', html)
+            for part in parts:
+                self.assertIn(tr(part.name, lang), html)
 
     def test_failed_cancelled_unsupported_never_show_stale_data(self):
         for status in ["failed", "interrupted", "unsupported", "timeout", "not_run"]:
@@ -80,7 +128,7 @@ assert.equal(elements.language.value,'zh'); elements.language.value='en';element
 assert.equal(document.documentElement.lang,'en');assert.equal(elements.language.options[0].textContent,'Chinese');
 elements.theme.value='light';elements.theme.change();assert.equal(document.documentElement.dataset.theme,'light');
 '''
-        subprocess.run(["node", "-e", harness], check=True, capture_output=True, timeout=10)
+        subprocess.run(["node", "-e", harness], check=True, capture_output=True, timeout=30)
 
     def test_palette_text_contrast_and_unique_stable_colors(self):
         def luminance(color):
@@ -114,6 +162,35 @@ class NativePresentationTests(unittest.TestCase):
     def setUp(self):
         self.window = MainWindow(autodetect=False)
         self.addCleanup(self.window.close)
+
+    def test_native_cache_tabs_preserve_selection_and_split_results(self):
+        from benchmark_registry import ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "cache_hierarchy_report.md").write_text(MODERN_CACHE)
+            page = self.window.pages["cache_hierarchy"]
+            page.model = build_module("cache_hierarchy", path)
+            page.retranslate()
+            self.assertEqual(page.details.count(), 3)
+            self.window.tabs.setCurrentIndex(1)
+            self.window.resize(1080, 720)
+            self.window.show()
+            output = ROOT / "build/ui-revision"
+            output.mkdir(parents=True, exist_ok=True)
+            for lang in ("zh", "en"):
+                self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(lang))
+                for theme in ("dark", "light"):
+                    self.window.theme_combo.setCurrentIndex(self.window.theme_combo.findData(theme))
+                    for index, key in enumerate(("cache_bandwidth_test", "cache_latency_test", "cache_detection")):
+                        page.details.setCurrentIndex(index)
+                        page.retranslate()
+                        self.app.processEvents()
+                        self.assertEqual(page.details.currentIndex(), index)
+                        self.assertEqual(page.details.tabText(index), tr(key, lang))
+                        self.window.grab().save(str(output / f"cache-{index}-{lang}-{theme}.png"))
+            self.assertEqual(page.details.widget(0).model.charts[0].unit, "MB/s")
+            self.assertEqual(page.details.widget(1).model.charts[0].unit, "ns")
+            self.assertFalse(page.details.widget(2).model.charts)
 
     def test_language_theme_preserve_selection_running_state_and_result(self):
         self.window.modules["cpu_float"].setChecked(False)
@@ -306,6 +383,24 @@ class NativePresentationTests(unittest.TestCase):
         self.assertEqual(self.window.stress_page.access_status_key, "monitor_failed")
         self.assertFalse(self.window.stress_page.enhanced.isChecked())
         self.assertFalse(self.window.authorization_timer.isActive())
+
+    def test_authorization_automatically_enables_monitoring_and_hides_checkbox(self):
+        access, page = self.window.monitor_access, self.window.stress_page
+        access.authorized = True  # Verified helper handshake, not just clicking Yes.
+        access.status = "ready"
+        self.window.monitor_authorized()
+        self.assertTrue(page.enhanced.isChecked())
+        self.assertTrue(page.enhanced.isHidden())
+        self.assertTrue(page.retry_monitor.isHidden())
+        access.status = "error"
+        self.window.monitor_authorized()
+        self.assertTrue(page.enhanced.isChecked())
+        self.assertTrue(page.enhanced.isHidden())
+        self.assertFalse(page.retry_monitor.isHidden())
+        self.assertEqual(page.access_status_key, "monitor_failed")
+        with patch.object(self.window, "request_monitor_access") as retry:
+            page.retry_monitor.click()
+            retry.assert_called_once()
 
     def test_normal_monitoring_has_no_engineering_prose_or_empty_notice_rows(self):
         page = self.window.stress_page

@@ -7,9 +7,9 @@
   },
   "tests": {
     "cache_hierarchy": {
-      "name": "Cache Hierarchy Test",
-      "description": "L1/L2/L3 cache and RAM latency/bandwidth",
-      "description_zh": "测量L1/L2/L3缓存和主存的访问延迟和带宽",
+      "name": "Cache Tests",
+      "description": "Cache bandwidth, dependent-load latency and hierarchy detection",
+      "description_zh": "缓存带宽测试、缓存延迟测试与缓存层级检测",
       "category": "memory",
       "section": "Cache & Memory Hierarchy",
       "source": "src/test_cache_hierarchy.c",
@@ -18,9 +18,9 @@
       "report": "cache_hierarchy_report.md"
     },
     "memory_bandwidth": {
-      "name": "Memory Bandwidth Test",
-      "description": "Multi-channel memory read/write/copy bandwidth",
-      "description_zh": "测量大块内存的读写和复制带宽",
+      "name": "Memory Tests",
+      "description": "Read/write/copy/scale/add/triad/stride bandwidth and dependent-load latency",
+      "description_zh": "内存读写、复制、缩放、相加、乘加、步长访问与依赖链延迟",
       "category": "memory",
       "section": "Memory Bandwidth",
       "source": "src/test_memory_bandwidth.c",

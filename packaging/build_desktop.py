@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -156,7 +157,22 @@ def dmg(bundle, staging, artifacts):
     shutil.copytree(bundle, image / "MemoryTest.app", symlinks=True)
     (image / "Applications").symlink_to("/Applications")
     target = artifacts / f"MemoryTest-{VERSION}-macOS-{platform.machine()}.dmg"
-    run(["hdiutil", "create", "-volname", "MemoryTest", "-srcfolder", image, "-format", "UDZO", target])
+    # Hosted macOS runners occasionally return Resource busy while creating a
+    # disk image. Retry only that transient failure, using a fresh local path.
+    for attempt in range(3):
+        candidate = staging / f"MemoryTest-attempt-{attempt}.dmg"
+        try:
+            result = run(["hdiutil", "create", "-volname", "MemoryTest", "-srcfolder", image,
+                          "-format", "UDZO", candidate], capture_output=True, text=True)
+            if result.stdout:
+                print(result.stdout, end="", flush=True)
+            shutil.move(candidate, target)
+            break
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout or "", exc.stderr or "", flush=True)
+            if attempt == 2 or "resource busy" not in (exc.stderr or "").lower():
+                raise
+            time.sleep(3)
     return target
 
 

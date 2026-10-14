@@ -4,11 +4,11 @@ import sys
 from PySide6.QtCore import Qt, QAbstractTableModel, QSize
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QProgressBar,
-    QPushButton, QScrollArea, QTableView, QHeaderView, QWidget)
+    QPushButton, QScrollArea, QTableView, QHeaderView, QWidget, QTabWidget)
 from desktop_theme import card, label, set_tone
 from i18n import tr, display
 from presentation import plot_svg
-from result_model import ModuleResult, build_module, perflevel_table
+from result_model import ModuleResult, build_module, perflevel_table, cache_parts
 
 TITLES = {name: tr(name, "zh") for name in
           ("cache_hierarchy", "memory_bandwidth", "inter_core", "cpu_alu", "cpu_float", "cpu_branch", "cpu_multi")}
@@ -140,6 +140,24 @@ class ResultView(QScrollArea):
         return "\n".join(values)
 
 
+class CacheResultView(QTabWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDocumentMode(True)
+        self.model = None
+        for _ in range(3):
+            self.addTab(ResultView(), "")
+
+    def render(self, model, language, theme):
+        self.model = model
+        for index, part in enumerate(cache_parts(model)):
+            self.setTabText(index, tr(part.name, language))
+            self.widget(index).render(part, language, theme)
+
+    def toPlainText(self):
+        return "\n".join(self.widget(i).toPlainText() for i in range(self.count()))
+
+
 class ModulePage(QWidget):
     def __init__(self, name, window):
         super().__init__()
@@ -173,7 +191,7 @@ class ModulePage(QWidget):
         self.progress.setTextVisible(False)
         layout.addWidget(self.summary)
         layout.addWidget(self.progress)
-        self.details = ResultView()
+        self.details = CacheResultView() if name == "cache_hierarchy" else ResultView()
         layout.addWidget(self.details, 1)
         self.retranslate()
 

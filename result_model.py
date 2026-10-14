@@ -1,5 +1,5 @@
 """Presentation-neutral results. No Qt, browser, scores for partial runs or prose inference."""
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 import json
 import math
 from pathlib import Path
@@ -111,12 +111,17 @@ OPS = {"add": "add", "sub": "sub", "mul": "mul", "div": "div", "mod": "mod", "sq
        "load+alu": "load_alu", "fma": "fma", "dot": "dot", "dot product": "dot", "read": "read",
        "write": "write", "copy": "copy", "always taken": "always", "never taken": "never",
        "random 50%": "random50", "2-bit counter": "counter2", "increasing": "increasing"}
+OPS.update({"alternating": "alternating", "ttnn": "ttnn", "scale": "scale", "triad": "triad",
+            "dependent random read": "dependent_read", "mul+add": "muladd"})
 
 
 def operation(value, index=1):
     lowered = value.strip().lower()
     if lowered in OPS:
         return ref(OPS[lowered])
+    stride = re.fullmatch(r"stride (\d+)b", lowered)
+    if stride:
+        return ref("stride_n", bytes=int(stride[1]))
     for prefix in ("float", "double", "simd"):
         if lowered.startswith(prefix + " "):
             return ref("typed_op", type=ref(prefix), operation=operation(value[len(prefix) + 1:], index))
@@ -135,6 +140,8 @@ HEADERS = {"operation": ("operation", ""), "pattern": ("pattern", ""), "size": (
            "ns/branch": ("latency", "ns/branch"), "cpi": ("cpi", ""), "ipc": ("ipc", ""),
            "threads": ("threads", ""), "speedup": ("speedup", "×"), "efficiency": ("efficiency", "%"),
            "mispred rate": ("mispred", "%"), "data source": ("source", ""), "type": ("type", "")}
+HEADERS.update({"spread(%)": ("spread", "%"), "operations": ("operations", ""),
+                "branches": ("branches", ""), "bytes": ("payload", "B")})
 
 
 def column(key, unit=""):
@@ -182,7 +189,10 @@ def build_module(name, reports, record=None):
         parsed = list(tables(text))
         result.status = "passed"
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
-                             (r"^- Thread Count: (\d+)\s*$", "threads")]:
+                             (r"^- Thread Count: (\d+)\s*$", "threads"),
+                             (r"^- Samples: (\d+)\s*$", "samples"),
+                             (r"^- Warmup minimum: ([\d.]+ ms)\s*$", "warmup"),
+                             (r"^- Sample target: ([\d.]+ ms)\s*$", "sample_target")]:
             match = re.search(pattern, text, re.MULTILINE)
             if match:
                 result.conditions.append((ref(key), match[1]))
@@ -216,6 +226,16 @@ def build_module(name, reports, record=None):
             except (OSError, ValueError, KeyError, TypeError):
                 result.notice = "score_unavailable"
         for title, headers, rows in parsed:
+            if name == "cache_hierarchy" and title == "Reported Cache Hierarchy" and rows:
+                result.tables.append(Table("reported_cache", [column("level"), column("capacity", "KiB")],
+                    [[ref({"L1D": "l1d", "L2": "l2", "L3": "l3"}.get(row[0], "level")), number(row[1])] for row in rows]))
+                continue
+            if name == "cache_hierarchy" and title == "Cache Hierarchy Detection":
+                if rows:
+                    result.tables.append(Table("cache_transitions", [column("transition"), column("lower_bound", "KiB"),
+                        column("upper_bound", "KiB"), column("before", "ns"), column("after", "ns"), column("ratio", "×")],
+                        [[number(value) for value in row] for row in rows]))
+                continue
             if not rows or headers[0].lower() in {"item", "level"}:
                 continue
             if headers[0].lower() == "core":
@@ -236,7 +256,17 @@ def build_module(name, reports, record=None):
                     result.kpis.append({"label": ref(label), "value": statistics.median(finite), "unit": unit})
                 continue
             lower = [header.lower() for header in headers]
-            add_generic(result, headers, rows, "cache_scan" if "rdlat(ns)" in lower else "results")
+            if name == "cache_hierarchy" and title == "Cache Bandwidth Test":
+                add_generic(result, headers, rows, "cache_bandwidth_test")
+                sizes = sorted({size_kib(row[0]) for row in rows if size_kib(row[0]) is not None})
+                series = []
+                for op in ("Read", "Write", "Copy"):
+                    by_size = {size_kib(row[0]): number(row[2]) for row in rows if row[1] == op}
+                    series.append({"label": operation(op), "values": [by_size.get(size) for size in sizes]})
+                result.charts.append(Chart("cache_bandwidth_test", "line", "MB/s", sizes, series, sizes, "workset", True))
+                continue
+            table_title = "cache_latency_test" if title == "Cache Latency Test" else "cache_scan" if "rdlat(ns)" in lower else "memory_latency" if title == "Memory Latency" else "results"
+            add_generic(result, headers, rows, table_title)
             if "rdlat(ns)" in lower:
                 valid = sorted([(size_kib(row[0]), row) for row in rows if size_kib(row[0]) is not None], key=lambda pair: pair[0])
                 xs = [pair[0] for pair in valid]
@@ -245,7 +275,7 @@ def build_module(name, reports, record=None):
                     if heading in lower:
                         values = [number(row[lower.index(heading)]) for _, row in valid]
                         series.append({"label": ref(key), "values": values})
-                result.charts.append(Chart("cache_scan", "line", "ns", xs, series, xs, "workset", True))
+                result.charts.append(Chart(table_title, "line", "ns", xs, series, xs, "workset", True))
                 if "bw(mb/s)" in lower:
                     result.charts.append(Chart("cache_bw", "line", "MB/s", xs, [{"label": ref("bandwidth"),
                         "values": [number(row[lower.index("bw(mb/s)")]) for _, row in valid]}], xs, "workset", True))
@@ -271,13 +301,29 @@ def build_module(name, reports, record=None):
                     index = lower.index(measure)
                     labels = [operation(row[0], i + 1) for i, row in enumerate(rows)]
                     values = [number(row[index]) for row in rows]
-                    result.charts.append(Chart(name, "bar", measure, labels, [{"label": ref("latency"), "values": values}]))
+                    result.charts.append(Chart("memory_latency" if title == "Memory Latency" else name, "bar", measure, labels, [{"label": ref("latency"), "values": values}]))
                     result.kpis.extend({"label": label, "value": value, "unit": measure} for label, value in zip(labels[:4], values[:4]))
         if not result.tables:
             result.status, result.reason = "invalid_report", "read_error"
     except (OSError, ValueError, KeyError, TypeError):
         result.status, result.reason = "invalid_report", "read_error"
     return result
+
+
+def cache_parts(result):
+    """Three independently browsable views, preserving one compatible CLI ID."""
+    parts = []
+    for key in ("cache_bandwidth_test", "cache_latency_test", "cache_detection"):
+        titles = {"cache_bandwidth_test": {"cache_bandwidth_test", "cache_bw"},
+                  "cache_latency_test": {"cache_latency_test", "cache_scan"},
+                  "cache_detection": {"reported_cache", "cache_transitions"}}[key]
+        part = replace(result, name=key, tables=[table for table in result.tables if table.title in titles],
+                       charts=[chart for chart in result.charts if chart.title in titles],
+                       kpis=result.kpis if key == "cache_latency_test" else [])
+        if key == "cache_detection" and result.status == "passed" and not any(t.title == "cache_transitions" for t in part.tables):
+            part.notice = "no_transition"
+        parts.append(part)
+    return parts
 
 
 def system_data(reports, modules, manifest=None):

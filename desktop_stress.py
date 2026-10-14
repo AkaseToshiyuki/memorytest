@@ -170,7 +170,10 @@ class StressPage(QWidget):
         self.export_button.clicked.connect(self.export)
         self.enhanced = QCheckBox()
         self.enhanced.toggled.connect(self.enhanced_changed)
-        for widget in (self.start_button, self.stop_button, self.export_button, self.enhanced):
+        self.retry_monitor = QPushButton()
+        self.retry_monitor.clicked.connect(lambda: self.window.request_monitor_access())
+        self.retry_monitor.hide()
+        for widget in (self.start_button, self.stop_button, self.export_button, self.enhanced, self.retry_monitor):
             control.addWidget(widget)
         control.addStretch()
         layout.addLayout(control)
@@ -239,6 +242,7 @@ class StressPage(QWidget):
         for button, key in ((self.start_button, "start"), (self.stop_button, "stop"), (self.export_button, "export"), (self.enhanced, "enhanced")):
             button.setText(tr(key, lang))
         self.enhanced.setToolTip(tr("enhanced_hint", lang))
+        self.retry_monitor.setText(tr("retry_monitor", lang))
         self.duration.setSpecialValueText(tr("manual_stop", lang))
         self.duration.setSuffix(" " + tr("minutes", lang) if self.duration.value() else "")
         self.window_minutes.setSuffix(" " + tr("minutes", lang))
@@ -257,6 +261,10 @@ class StressPage(QWidget):
         self.export_button.setEnabled(self.report is not None and not self.active)
         for widget in (self.threads, self.memory, self.duration, self.enhanced):
             widget.setEnabled(not self.active)
+        access = getattr(self.window, "monitor_access", None)
+        authorized = bool(access and access.authorized)
+        self.enhanced.setVisible(not authorized)
+        self.retry_monitor.setVisible(authorized and access.status in {"error", "denied", "stopped", "unavailable"})
 
     def refresh_warning(self):
         lang = self.window.language
