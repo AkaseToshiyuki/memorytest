@@ -91,8 +91,8 @@ class MacOSNativeTests(unittest.TestCase):
         self.assertIn("sysctl summary; may be cluster-shared", report)
         self.assertIn("Unsupported via public APIs", report)
         self.assertNotIn("per core,", report)
-        self.assertNotIn("nan", report.lower())
-        self.assertNotIn("inf", report.lower().replace("information", ""))
+        # Match non-finite numeric tokens, not words such as "inferred".
+        self.assertNotRegex(report, r"(?i)\b(?:nan|inf(?:inity)?)\b")
 
     def test_partial_thread_creation_cleanup(self):
         if (os.cpu_count() or 1) < 2: self.skipTest("needs 2 online CPUs")
