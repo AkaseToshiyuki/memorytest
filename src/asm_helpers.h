@@ -153,7 +153,7 @@ static inline void prefetch_l2(const void *p) {
 static inline void clflush(const void *p) {
 #if defined(__x86_64__) || defined(__i386__)
     __asm__ __volatile__("clflush (%0)" :: "r"(p) : "memory");
-#elif defined(__APPLE__) && defined(__aarch64__)
+#elif (defined(__APPLE__) || defined(_WIN32)) && defined(__aarch64__)
     /* No userspace per-line invalidation contract. Cache tests must use
      * the explicitly labelled capacity-eviction path, NOT this fence. */
     (void)p;

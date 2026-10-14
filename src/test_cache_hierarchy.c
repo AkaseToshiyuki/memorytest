@@ -44,10 +44,10 @@ typedef struct {
 
 static __thread double thread_sum;
 
-#if defined(__APPLE__) && defined(__aarch64__)
+#if (defined(__APPLE__) || defined(_WIN32)) && defined(__aarch64__)
 /* Capacity pressure only: does not claim to invalidate every cache/SLC line.
  * Runs outside timing. Bounded allocation, no privileged DC CIVAC instruction. */
-static int macos_evict_cache(void) {
+static int capacity_evict_cache(void) {
     static volatile unsigned char *buffer;
     static size_t bytes;
     if (!buffer) {
@@ -229,7 +229,7 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * it's chain_indices[0..chain_len-1].  We point flush_order at the
      * appropriate array so the between-run eviction can clflush every
      * node deterministically. */
-#if !defined(__APPLE__) || !defined(__aarch64__)
+#if !(defined(__APPLE__) || defined(_WIN32)) || !defined(__aarch64__)
     size_t *flush_order = (size < SMALL_BUF) ? perm : chain_indices;
     size_t flush_count  = chain_len;
 #endif
@@ -270,8 +270,8 @@ static double measure_latency(void *ptr, size_t size, int samples) {
             /* Eviction: always on run 0 (cold start), then selectively
              * on subsequent runs based on buffer size. */
             if (r == 0 || evict_every_run) {
-#if defined(__APPLE__) && defined(__aarch64__)
-                if (macos_evict_cache() != 0) {
+#if (defined(__APPLE__) || defined(_WIN32)) && defined(__aarch64__)
+                if (capacity_evict_cache() != 0) {
                     fprintf(stderr, "Cache eviction allocation failed; no latency sample\n");
                     free(latencies); free(perm); free(chain_indices); return 0;
                 }

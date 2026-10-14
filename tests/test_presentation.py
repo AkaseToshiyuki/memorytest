@@ -163,8 +163,12 @@ class NativePresentationTests(unittest.TestCase):
             root = builder.build_icons(directory)
             for name in ["memorytest.ico", "memorytest.icns"]:
                 reader = QImageReader(str(root / name))
-                self.assertTrue(reader.canRead(), name)
-                self.assertFalse(reader.read().isNull(), name)
+                try:
+                    self.assertTrue(reader.canRead(), name)
+                    self.assertFalse(reader.read().isNull(), name)
+                finally:
+                    # Release the native file handle before Windows temp cleanup.
+                    del reader
             self.assertEqual([size.width() for size in QIcon(str(root / "memorytest.ico")).availableSizes()],
                              [16, 24, 32, 48, 64, 128, 256])
 
