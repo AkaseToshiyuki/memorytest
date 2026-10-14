@@ -68,8 +68,8 @@ def collect():
         try:
             info = json.loads(command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], 10))
             result["cpu_model"] = ", ".join(dict.fromkeys(item["Name"].strip() for item in info["cpu"]))
-            result["nominal_frequency"] = ", ".join(sorted({f'{item["MaxClockSpeed"]} MHz' for item in info["cpu"] if item.get("MaxClockSpeed", 0) > 0})) or None
-            result["memory_rate"] = ", ".join(sorted({f'{item["ConfiguredClockSpeed"]} MHz' for item in info["memory"] if item.get("ConfiguredClockSpeed", 0) > 0})) or None
+            result["nominal_frequency"] = ", ".join(sorted({f'{item["MaxClockSpeed"]} MHz' for item in info["cpu"] if (item.get("MaxClockSpeed") or 0) > 0})) or None
+            result["memory_rate"] = ", ".join(sorted({f'{item["ConfiguredClockSpeed"]} MHz' for item in info["memory"] if (item.get("ConfiguredClockSpeed") or 0) > 0})) or None
             result["gpu"] = ", ".join(item["Name"] for item in info["gpu"])
         except (ValueError, KeyError, TypeError):
             pass

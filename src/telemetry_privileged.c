@@ -29,6 +29,7 @@ static HANDLE child_process, child_pipe, parent_process, child_job;
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/wait.h>

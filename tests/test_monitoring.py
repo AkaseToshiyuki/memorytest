@@ -97,9 +97,9 @@ Nominal frequency: 9000 MHz
         helper = Path("/tmp/Memory Test's $() app/telemetry_privileged")
         command = authorization_command(helper, 12345, "ab" * 32, 1234, "darwin")
         self.assertEqual(command[0], "/usr/bin/osascript")
-        self.assertEqual(shlex.split(command[-1]), [str(helper), "12345", "ab" * 32, "1234"])
+        self.assertEqual(shlex.split(command[-1]), [str(helper.resolve()), "12345", "ab" * 32, "1234"])
         command = authorization_command(helper, 12345, "ab" * 32, 1234, "linux")
-        self.assertEqual(command[:2], ["/usr/bin/pkexec", str(helper)])
+        self.assertEqual(command[:2], ["/usr/bin/pkexec", str(helper.resolve())])
         self.assertNotIn("python", " ".join(command).lower())
 
     def test_socket_setup_failure_leaves_no_authorization_spinner(self):
@@ -121,7 +121,7 @@ Nominal frequency: 9000 MHz
     def test_windows_hardware_card_preserves_cim_clock_units(self):
         import system_info
         fixture = {"cpu": [{"Name": " Example CPU ", "MaxClockSpeed": 3200}],
-                   "memory": [{"ConfiguredClockSpeed": 6400}, {"ConfiguredClockSpeed": 0}],
+                   "memory": [{"ConfiguredClockSpeed": 6400}, {"ConfiguredClockSpeed": 0}, {"ConfiguredClockSpeed": None}],
                    "gpu": [{"Name": "示例 GPU"}]}
         with patch("system_info.sys.platform", "win32"), patch("system_info.command", return_value=json.dumps(fixture)):
             result = system_info.collect()
@@ -151,8 +151,10 @@ class NativeMonitorTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory(prefix="memorytest-monitor-test-")
         cls.binary = Path(cls.directory.name) / ("telemetry_privileged.exe" if os.name == "nt" else "telemetry_privileged")
         compiler = shlex.split(os.environ.get("CC", "cc"))
-        subprocess.run(compiler + ["-O2", "-std=c11", str(ROOT / "src/telemetry_privileged.c"), "-o", str(cls.binary)] +
-            (["-lws2_32", "-static-libgcc"] if os.name == "nt" else []), check=True, capture_output=True, timeout=60)
+        build = subprocess.run(compiler + ["-O2", "-std=c11", str(ROOT / "src/telemetry_privileged.c"), "-o", str(cls.binary)] +
+            (["-lws2_32", "-static-libgcc"] if os.name == "nt" else []), capture_output=True, text=True, timeout=60)
+        if build.returncode:
+            raise RuntimeError(build.stdout + build.stderr)
 
     @classmethod
     def tearDownClass(cls):

@@ -244,8 +244,8 @@ class StressPage(QWidget):
         self.window_minutes.setSuffix(" " + tr("minutes", lang))
         self.status.setText(tr(self.status_key, lang))
         self.access_status.setText(tr(self.access_status_key, lang))
-        self.warning.setText(tr("stress_warning", lang) + (" " + tr("no_temperature", lang) if not self.has_temperature else "") +
-                             (" " + tr("sensor_denied", lang) if self.permission_denied else ""))
+        self.access_status.setVisible(bool(self.access_status.text()))
+        self.refresh_warning()
         self.table.setHorizontalHeaderLabels([tr(key, lang) for key in ("show", "sensors", "unit", "current", "minimum", "maximum", "average")])
         self.refresh_table()
         self.plot.refresh()
@@ -257,6 +257,18 @@ class StressPage(QWidget):
         self.export_button.setEnabled(self.report is not None and not self.active)
         for widget in (self.threads, self.memory, self.duration, self.enhanced):
             widget.setEnabled(not self.active)
+
+    def refresh_warning(self):
+        lang = self.window.language
+        notices = []
+        if self.active and self.selected_modes():
+            notices.append(tr("stress_warning", lang))
+            if not self.has_temperature:
+                notices.append(tr("no_temperature", lang))
+        if self.permission_denied:
+            notices.append(tr("sensor_denied", lang))
+        self.warning.setText(" ".join(notices))
+        self.warning.setVisible(bool(notices))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -390,9 +402,7 @@ class StressPage(QWidget):
         self.elapsed.setText(f'{int(data["elapsed"])//60}:{int(data["elapsed"])%60:02d}')
         # No widget relabelling, geometry negotiation or full retranslation at 1 Hz.
         self.status.setText(tr(self.status_key, self.window.language))
-        self.warning.setText(tr("stress_warning", self.window.language) +
-            (" " + tr("no_temperature", self.window.language) if not self.has_temperature else "") +
-            (" " + tr("sensor_denied", self.window.language) if self.permission_denied else ""))
+        self.refresh_warning()
         self.refresh_table()
         if old_keys != set(self.catalog):
             self.plot.refresh()

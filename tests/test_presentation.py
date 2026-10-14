@@ -303,6 +303,24 @@ class NativePresentationTests(unittest.TestCase):
         self.assertFalse(self.window.stress_page.enhanced.isChecked())
         self.assertFalse(self.window.authorization_timer.isActive())
 
+    def test_normal_monitoring_has_no_engineering_prose_or_empty_notice_rows(self):
+        page = self.window.stress_page
+        for language in ("zh", "en"):
+            self.window.language = language
+            for state in ("monitor_standard", "monitor_authorized"):
+                page.access_status_key = state
+                page.retranslate()
+                self.assertEqual(page.access_status.text(), "")
+                self.assertTrue(page.access_status.isHidden())
+                self.assertTrue(page.warning.isHidden())
+            self.assertNotRegex(page.enhanced.toolTip(), "只读|推算|read-only|inferred")
+        page.active = True
+        try:
+            page.refresh_warning()
+            self.assertFalse(page.warning.isHidden())
+        finally:
+            page.active = False
+
 
 if __name__ == "__main__":
     unittest.main()
