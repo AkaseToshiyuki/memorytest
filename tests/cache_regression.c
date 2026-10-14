@@ -24,6 +24,7 @@ int main(int argc, char **argv) {
     cache_max_bytes = 128 * KB;
     cache_thread_limit = 1;
     cache_quick = 1;
+    if (argc > 1 && !strcmp(argv[1], "sparse")) cache_max_bytes = 24 * KB;
     if (argc > 1 && !strcmp(argv[1], "missing")) {
         global_cache_config.l1d_size = global_cache_config.l2_size = 0;
     }

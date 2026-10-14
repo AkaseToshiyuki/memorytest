@@ -313,19 +313,23 @@ class StressPage(QWidget):
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.catalog))
         for row, (key, sensor) in enumerate(self.catalog.items()):
-            checkbox = self.table.item(row, 0) or QTableWidgetItem()
+            checkbox = self.table.item(row, 0)
+            if checkbox is None:
+                checkbox = QTableWidgetItem()
+                self.table.setItem(row, 0, checkbox)
             checkbox.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
             checkbox.setData(Qt.UserRole, key)
             checkbox.setCheckState(Qt.Checked if key in self.plot.visible else Qt.Unchecked)
-            self.table.setItem(row, 0, checkbox)
             values = [display(sensor["label"], self.window.language), sensor["unit"],
                       *[display(self.stats.get(key, {}).get(field), self.window.language) for field in ("current", "minimum", "maximum", "average")]]
             for column, value in enumerate(values, 1):
-                item = self.table.item(row, column) or QTableWidgetItem()
+                item = self.table.item(row, column)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.table.setItem(row, column, item)
                 item.setText(value)
                 if column == 1:
                     item.setForeground(QColor(curve_color(self.plot.colors.get(key, 0), self.window.theme)))
-                self.table.setItem(row, column, item)
         self.table.blockSignals(False)
 
     def sensor_toggled(self, item):

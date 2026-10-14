@@ -93,7 +93,7 @@ stress checks as well as existing contracts. It does not run the legacy heavy
 top-level smoke/sanity/regression commands. Native CPU checks use at most two
 threads; the stress check uses one thread, 1 MiB, and a 1.2-second limit.
 
-- `test_cache_report.py`: bounded 128 KiB end-to-end cache scan; no L3, unknown cache
+- `test_cache_report.py`: bounded 128 KiB end-to-end cache scan; no L3, sparse samples, unknown cache
   metadata, allocation failure, unknown available memory, creation/write failures.
 - `test_presentation.py`: hand-calculated values/units/SVG coordinates, stale-result
   exclusion, all four language/theme combinations, state preservation, contrast,
@@ -106,6 +106,9 @@ threads; the stress check uses one thread, 1 MiB, and a 1.2-second limit.
   heavyweight-dependency exclusion, idle resources and a monitoring-only session.
   It does not certify real GPU stress, SMC access on every Mac, or Windows LHM.
 
-Verification on 2026-10-14 before installer CI: 87 discovered, 81 passed, 6
-platform-dependent checks skipped on Linux x64. Full native-GPU and physical Mac
-sensor coverage remain device-dependent; a successful build is not that coverage.
+Verification on 2026-10-14 before installer CI: 88 discovered, 82 passed, 6
+platform-dependent checks skipped on Linux x64 (27.573 seconds). An additional
+1.5-second OpenCL-only session on a Tesla P4 completed with validated dispatch
+heartbeats and a duration stop. This is not long-duration stability coverage.
+Metal, physical Mac sensor access and Windows GPU/sensor coverage remain
+device-dependent; a successful build is not that coverage.

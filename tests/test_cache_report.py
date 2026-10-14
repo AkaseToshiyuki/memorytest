@@ -43,7 +43,7 @@ class CacheReportTests(unittest.TestCase):
                 (root / "reports/cache_hierarchy_report.md").symlink_to("/dev/full")
             result = subprocess.run([str(self.binary), mode], cwd=root, capture_output=True,
                                     text=True, timeout=30, stdin=subprocess.DEVNULL)
-            if mode in {"no_l3", "missing"} and not broken_directory and not full_device:
+            if mode in {"no_l3", "missing", "sparse"} and not broken_directory and not full_device:
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 path = root / "reports/cache_hierarchy_report.md"
                 self.assertIsNone(validate_report(path))
@@ -62,6 +62,9 @@ class CacheReportTests(unittest.TestCase):
 
     def test_no_l3_still_writes_scan(self):
         self.run_case("no_l3")
+
+    def test_sparse_scan_still_writes_data_without_inference(self):
+        self.run_case("sparse")
 
     def test_missing_cache_metadata_still_writes_scan(self):
         self.run_case("missing")

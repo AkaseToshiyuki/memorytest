@@ -109,3 +109,9 @@ jobs:
           name: MemoryTest-test-${{ matrix.label }}-unsigned
           path: release/desktop/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-${{ matrix.label }}
+          path: build/ui-failure/
+          if-no-files-found: ignore

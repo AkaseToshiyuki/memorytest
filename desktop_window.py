@@ -240,7 +240,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(4, tr("stress", self.language))
         for name, check in self.modules.items():
             check.setText(tr(name, self.language))
-            self.labels[name].setText(tr(self.module_status[name], self.language))
+            status = self.module_status[name]
+            self.labels[name].setText(tr("unavailable" if status == "unsupported" else status, self.language))
+            self.labels[name].setToolTip(tr(status, self.language))
         self.progress.setFormat(tr("progress", self.language, done="%v", total="%m"))
         self.status.setText(tr(self.status_key, self.language))
         self.log.setPlainText("\n".join(tr(name, self.language) + ": " + tr(status, self.language) for name, status in self.log_events))

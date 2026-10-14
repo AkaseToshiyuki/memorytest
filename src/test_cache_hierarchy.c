@@ -827,8 +827,7 @@ int run_cache_hierarchy_test(void) {
      * spurious). */
     const int SKIP_HEAD = 2;
 
-    /* Need at least 3 points past the skip to compute the slope. */
-    if (num_results < SKIP_HEAD + 3) return;
+    /* Too few points simply skip inference; measured data must still be saved. */
 
     for (int i = SKIP_HEAD + 2; i < num_results && num_hits < 8; i++) {
         if (results[i-2].rd_lat <= 0 || results[i-1].rd_lat <= 0 || results[i].rd_lat <= 0) continue;

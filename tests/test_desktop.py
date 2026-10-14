@@ -113,6 +113,8 @@ class WindowTests(unittest.TestCase):
         self.assertEqual([item for item in labels if item.text() == RELEASE_TAG], [self.window.version])
 
     def test_compact_layout_keeps_primary_controls_visible(self):
+        self.window.module_status["inter_core"] = "unsupported"
+        self.window.retranslate()
         self.window.resize(880, 720)
         self.window.show()
         self.app.processEvents()
@@ -120,7 +122,12 @@ class WindowTests(unittest.TestCase):
         for widget in (self.window.run_all, self.window.cancel, self.window.output,
                        self.window.progress, self.window.licenses):
             bottom_right = widget.mapTo(self.window, widget.rect().bottomRight())
-            self.assertTrue(self.window.rect().contains(bottom_right), widget.text() if hasattr(widget, "text") else str(widget))
+            if not self.window.rect().contains(bottom_right):
+                evidence = ROOT / "build/ui-failure"
+                evidence.mkdir(parents=True, exist_ok=True)
+                self.window.grab().save(str(evidence / "home.png"))
+            self.assertTrue(self.window.rect().contains(bottom_right),
+                            f"{widget.text() if hasattr(widget, 'text') else widget}: {bottom_right}, window={self.window.size()}")
             self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
 
     def test_single_tab_runs_only_its_module(self):

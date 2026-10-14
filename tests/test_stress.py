@@ -117,7 +117,7 @@ class SupervisorTests(unittest.TestCase):
                 emitted.append(data)
                 if callback:
                     callback(data, control)
-            code = run_session(root, root, ["cpu"], 1, 1, duration=.16, control=control, parent_pid=parent_pid,
+            code = run_session(root, root, ["cpu"], 1, 1, duration=2 if callback else .16, control=control, parent_pid=parent_pid,
                                capability_data=CAPS, child_factory=FakeChild, event=event)
             manifest = json.loads(next(root.glob("stress-runs/*/manifest.json")).read_text())
             self.assertTrue(all(child.stopped for child in created))

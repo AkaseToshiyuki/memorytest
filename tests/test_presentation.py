@@ -180,6 +180,15 @@ class NativePresentationTests(unittest.TestCase):
         self.assertEqual(len(page.plot.samples), 601)
         self.assertEqual(page.plot.samples[0][0], 400)
         page.refresh_table()
+        from PySide6.QtCore import qInstallMessageHandler
+        warnings = []
+        previous = qInstallMessageHandler(lambda _type, _context, message: warnings.append(message))
+        try:
+            page.refresh_table()
+            page.refresh_table()
+        finally:
+            qInstallMessageHandler(previous)
+        self.assertEqual(warnings, [])
         page.table.item(0, 0).setCheckState(Qt.Unchecked)
         self.assertFalse(page.plot.visible)
         self.assertEqual(page.stats["s"]["average"], 20)
