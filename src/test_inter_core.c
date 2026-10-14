@@ -24,7 +24,6 @@
 #define _GNU_SOURCE
 #include "common.h"
 #include "util.h"
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -32,6 +31,16 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+
+#if defined(__APPLE__) || defined(_WIN32)
+/* Affinity tags are not CPU IDs. A per-core matrix without verified pinning
+ * would mislabel scheduler migrations as inter-core hardware latency. */
+int main(void) {
+    fprintf(stderr, "UNSUPPORTED: this OS backend has no validated per-core matrix; "
+                    "inter-core latency matrix is unavailable.\n");
+    return 77;
+}
+#else
 
 /* ===== Tunables (compile-time; runtime scaling for big machines below) ===== */
 #define NUM_SAMPLES             10      /* samples per pair for latency */
@@ -779,3 +788,4 @@ int main(int argc, char *argv[]) {
     run_inter_core_latency_test();
     return 0;
 }
+#endif /* !__APPLE__ */

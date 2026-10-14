@@ -1,0 +1,99 @@
+name: Native desktop installers (unsigned preview)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/release-v0.1.0']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: Linux-x64
+            shell: bash
+            cc: gcc
+            python_arch: x64
+          - os: ubuntu-24.04-arm
+            label: Linux-arm64
+            shell: bash
+            cc: gcc
+            python_arch: arm64
+          - os: macos-15
+            label: macOS-arm64
+            shell: bash
+            cc: clang
+            python_arch: arm64
+          - os: macos-15-intel
+            label: macOS-x86_64
+            shell: bash
+            cc: clang
+            python_arch: x64
+          - os: windows-2022
+            label: Windows-x64
+            shell: 'msys2 {0}'
+            cc: gcc
+            python_arch: x64
+            msystem: UCRT64
+            msys_packages: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nsis
+          - os: windows-11-arm
+            label: Windows-arm64
+            shell: 'msys2 {0}'
+            cc: clang
+            python_arch: arm64
+            msystem: CLANGARM64
+            msys_packages: mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CC: ${{ matrix.cc }}
+      PYTHONUTF8: '1'
+      QT_QPA_PLATFORM: offscreen
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python_arch }}
+      - name: Windows native compiler and installer tooling
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          path-type: inherit
+          install: ${{ matrix.msys_packages }}
+      - name: Linux native GUI runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+      - name: Isolated Python dependencies
+        run: python -m pip install -r packaging/requirements-desktop.txt
+      - name: Independent kernel references and bounded native score
+        run: python -m unittest discover -s tests -p test_compute.py -v
+      - name: Desktop lifecycle and cancellation
+        run: python -m unittest discover -s tests -p test_desktop.py -v
+      - name: Workflow and platform contracts
+        if: runner.os != 'Windows'
+        run: |
+          python -m unittest discover -s tests -p test_workflow.py -v
+          python -m unittest discover -s tests -p test_platform.py -v
+      - name: Build native installer, no signing or publishing
+        run: python packaging/build_desktop.py
+      - name: Packaged runtime acceptance and resource measurement
+        run: python packaging/check_artifact.py
+      - name: Source distributions from the same commit
+        if: matrix.label == 'Linux-x64'
+        run: python packaging/build_source.py --output-dir release/desktop/source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MemoryTest-V0.1.0-${{ matrix.label }}-unsigned
+          path: release/desktop/
+          if-no-files-found: error

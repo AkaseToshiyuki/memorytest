@@ -4,9 +4,10 @@ from __future__ import annotations
 
 Produces a self-contained HTML file with:
   - System info section
-  - Overall score with letter grade
-  - Per-category scores with progress bars
-  - All benchmark tables (parsed from reports/*.md)
+  - Selected modules and run status (when a manifest is provided)
+  - Selected benchmark tables from a single run directory
+  - Measured ComputeMark v2 scalar scores when validated raw inputs are available
+  - Optional legacy diagnostic grades (--legacy-scores)
   - Inline SVG charts:
     - Cache hierarchy latency vs size
     - Memory bandwidth by operation
@@ -34,6 +35,7 @@ import math
 import re
 import sys
 from pathlib import Path
+from benchmark_registry import TESTS, COMPARABILITY, select_modules, report_filename
 
 ROOT = Path(__file__).parent.resolve()
 REPORTS = ROOT / "reports"
@@ -474,14 +476,15 @@ def _collect_cache_kpis() -> list:
     return out
 
 
-def _system_info_html() -> str:
+def _system_info_html(modules=None) -> str:
     """Top-of-page System Information card.
 
-    Pulls the System Configuration table from cache_hierarchy_report.md
-    (the canonical first source — every test binary writes the same fields).
+    Uses the first available selected report; every binary writes these fields.
     """
-    p = REPORTS / "cache_hierarchy_report.md"
-    if not p.exists():
+    p = next((REPORTS / TESTS[name]["report"]
+              for name in (TESTS if modules is None else modules)
+              if (REPORTS / TESTS[name]["report"]).is_file()), None)
+    if p is None:
         return '<div class="card"><h2>System Information</h2><p class="no-data">No report available</p></div>'
     text = p.read_text()
     # Find the table that follows "## System Configuration"
@@ -490,13 +493,13 @@ def _system_info_html() -> str:
         return '<div class="card"><h2>System Information</h2><p class="no-data">No system info parsed</p></div>'
     headers, rows = tbl
     body = "".join(
-        f"<tr><td>{html.escape(h)}</td><td>{html.escape(v)}</td></tr>"
-        for h, v in rows
+        f"<tr><td>{html.escape(row[0])}</td><td>{html.escape(row[1])}</td></tr>"
+        for row in rows if len(row) == 2
     )
     return (
         '<div class="card">'
         '<h2>System Information</h2>'
-        f'<table class="data"><thead><tr><th>{"</th><th>".join(headers)}</th></tr></thead>'
+        f'<table class="data"><thead><tr><th>{"</th><th>".join(html.escape(h) for h in headers)}</th></tr></thead>'
         f'<tbody>{body}</tbody></table>'
         '</div>'
     )
@@ -744,6 +747,7 @@ def _collect_multi_kpis() -> list:
         hl = h.lower()
         if "speedup" in hl: sp_col = i
         elif "efficiency" in hl: eff_col = i
+        elif "threads" in hl: thr_col = i
     if sp_col is None: return []
     best_sp, best_op, best_thr, best_eff = 0.0, "", "", 0.0
     effs = []
@@ -933,20 +937,102 @@ table.data tr:hover { background: #fafbfc; }
 """
 
 
-def build_html(score_dict: dict | None) -> str:
+def _run_status_html(modules, manifest):
+    parts = ['<div class="card"><h2>Run Summary / 本次测试</h2>']
+    parts.append(f'<p>Selected modules: {html.escape(", ".join(modules))}</p>')
+    if manifest:
+        parts.append(f'<p>Run ID: {html.escape(str(manifest.get("run_id", "")))}</p>')
+        parts.append(f'<p>Started: {html.escape(str(manifest.get("started_at", "")))}</p>')
+        rows = []
+        for result in manifest.get("modules", []):
+            if result["module"] in modules:
+                rows.append([result["module"], result["status"],
+                             str(result.get("duration_seconds", "")),
+                             str(result.get("exit_code", "")), result.get("message", "")])
+        parts.append(_table_html(["Module", "Status", "Seconds", "Exit code", "Details"], rows))
+        environment = manifest.get("environment", {})
+        if environment:
+            limits = environment.get("cgroup_v2_limits", {})
+            parts.append(_table_html(["Runtime environment", "Observed value"], [
+                ["Kernel / architecture", str(environment.get("kernel")) + " / " + str(environment.get("architecture"))],
+                ["CPU governor (first allowed CPU)", str(environment.get("cpu_governor", "unknown"))],
+                ["Visible cgroup v2 configuration", "; ".join(f"{k}: {v}" for k, v in limits.items()) or "unknown / unavailable (not proof of unrestricted CPU capacity)"],
+            ]))
+            if environment.get("macos_sysctl"):
+                parts.append(_table_html(["macOS public sysctl", "Observed value"],
+                                         list(environment["macos_sysctl"].items())))
+            if environment.get("macos_perflevels"):
+                parts.append('<h3>CPU core types / 大小核与共享缓存</h3><p>OS-reported levels; not per-worker CPU placement. Unknown fields are not guessed.</p>')
+                fields = ["level", "name", "physicalcpu", "logicalcpu", "l1dcachesize", "l2cachesize", "cpusperl2"]
+                parts.append(_table_html(["Level", "OS name", "Physical CPUs", "Logical CPUs", "L1D bytes", "L2 bytes", "CPUs/L2"],
+                                         [[str(level.get(key)) if level.get(key) is not None else "unknown" for key in fields]
+                                          for level in environment["macos_perflevels"]]))
+        if any(r.get("status") == "unsupported" for r in manifest.get("modules", [])):
+            parts.append('<p class="warn">Unsupported modules were not measured and are not passes. Other selected modules still run; unsupported-only runs exit with code 77.</p>')
+        if not manifest.get("success"):
+            parts.append('<p class="warn">Incomplete run / 测试未全部完成。Failed or interrupted modules are excluded from results and scoring.</p>')
+    else:
+        parts.append('<p class="warn">No run manifest: input files may come from different runs. Execution status is unverified.</p>')
+    parts.append('<p class="info">Passed means the process completed and a result table exists; it does not certify measurement accuracy.</p></div>')
+    return "\n".join(parts)
+
+
+def build_html(score_dict: dict | None, modules=None, manifest=None, legacy_scores=False) -> str:
+    modules = list(TESTS if modules is None else modules)
+    title = TESTS[modules[0]]["name"] + " Report" if len(modules) == 1 else "Memory & CPU Benchmark Report"
     parts = ['<!DOCTYPE html>', '<html lang="en">', '<head>',
              '<meta charset="UTF-8">',
              '<meta name="viewport" content="width=device-width, initial-scale=1">',
-             '<title>Memory Benchmark Report</title>',
+             f'<title>{html.escape(title)}</title>',
              f'<style>{CSS}</style>', '</head>', '<body>', '<div class="container">']
-    parts.append('<h1>Memory Benchmark Report</h1>')
+    parts.append(f'<h1>{html.escape(title)}</h1>')
+    parts.append(_run_status_html(modules, manifest))
     parts.append(f'<p class="subtitle">Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>')
 
     # --- System info: pinned to the very top, before all score/chart sections ---
-    parts.append(_system_info_html())
+    parts.append(_system_info_html(modules))
+    parts.append('<div class="card"><h2>Comparability / 可比性审计</h2>')
+    parts.append(_table_html(["Module", "Scope and limitations"],
+                             [[name, COMPARABILITY[name]] for name in modules]))
+    parts.append('</div>')
+
+    # Scores come only from the strict v2 sidecar, never legacy scalar/SIMD reports.
+    if score_dict and score_dict.get("compute_mark"):
+        c = score_dict["compute_mark"]
+        parts.append('<div class="card">')
+        parts.append(f'<h2>Memorytest ComputeMark {html.escape(c["version"])}</h2>')
+        parts.append('<div class="kpi-row">')
+        for label, value, unit in [
+            ("Single-thread score", f'{c["single_points"]:,}', "points"),
+            ("Measured multi-thread throughput score", f'{c["points"]:,}', "points"),
+            ("Measured integer bitwise throughput", f'{c["integer_gops"]:.3f}', "Gop/s"),
+            ("Measured scalar FP64 throughput", f'{c["fp64_gflops"]:.3f}', "GFLOP/s"),
+        ]:
+            parts.append(f'<div class="kpi"><div class="kpi-label">{label}</div><div class="kpi-value">{value}<span class="kpi-unit">{unit}</span></div></div>')
+        parts.append('</div>')
+        metadata = [
+            ["Protocol / profile", c["workload"] + " / " + c["profile"]],
+            ["Compiler / architecture", c["compiler"] + " / " + c["architecture"]],
+            ["Thread policy", f'{c["scope"]}: {c["threads"]} of {c["available_threads"]} available logical CPUs'],
+            ["OS / placement", c["os"] + " / " + c["placement_policy"]],
+            ["Pinned CPU IDs", ", ".join(map(str, c["cpu_ids"])) if c["affinity_verified"] else "Unavailable — OS scheduled (not pinned)"],
+            ["Kernel SHA-256", c["source_hash"]],
+            ["Maximum repeat spread", f'{c["max_spread_pct"]:.2f}%'],
+        ]
+        parts.append(_table_html(["Comparison metadata", "Value"], metadata))
+        if not c["affinity_verified"]:
+            parts.append('<p class="warn">macOS: verified USER_INITIATED QoS is a scheduling hint, not CPU-ID/P-core pinning. Same workload and point units, different placement policy: do not mix these results with Linux pinned-policy rankings. Native Apple Silicon performance validation is required.</p>')
+        if not c["stable"]:
+            parts.append('<p class="warn">UNSTABLE / 波动过大：本次分数仅供诊断，不用于排名；请减少后台负载后重测。</p>')
+        parts.append('<p class="info">Points = round(1000 × sqrt(integer Gop/s × scalar FP64 GFLOP/s)), separately for single-thread and measured multi-thread rates. No reference CPU, ceiling or extrapolation. Five repeats, each ≥100 ms. Match protocol, profile, compiler and allocation policy when comparing. This is a scalar workload rating, not SIMD peak or universal application performance; cross-ISA native validation remains pending.</p>')
+        parts.append('</div>')
+    if score_dict and "cpu_multi" in modules:
+        for warning in score_dict.get("warnings", []):
+            if warning.startswith("ComputeMark"):
+                parts.append(f'<div class="card warn">{html.escape(warning)}</div>')
 
     # --- Score section ---
-    if score_dict:
+    if legacy_scores and score_dict and score_dict.get("n_metrics_scored"):
         parts.append('<div class="card">')
         parts.append('<h2>Overall Score</h2>')
         parts.append('<div class="score-grid">')
@@ -996,370 +1082,24 @@ def build_html(score_dict: dict | None) -> str:
             </div>''')
         parts.append('</div>')
 
-    # --- Cache hierarchy chart ---
-    # --- Cache Hierarchy (KPI + chart + table + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>Cache Hierarchy</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Pointer-chase latency over working-set sizes spanning 1 KB to several GB. '
-        'When the working set exceeds the L1d / L2 / L3 capacity, latency '
-        'jumps sharply as misses start to hit the next level (L2 / L3 / RAM). '
-        'Cache-level boundaries are <b>determined from measured latency jumps</b> — '
-        'the <i>Expected</i> column is the level inferred from the latency boundary; '
-        '<i>Analysis</i> describes the transition.  System-detected cache sizes are '
-        'shown in the comparison table below as a reference only.'
-        '</p>'
-    )
-    # KPI cards (L1D / L2 / L3 / RAM latency) — concrete numbers, prominent
-    kpis = _collect_cache_kpis()
-    if kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    cache_pts = _collect_cache_chart_data()
-    if cache_pts:
-        parts.append(_svg_line_chart(cache_pts, width=700, height=240,
-                                      xlabel="Buffer size", ylabel="RdLat (ns)",
-                                      title="Latency vs working-set size",
-                                      log_y=True))
-    else:
-        parts.append('<p class="no-data">No cache data</p>')
-    # Also include the table
-    p = REPORTS / "cache_hierarchy_report.md"
-    if p.exists():
-        text = p.read_text()
-        tbl = _find_data_table_after(text, "RdLat(ns)")
-        if tbl:
-            parts.append(_table_html(*tbl))
-        # Inferred vs Reported comparison table — shows both the measured
-        # boundary (from latency jumps) and the system-reported cache size.
-        ir_tbl = _find_data_table_after(text, "Inferred (from latency)")
-        if not ir_tbl:
-            ir_tbl = _find_data_table_after(text, "Inferred")
-        if ir_tbl:
-            parts.append('<h3 style="margin-top:24px">Inferred vs Reported</h3>')
-            parts.append(_table_html(*ir_tbl))
-    # Interpretation
-    if kpis and len(kpis) >= 4:
-        try:
-            l1, l2, l3, ram = (float(k[1]) for k in kpis[:4])
-            ratio_l1l2 = l2 / l1 if l1 > 0 else 0
-            ratio_l2l3 = l3 / l2 if l2 > 0 else 0
-            ratio_l3ram = ram / l3 if l3 > 0 else 0
-            note = (
-                f'L1→L2 transition is <b>{ratio_l1l2:.1f}×</b>, '
-                f'L2→L3 is <b>{ratio_l2l3:.1f}×</b>, '
-                f'L3→RAM is <b>{ratio_l3ram:.1f}×</b>. '
-            )
-            if 1.5 <= ratio_l1l2 <= 5 and 1.1 <= ratio_l2l3 <= 3 and 1.5 <= ratio_l3ram <= 10:
-                note += 'All three transitions fall in the expected range for a healthy cache hierarchy.'
-            elif ratio_l3ram < 1.3:
-                note += 'L3→RAM transition is suspiciously small — likely the working set did not exceed L3.'
-            else:
-                note += 'Some transitions look unusual; check whether the working set was large enough.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    parts.append('</div>')
-
-    # --- Bandwidth chart (KPI + chart + table + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>Memory Bandwidth</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Multi-threaded sustained bandwidth for <b>Read</b>, <b>Write</b> and '
-        '<b>Copy</b> (read-modify-write) over a 256 MB buffer with one thread '
-        'per logical core. The numbers reflect what real workloads can expect: '
-        'Read is usually the highest, Copy is bottlenecked by write bandwidth.'
-        '</p>'
-    )
-    bw_kpis = _collect_bw_kpis()
-    if bw_kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in bw_kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    bw_pts = _collect_bw_chart_data()
-    if bw_pts:
-        parts.append(_svg_bar_chart(bw_pts, width=600, height=200,
-                                    xlabel="Operation", ylabel="Bandwidth (MB/s)",
-                                    title="Multi-channel memory bandwidth"))
-    p = REPORTS / "memory_bandwidth_report.md"
-    if p.exists():
-        tbl_html = _bandwidth_table_html(p.read_text())
-        if tbl_html:
-            parts.append(tbl_html)
-    if bw_kpis and len(bw_kpis) >= 3:
-        try:
-            read_v, write_v, copy_v = (float(k[1]) for k in bw_kpis[:3])
-            note = (
-                f'<b>Read</b> is {read_v:.0f} MB/s, <b>Write</b> {write_v:.0f} MB/s, '
-                f'<b>Copy</b> {copy_v:.0f} MB/s. '
-            )
-            r_w = read_v / write_v if write_v > 0 else 0
-            if r_w > 1.5:
-                note += f'Read is {r_w:.1f}× faster than Write — common on DDR systems with write-allocate.'
-            elif r_w > 1.0:
-                note += 'Read modestly outpaces Write — typical of balanced memory subsystems.'
-            else:
-                note += 'Write is faster than Read — uncommon, may indicate a write-combining buffer or measurement noise.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    parts.append('</div>')
-
-    # --- Inter-core (KPI + heatmap + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>Inter-Core Latency</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Cross-core CAS (compare-and-swap) latency matrix. Each cell shows '
-        'the round-trip time in nanoseconds for a ping-pong CAS between two '
-        'cores. Diagonal entries are skipped (same-core).'
-        '</p>'
-    )
-    ic_kpis = _collect_intercore_kpis()
-    if ic_kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in ic_kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    heatmap = CHARTS / "inter_core_heatmap.png"
-    uri = _png_data_uri(heatmap)
-    if uri:
-        parts.append(f'<img class="chart-img" src="{uri}" alt="Inter-core heatmap">')
-    else:
-        parts.append('<p class="no-data">No inter-core heatmap (run generate_report.py first to generate charts/)</p>')
-    tp_heatmap = CHARTS / "inter_core_throughput.png"
-    tp_uri = _png_data_uri(tp_heatmap)
-    if tp_uri:
-        parts.append(f'<h3>CAS Throughput (MOPS)</h3>')
-        parts.append(f'<img class="chart-img" src="{tp_uri}" alt="Inter-core throughput heatmap">')
-    if ic_kpis and len(ic_kpis) >= 3:
-        try:
-            lo, hi, mean = float(ic_kpis[0][1]), float(ic_kpis[1][1]), float(ic_kpis[2][1])
-            spread = hi - lo
-            note = (
-                f'Latency ranges from <b>{lo:.1f} ns</b> to <b>{hi:.1f} ns</b> '
-                f'(spread {spread:.1f} ns, mean {mean:.1f} ns). '
-            )
-            if spread < mean * 0.3:
-                note += 'Spread is small — likely a flat topology (single NUMA node or tightly-coupled mesh).'
-            elif spread < mean * 0.8:
-                note += 'Moderate spread — probably two NUMA nodes or chiplet halves with separate L3 slices.'
-            else:
-                note += 'Large spread — multiple NUMA domains with significantly different hop counts.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    parts.append('</div>')
-
-    # --- CPU ALU (KPI + chart + table + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>CPU ALU (Integer)</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Throughput of common integer operations. IPC (instructions per cycle) '
-        'is the primary signal: scalar ops typically max out at ~1 IPC on a '
-        '1-wide issue CPU, or higher on superscalar designs. Sustained IPC '
-        'close to the theoretical peak means the front-end and execution units '
-        'are well fed; much lower IPC indicates stalls (cache misses, '
-        'dependencies, branch mispredicts).'
-        '</p>'
-    )
-    alu_kpis = _collect_alu_kpis()
-    if alu_kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in alu_kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    alu_pts = _collect_alu_chart_data()
-    if alu_pts:
-        parts.append(_svg_bar_chart(alu_pts, width=600, height=200,
-                                     xlabel="Operation", ylabel="IPC (instructions/cycle)",
-                                     title="Integer operation throughput"))
-    p = REPORTS / "cpu_alu_report.md"
-    if p.exists():
-        text = p.read_text()
-        tbl = _find_data_table_after(text, "IPC")
-        if tbl:
-            parts.append(_table_html(*tbl))
-    if alu_kpis and len(alu_kpis) >= 3:
-        try:
-            best = float(alu_kpis[0][1])
-            avg = float(alu_kpis[1][1])
-            worst = float(alu_kpis[2][1])
-            note = (
-                f'Best IPC is <b>{best:.2f}</b>, average <b>{avg:.2f}</b>, '
-                f'worst <b>{worst:.2f}</b>. '
-            )
-            if best >= 2.0:
-                note += 'Superscalar execution confirmed — at least 2 integer ops dispatched per cycle.'
-            elif best >= 1.0:
-                note += 'Single-issue throughput — the core issues at most one integer op per cycle.'
-            else:
-                note += 'IPC below 1.0 — heavy register pressure or microcode stalls.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    else:
-        # KPI collector returned nothing — likely because PMU was restricted
-        # and every row's IPC reads "N/A". Surface this so the user knows.
+    if "cache_hierarchy" in modules:
+        # --- Cache hierarchy chart ---
+        # --- Cache Hierarchy (KPI + chart + table + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>Cache Hierarchy</h2>')
         parts.append(
-            '<p style="margin:10px 0 0 0;color:#888;font-size:0.92em;font-style:italic">'
-            'No IPC numbers available — PMU is restricted on this host '
-            '(see <code>perf_event_paranoid</code> in System Information). '
-            'The data table below shows <b>ns/op</b> as a fallback signal.'
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Pointer-chase latency over working-set sizes spanning 1 KB to several GB. '
+            'When the working set exceeds the L1d / L2 / L3 capacity, latency '
+            'jumps sharply as misses start to hit the next level (L2 / L3 / RAM). '
+            'Cache-level boundaries are <b>determined from measured latency jumps</b> — '
+            'the <i>Expected</i> column is the level inferred from the latency boundary; '
+            '<i>Analysis</i> describes the transition.  System-detected cache sizes are '
+            'shown in the comparison table below as a reference only.'
             '</p>'
         )
-    parts.append('</div>')
-
-    # --- CPU Float (SIMD) (KPI + chart + table + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>CPU Floating Point &amp; SIMD (NEON)</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Latency of floating-point and SIMD (128-bit NEON) operations. '
-        'Lower ns/op is better; SIMD should be several times faster than '
-        'the equivalent scalar code. SIMD-only operations are filtered '
-        'out from the chart; scalar floats stay in the data table.'
-        '</p>'
-    )
-    simd_kpis = _collect_simd_kpis()
-    if simd_kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in simd_kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    simd_pts = _collect_simd_chart_data()
-    if simd_pts:
-        parts.append(_svg_bar_chart(simd_pts, width=600, height=200,
-                                     xlabel="Operation", ylabel="ns/op",
-                                     title="SIMD (128-bit NEON) latency per op"))
-    p = REPORTS / "cpu_float_report.md"
-    if p.exists():
-        text = p.read_text()
-        tbl = _find_data_table_after(text, "ns/op")
-        if tbl:
-            parts.append(_table_html(*tbl))
-    if simd_kpis and len(simd_kpis) >= 3:
-        try:
-            best = float(simd_kpis[0][1])
-            avg = float(simd_kpis[1][1])
-            worst = float(simd_kpis[2][1])
-            ratio = worst / best if best > 0 else 0
-            note = (
-                f'Fastest SIMD op is <b>{best:.2f} ns/op</b>, average <b>{avg:.2f}</b>, '
-                f'slowest <b>{worst:.2f}</b> ({ratio:.1f}× spread). '
-            )
-            if best < 1.0:
-                note += 'SIMD pipeline is running at &lt;1 ns/op — multiple SIMD ops issued per cycle.'
-            elif best < 4.0:
-                note += 'Single-issue SIMD throughput — one SIMD op per few cycles.'
-            else:
-                note += 'Slow SIMD pipeline — likely reciprocal/sqrt or division microcode.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    parts.append('</div>')
-
-    # --- Multi-Core Scaling (KPI + PNG chart + table + interpretation) ---
-    parts.append('<div class="card">')
-    parts.append('<h2>Multi-Core Scaling</h2>')
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'How well each operation scales as we add threads. <b>Speedup</b> is '
-        'time(1 thread) / time(N threads); <b>Efficiency</b> is speedup / N. '
-        'Memory-bound operations (Mul, FPU) typically keep &gt;80% efficiency '
-        'until they hit the memory bandwidth wall; ALU bandwidth-bound ops '
-        'saturate earlier.'
-        '</p>'
-    )
-    multi_kpis = _collect_multi_kpis()
-    if multi_kpis:
-        cards = "".join(
-            f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
-            for label, value, unit in multi_kpis
-        )
-        parts.append(f'<div class="kpi-row">{cards}</div>')
-    multi_png = CHARTS / "multi_core_scaling.png"
-    multi_uri = _png_data_uri(multi_png)
-    if multi_uri:
-        parts.append(f'<img class="chart-img" src="{multi_uri}" alt="Multi-core scaling">')
-    else:
-        parts.append('<p class="no-data">No multi-core chart (run generate_report.py first to generate charts/)</p>')
-    p = REPORTS / "cpu_multi_core_report.md"
-    if p.exists():
-        text = p.read_text()
-        tbl = _find_data_table_after(text, "Speedup")
-        if tbl:
-            parts.append(_table_html(*tbl))
-        else:
-            parts.append('<p class="no-data">No multi-core table</p>')
-    else:
-        parts.append('<p class="no-data">cpu_multi_core_report.md not found</p>')
-    if multi_kpis and len(multi_kpis) >= 3:
-        try:
-            sp = float(multi_kpis[0][1].replace("x", ""))
-            eff = float(multi_kpis[1][1])
-            note = (
-                f'Best speedup is <b>{sp:.2f}×</b> with <b>{eff:.1f}%</b> efficiency. '
-            )
-            if sp >= 8 and eff >= 80:
-                note += 'Excellent scaling — the operation is genuinely parallel and not memory-bound.'
-            elif sp >= 4 and eff >= 50:
-                note += 'Decent scaling — some shared-resource contention (L3, memory bus) is showing up.'
-            elif sp >= 2:
-                note += 'Limited scaling — the workload is bandwidth- or contention-bound beyond a few threads.'
-            else:
-                note += 'Poor scaling — likely serialised on a shared resource (lock, atomic, single-port L3).'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-        except (ValueError, IndexError):
-            pass
-    parts.append('</div>')
-
-    # --- CPU Branch (KPI cards + bar chart + table + interpretation) ---
-    parts.append('<div class="card"><h2>CPU Branch</h2>')
-    # Header paragraph: what this test measures + caveat about compiler folding
-    parts.append(
-        '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
-        'Each row measures wall-clock cost per branch across distinct branch patterns: '
-        '<i>Predictable</i> (always/never taken) saturates the predictor, '
-        '<i>Unpredictable</i> (random 50%) is the worst case, '
-        '<i>Pattern</i> toggles test the pattern-history table, '
-        '<i>Adaptive</i> tests hysteresis recovery. '
-        'Rows with <code>0.00</code> ns/branch marked with <code>*</code> indicate '
-        'the compiler statically proved the condition tautological and emitted '
-        'no branch instruction (lower bound, not a predictor measurement). '
-        'The Mispred Rate column requires unrestricted <code>perf_event_open</code> '
-        '(N/A on this system — see <code>perf_event_paranoid</code> in Notes).'
-        '</p>'
-    )
-    p = REPORTS / "cpu_branch_report.md"
-    if p.exists():
-        text = p.read_text()
-        # The header is `| Pattern | Category | ...` (newer) or
-        # `| Operation | Pattern | ...` (older). Try "Pattern" first
-        # (always present, always a column) then fall back.
-        tbl = _find_data_table_after(text, "Pattern")
-        if not tbl:
-            tbl = _find_data_table_after(text, "Operation")
-
-        # KPI cards
-        kpis = _collect_branch_kpis()
+        # KPI cards (L1D / L2 / L3 / RAM latency) — concrete numbers, prominent
+        kpis = _collect_cache_kpis()
         if kpis:
             cards = "".join(
                 f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
@@ -1367,45 +1107,399 @@ def build_html(score_dict: dict | None) -> str:
                 for label, value, unit in kpis
             )
             parts.append(f'<div class="kpi-row">{cards}</div>')
+        cache_pts = _collect_cache_chart_data()
+        if cache_pts:
+            parts.append(_svg_line_chart(cache_pts, width=700, height=240,
+                                          xlabel="Buffer size", ylabel="RdLat (ns)",
+                                          title="Latency vs working-set size",
+                                          log_y=True))
+        else:
+            parts.append('<p class="no-data">No cache data</p>')
+        # Also include the table
+        p = REPORTS / "cache_hierarchy_report.md"
+        if p.exists():
+            text = p.read_text()
+            tbl = _find_data_table_after(text, "RdLat(ns)")
+            if tbl:
+                parts.append(_table_html(*tbl))
+            # Inferred vs Reported comparison table — shows both the measured
+            # boundary (from latency jumps) and the system-reported cache size.
+            ir_tbl = _find_data_table_after(text, "Inferred (from latency)")
+            if not ir_tbl:
+                ir_tbl = _find_data_table_after(text, "Inferred")
+            if ir_tbl:
+                parts.append('<h3 style="margin-top:24px">Inferred vs Reported</h3>')
+                parts.append(_table_html(*ir_tbl))
+        # Interpretation
+        if kpis and len(kpis) >= 4:
+            try:
+                l1, l2, l3, ram = (float(k[1]) for k in kpis[:4])
+                ratio_l1l2 = l2 / l1 if l1 > 0 else 0
+                ratio_l2l3 = l3 / l2 if l2 > 0 else 0
+                ratio_l3ram = ram / l3 if l3 > 0 else 0
+                note = (
+                    f'L1→L2 transition is <b>{ratio_l1l2:.1f}×</b>, '
+                    f'L2→L3 is <b>{ratio_l2l3:.1f}×</b>, '
+                    f'L3→RAM is <b>{ratio_l3ram:.1f}×</b>. '
+                )
+                if 1.5 <= ratio_l1l2 <= 5 and 1.1 <= ratio_l2l3 <= 3 and 1.5 <= ratio_l3ram <= 10:
+                    note += 'All three transitions fall in the expected range for a healthy cache hierarchy.'
+                elif ratio_l3ram < 1.3:
+                    note += 'L3→RAM transition is suspiciously small — likely the working set did not exceed L3.'
+                else:
+                    note += 'Some transitions look unusual; check whether the working set was large enough.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        parts.append('</div>')
 
-        # Bar chart of ns/branch per pattern (zero_marker draws a grey
-        # stub for patterns the compiler folded, so they're visible).
-        branch_pts = _collect_branch_chart_data()
-        if branch_pts:
-            parts.append(_svg_bar_chart(branch_pts, width=720, height=220,
-                                        xlabel="Branch pattern",
-                                        ylabel="ns / branch",
-                                        title="Branch cost per pattern (lower = better; grey stub = no branch emitted)",
-                                        zero_marker=True))
-
-        # Data table (existing)
-        if tbl:
-            parts.append(_table_html(*tbl))
-
-        # Interpretation paragraph (auto-derived from the data)
-        if kpis and len(kpis) >= 3:
-            real_avg = float(kpis[2][1])
-            note = (
-                f'Average cost on patterns with real branches is <b>{real_avg:.2f} ns/branch</b>. '
-                f'On a {3000} MHz CPU, this is ~{real_avg * 3:.1f} cycles per branch. '
+    if "memory_bandwidth" in modules:
+        # --- Bandwidth chart (KPI + chart + table + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>Memory Bandwidth</h2>')
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Multi-threaded sustained bandwidth for <b>Read</b>, <b>Write</b> and '
+            '<b>Copy</b> (read-modify-write) over a 256 MB buffer with one thread '
+            'per logical core. The numbers reflect what real workloads can expect: '
+            'Read is usually the highest, Copy is bottlenecked by write bandwidth.'
+            '</p>'
+        )
+        bw_kpis = _collect_bw_kpis()
+        if bw_kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in bw_kpis
             )
-            if real_avg < 1.0:
-                note += 'The predictor is performing well — most branches resolve in &lt;1 cycle on average.'
-            elif real_avg < 2.0:
-                note += 'Predictor performance is reasonable; some miss penalty is visible.'
-            else:
-                note += 'High miss penalty — consider whether the workload has data-dependent control flow.'
-            parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
-    else:
-        parts.append('<p class="no-data">cpu_branch_report.md not found</p>')
-    parts.append('</div>')
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+        bw_pts = _collect_bw_chart_data()
+        if bw_pts:
+            parts.append(_svg_bar_chart(bw_pts, width=600, height=200,
+                                        xlabel="Operation", ylabel="Bandwidth (MB/s)",
+                                        title="Multi-channel memory bandwidth"))
+        p = REPORTS / "memory_bandwidth_report.md"
+        if p.exists():
+            tbl_html = _bandwidth_table_html(p.read_text())
+            if tbl_html:
+                parts.append(tbl_html)
+        if bw_kpis and len(bw_kpis) >= 3:
+            try:
+                read_v, write_v, copy_v = (float(k[1]) for k in bw_kpis[:3])
+                note = (
+                    f'<b>Read</b> is {read_v:.0f} MB/s, <b>Write</b> {write_v:.0f} MB/s, '
+                    f'<b>Copy</b> {copy_v:.0f} MB/s. '
+                )
+                r_w = read_v / write_v if write_v > 0 else 0
+                if r_w > 1.5:
+                    note += f'Read is {r_w:.1f}× faster than Write — common on DDR systems with write-allocate.'
+                elif r_w > 1.0:
+                    note += 'Read modestly outpaces Write — typical of balanced memory subsystems.'
+                else:
+                    note += 'Write is faster than Read — uncommon, may indicate a write-combining buffer or measurement noise.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        parts.append('</div>')
 
-    parts.append('<div class="footer">Memorytest v1.0.1 | Reports: reports/*.md | Source: 7 binaries under bin/</div>')
+    if "inter_core" in modules:
+        # --- Inter-core (KPI + heatmap + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>Inter-Core Latency</h2>')
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Cross-core CAS (compare-and-swap) latency matrix. Each cell shows '
+            'the round-trip time in nanoseconds for a ping-pong CAS between two '
+            'cores. Diagonal entries are skipped (same-core).'
+            '</p>'
+        )
+        ic_kpis = _collect_intercore_kpis()
+        if ic_kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in ic_kpis
+            )
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+        heatmap = CHARTS / "inter_core_heatmap.png"
+        uri = _png_data_uri(heatmap)
+        if uri:
+            parts.append(f'<img class="chart-img" src="{uri}" alt="Inter-core heatmap">')
+        else:
+            parts.append('<p class="no-data">Heatmap unavailable; raw latency table is shown below</p>')
+        ic_report = REPORTS / TESTS["inter_core"]["report"]
+        if ic_report.is_file():
+            for label, table in zip(["CAS Latency (ns)", "CAS Throughput (Mops/s)"],
+                                    _parse_all_tables(ic_report.read_text(encoding="utf-8"))[1:3]):
+                parts.append(f'<h3>{label}</h3><div style="overflow-x:auto">{_table_html(*table)}</div>')
+        tp_heatmap = CHARTS / "inter_core_throughput.png"
+        tp_uri = _png_data_uri(tp_heatmap)
+        if tp_uri:
+            parts.append(f'<h3>CAS Throughput (MOPS)</h3>')
+            parts.append(f'<img class="chart-img" src="{tp_uri}" alt="Inter-core throughput heatmap">')
+        if ic_kpis and len(ic_kpis) >= 3:
+            try:
+                lo, hi, mean = float(ic_kpis[0][1]), float(ic_kpis[1][1]), float(ic_kpis[2][1])
+                spread = hi - lo
+                note = (
+                    f'Latency ranges from <b>{lo:.1f} ns</b> to <b>{hi:.1f} ns</b> '
+                    f'(spread {spread:.1f} ns, mean {mean:.1f} ns). '
+                )
+                if spread < mean * 0.3:
+                    note += 'Spread is small — likely a flat topology (single NUMA node or tightly-coupled mesh).'
+                elif spread < mean * 0.8:
+                    note += 'Moderate spread — probably two NUMA nodes or chiplet halves with separate L3 slices.'
+                else:
+                    note += 'Large spread — multiple NUMA domains with significantly different hop counts.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        parts.append('</div>')
+
+    if "cpu_alu" in modules:
+        # --- CPU ALU (KPI + chart + table + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>CPU ALU (Integer)</h2>')
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Throughput of common integer operations. IPC (instructions per cycle) '
+            'is the primary signal: scalar ops typically max out at ~1 IPC on a '
+            '1-wide issue CPU, or higher on superscalar designs. Sustained IPC '
+            'close to the theoretical peak means the front-end and execution units '
+            'are well fed; much lower IPC indicates stalls (cache misses, '
+            'dependencies, branch mispredicts).'
+            '</p>'
+        )
+        alu_kpis = _collect_alu_kpis()
+        if alu_kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in alu_kpis
+            )
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+        alu_pts = _collect_alu_chart_data()
+        if alu_pts:
+            parts.append(_svg_bar_chart(alu_pts, width=600, height=200,
+                                         xlabel="Operation", ylabel="IPC (instructions/cycle)",
+                                         title="Integer operation throughput"))
+        p = REPORTS / "cpu_alu_report.md"
+        if p.exists():
+            text = p.read_text()
+            tbl = _find_data_table_after(text, "IPC")
+            if tbl:
+                parts.append(_table_html(*tbl))
+        if alu_kpis and len(alu_kpis) >= 3:
+            try:
+                best = float(alu_kpis[0][1])
+                avg = float(alu_kpis[1][1])
+                worst = float(alu_kpis[2][1])
+                note = (
+                    f'Best IPC is <b>{best:.2f}</b>, average <b>{avg:.2f}</b>, '
+                    f'worst <b>{worst:.2f}</b>. '
+                )
+                if best >= 2.0:
+                    note += 'Superscalar execution confirmed — at least 2 integer ops dispatched per cycle.'
+                elif best >= 1.0:
+                    note += 'Single-issue throughput — the core issues at most one integer op per cycle.'
+                else:
+                    note += 'IPC below 1.0 — heavy register pressure or microcode stalls.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        else:
+            # KPI collector returned nothing — likely because PMU was restricted
+            # and every row's IPC reads "N/A". Surface this so the user knows.
+            parts.append(
+                '<p style="margin:10px 0 0 0;color:#888;font-size:0.92em;font-style:italic">'
+                'No IPC numbers available — PMU is restricted on this host '
+                '(see <code>perf_event_paranoid</code> in System Information). '
+                'The data table below shows <b>ns/op</b> as a fallback signal.'
+                '</p>'
+            )
+        parts.append('</div>')
+
+    if "cpu_float" in modules:
+        # --- CPU Float (SIMD) (KPI + chart + table + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>CPU Floating Point &amp; SIMD</h2>')
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Latency of floating-point and SIMD (128-bit NEON) operations. '
+            'Lower ns/op is better; SIMD should be several times faster than '
+            'the equivalent scalar code. SIMD-only operations are filtered '
+            'out from the chart; scalar floats stay in the data table.'
+            '</p>'
+        )
+        simd_kpis = _collect_simd_kpis()
+        if simd_kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in simd_kpis
+            )
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+        simd_pts = _collect_simd_chart_data()
+        if simd_pts:
+            parts.append(_svg_bar_chart(simd_pts, width=600, height=200,
+                                         xlabel="Operation", ylabel="ns/op",
+                                         title="SIMD (128-bit NEON) latency per op"))
+        p = REPORTS / "cpu_float_report.md"
+        if p.exists():
+            text = p.read_text()
+            tbl = _find_data_table_after(text, "ns/op")
+            if tbl:
+                parts.append(_table_html(*tbl))
+        if simd_kpis and len(simd_kpis) >= 3:
+            try:
+                best = float(simd_kpis[0][1])
+                avg = float(simd_kpis[1][1])
+                worst = float(simd_kpis[2][1])
+                ratio = worst / best if best > 0 else 0
+                note = (
+                    f'Fastest SIMD op is <b>{best:.2f} ns/op</b>, average <b>{avg:.2f}</b>, '
+                    f'slowest <b>{worst:.2f}</b> ({ratio:.1f}× spread). '
+                )
+                if best < 1.0:
+                    note += 'SIMD pipeline is running at &lt;1 ns/op — multiple SIMD ops issued per cycle.'
+                elif best < 4.0:
+                    note += 'Single-issue SIMD throughput — one SIMD op per few cycles.'
+                else:
+                    note += 'Slow SIMD pipeline — likely reciprocal/sqrt or division microcode.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        parts.append('</div>')
+
+    if "cpu_multi" in modules:
+        # --- Multi-Core Scaling (KPI + PNG chart + table + interpretation) ---
+        parts.append('<div class="card">')
+        parts.append('<h2>Multi-Core Scaling</h2>')
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'How well each operation scales as we add threads. <b>Speedup</b> is '
+            'measured rate(N threads) / measured rate(1 thread) in ComputeMark v2; '
+            '<b>Efficiency</b> is speedup / N. Rates count completed work over a '
+            'common wall-time interval. Legacy reports used a different time-ratio protocol.'
+            '</p>'
+        )
+        multi_kpis = _collect_multi_kpis()
+        if multi_kpis:
+            cards = "".join(
+                f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                for label, value, unit in multi_kpis
+            )
+            parts.append(f'<div class="kpi-row">{cards}</div>')
+        multi_png = CHARTS / "multi_core_scaling.png"
+        multi_uri = _png_data_uri(multi_png)
+        if multi_uri:
+            parts.append(f'<img class="chart-img" src="{multi_uri}" alt="Multi-core scaling">')
+        else:
+            parts.append('<p class="no-data">Optional chart unavailable; results are shown in the table below</p>')
+        p = REPORTS / "cpu_multi_core_report.md"
+        if p.exists():
+            text = p.read_text()
+            topology = _find_data_table_after(text, "CPUs sharing L2")
+            if topology:
+                parts.append('<h3>macOS CPU performance levels</h3><p>OS names and counts, not guaranteed worker placement; zero fields are unknown.</p>')
+                parts.append(_table_html(*topology))
+            tbl = _find_data_table_after(text, "Speedup")
+            if tbl:
+                parts.append(_table_html(*tbl))
+            else:
+                parts.append('<p class="no-data">No multi-core table</p>')
+        else:
+            parts.append('<p class="no-data">cpu_multi_core_report.md not found</p>')
+        if multi_kpis and len(multi_kpis) >= 3:
+            try:
+                sp = float(multi_kpis[0][1].replace("x", ""))
+                eff = float(multi_kpis[1][1])
+                note = (
+                    f'Best speedup is <b>{sp:.2f}×</b> with <b>{eff:.1f}%</b> efficiency. '
+                )
+                note += 'Scaling alone cannot identify a bottleneck: CPU quotas, SMT, scheduling, power and temperature may all affect it.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+            except (ValueError, IndexError):
+                pass
+        parts.append('</div>')
+
+    if "cpu_branch" in modules:
+        # --- CPU Branch (KPI cards + bar chart + table + interpretation) ---
+        parts.append('<div class="card"><h2>CPU Branch</h2>')
+        # Header paragraph: what this test measures + caveat about compiler folding
+        parts.append(
+            '<p style="margin:8px 0 14px 0;color:#444;line-height:1.5">'
+            'Each row measures wall-clock cost per branch across distinct branch patterns: '
+            '<i>Predictable</i> (always/never taken) saturates the predictor, '
+            '<i>Unpredictable</i> (random 50%) is the worst case, '
+            '<i>Pattern</i> toggles test the pattern-history table, '
+            '<i>Adaptive</i> tests hysteresis recovery. '
+            'Rows with <code>0.00</code> ns/branch marked with <code>*</code> indicate '
+            'the compiler statically proved the condition tautological and emitted '
+            'no branch instruction (lower bound, not a predictor measurement). '
+            'The Mispred Rate column requires unrestricted <code>perf_event_open</code> '
+            '(N/A on this system — see <code>perf_event_paranoid</code> in Notes).'
+            '</p>'
+        )
+        p = REPORTS / "cpu_branch_report.md"
+        if p.exists():
+            text = p.read_text()
+            # The header is `| Pattern | Category | ...` (newer) or
+            # `| Operation | Pattern | ...` (older). Try "Pattern" first
+            # (always present, always a column) then fall back.
+            tbl = _find_data_table_after(text, "Pattern")
+            if not tbl:
+                tbl = _find_data_table_after(text, "Operation")
+
+            # KPI cards
+            kpis = _collect_branch_kpis()
+            if kpis:
+                cards = "".join(
+                    f'<div class="kpi"><div class="kpi-label">{html.escape(label)}</div>'
+                    f'<div class="kpi-value">{html.escape(value)}<span class="kpi-unit">{html.escape(unit)}</span></div></div>'
+                    for label, value, unit in kpis
+                )
+                parts.append(f'<div class="kpi-row">{cards}</div>')
+
+            # Bar chart of ns/branch per pattern (zero_marker draws a grey
+            # stub for patterns the compiler folded, so they're visible).
+            branch_pts = _collect_branch_chart_data()
+            if branch_pts:
+                parts.append(_svg_bar_chart(branch_pts, width=720, height=220,
+                                            xlabel="Branch pattern",
+                                            ylabel="ns / branch",
+                                            title="Branch cost per pattern (lower = better; grey stub = no branch emitted)",
+                                            zero_marker=True))
+
+            # Data table (existing)
+            if tbl:
+                parts.append(_table_html(*tbl))
+
+            # Interpretation paragraph (auto-derived from the data)
+            if kpis and len(kpis) >= 3:
+                real_avg = float(kpis[2][1])
+                note = (
+                    f'Average cost on patterns with real branches is <b>{real_avg:.2f} ns/branch</b>. '
+                    f'On a {3000} MHz CPU, this is ~{real_avg * 3:.1f} cycles per branch. '
+                )
+                if real_avg < 1.0:
+                    note += 'The predictor is performing well — most branches resolve in &lt;1 cycle on average.'
+                elif real_avg < 2.0:
+                    note += 'Predictor performance is reasonable; some miss penalty is visible.'
+                else:
+                    note += 'High miss penalty — consider whether the workload has data-dependent control flow.'
+                parts.append(f'<p style="margin:10px 0 0 0;color:#555;font-size:0.92em">{note}</p>')
+        else:
+            parts.append('<p class="no-data">cpu_branch_report.md not found</p>')
+        parts.append('</div>')
+
+    parts.append('<div class="footer">Memorytest | Only selected modules from the specified report directory</div>')
     parts.append('</div></body></html>')
     return "\n".join(parts)
 
 
-def _ensure_charts() -> None:
+def _ensure_charts(modules=None) -> None:
     """Regenerate the matplotlib PNG charts in reports/charts/.
 
     The HTML report embeds three PNGs (cache latency, memory bandwidth,
@@ -1418,6 +1512,7 @@ def _ensure_charts() -> None:
 
     Safe to call multiple times — each helper is idempotent.
     """
+    modules = set(TESTS if modules is None else modules)
     try:
         import generate_report as gr
     except ImportError as e:
@@ -1433,14 +1528,14 @@ def _ensure_charts() -> None:
     alu_md   = REPORTS / "cpu_alu_report.md"
     float_md = REPORTS / "cpu_float_report.md"
     # Cache latency (no markdown consumer — chart from parsed table)
-    if cache_md.exists():
+    if "cache_hierarchy" in modules and cache_md.exists():
         try:
             data = gr.parse_cache_report(str(cache_md))
             gr.create_cache_latency_chart(data, str(CHARTS / "cache_latency.png"))
         except Exception as e:
             print(f"# WARN: cache_latency chart failed: {e}", file=sys.stderr)
     # Memory bandwidth
-    if bw_md.exists():
+    if "memory_bandwidth" in modules and bw_md.exists():
         try:
             gr.create_bandwidth_chart(str(bw_md), str(CHARTS / "memory_bandwidth.png"))
         except Exception as e:
@@ -1448,7 +1543,7 @@ def _ensure_charts() -> None:
     # Inter-core heatmap (use the freshly-written JSON when present so the
     # self-sentinel nulls are honoured by the heatmap renderer; fall back
     # to the markdown otherwise).
-    if ic_json.exists():
+    if "inter_core" in modules and ic_json.exists():
         try:
             gr.create_inter_core_heatmap_from_json(str(ic_json), str(CHARTS / "inter_core_heatmap.png"))
         except AttributeError:
@@ -1460,31 +1555,31 @@ def _ensure_charts() -> None:
                     print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
         except Exception as e:
             print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
-    elif ic_md.exists():
+    elif "inter_core" in modules and ic_md.exists():
         try:
             gr.create_inter_core_heatmap(str(ic_md), str(CHARTS / "inter_core_heatmap.png"))
         except Exception as e:
             print(f"# WARN: inter-core heatmap failed: {e}", file=sys.stderr)
     # Inter-core throughput heatmap (MOPS)
-    if ic_json.exists():
+    if "inter_core" in modules and ic_json.exists():
         try:
             gr.create_inter_core_throughput_heatmap_from_json(str(ic_json), str(CHARTS / "inter_core_throughput.png"))
         except Exception as e:
             print(f"# WARN: inter-core throughput heatmap failed: {e}", file=sys.stderr)
     # Multi-core scaling
-    if multi_md.exists():
+    if "cpu_multi" in modules and multi_md.exists():
         try:
             data = gr.extract_multi_core_data(str(multi_md))
             gr.create_multi_core_scaling_chart(data, str(CHARTS / "multi_core_scaling.png"))
         except Exception as e:
             print(f"# WARN: multi-core scaling chart failed: {e}", file=sys.stderr)
     # CPU ALU / Float (matplotlib flavours — informational, HTML uses SVG)
-    if alu_md.exists():
+    if "cpu_alu" in modules and alu_md.exists():
         try:
             gr.create_cpu_chart(str(alu_md), str(CHARTS / "cpu_alu.png"), chart_type="alu")
         except Exception as e:
             print(f"# WARN: cpu_alu chart failed: {e}", file=sys.stderr)
-    if float_md.exists():
+    if "cpu_float" in modules and float_md.exists():
         try:
             gr.create_cpu_chart(str(float_md), str(CHARTS / "cpu_float.png"), chart_type="float")
         except Exception as e:
@@ -1492,29 +1587,60 @@ def _ensure_charts() -> None:
 
 
 def main():
+    global REPORTS, CHARTS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output HTML path (default: {DEFAULT_OUTPUT})")
+    ap.add_argument("--output", "-o", type=Path, help="Output HTML path (defaults to a module-aware filename in --reports-dir)")
+    ap.add_argument("--reports-dir", type=Path, default=REPORTS, help="Read raw reports from this directory only")
+    ap.add_argument("--module", "-m", action="append", choices=TESTS, help="Only render selected modules (repeatable)")
+    source = ap.add_mutually_exclusive_group()
+    source.add_argument("--manifest", type=Path, help="Run manifest generated by run_benchmarks.py")
+    source.add_argument("--run-dir", type=Path, help="Regenerate an archived run (manifest + reports subdirectory)")
+    source.add_argument("--latest-run", action="store_true", help="Use most recently finished run under --reports-dir/runs")
+    ap.add_argument("--legacy-scores", action="store_true", help="Show old relative 0–100 diagnostic grades (hidden by default)")
     ap.add_argument("--skip-charts", action="store_true", help="Don't regenerate the matplotlib PNGs (HTML will use whatever is already in charts/)")
     args = ap.parse_args()
+    if args.latest_run:
+        candidates = []
+        for path in (args.reports_dir / "runs").glob("*/manifest.json"):
+            try:
+                if json.loads(path.read_text(encoding="utf-8")).get("finished_at"):
+                    candidates.append(path)
+            except (OSError, ValueError):
+                continue
+        if not candidates:
+            ap.error("No completed run found; use make test first, or specify --reports-dir for legacy data")
+        args.run_dir = max(candidates, key=lambda path: path.stat().st_mtime_ns).parent
+    if args.run_dir:
+        args.manifest = args.run_dir / "manifest.json"
+        args.reports_dir = args.run_dir / "reports"
+    REPORTS = args.reports_dir.resolve()
+    CHARTS = REPORTS / "charts"
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
+    modules = select_modules(args.module or (manifest.get("selected_modules") if manifest else None))
+    if manifest and not set(modules) <= set(manifest["selected_modules"]):
+        ap.error("Requested module was not selected in this run")
+    args.output = args.output or (args.run_dir or REPORTS) / report_filename(modules)
 
     if not args.skip_charts:
-        _ensure_charts()
+        _ensure_charts(modules)
 
     score_dict = None
     if HAS_SCORE:
         try:
-            summary = score_run()
-            display = collect_display_data()
+            summary = score_run(REPORTS, modules)
+            display = collect_display_data(REPORTS, modules)
             score_dict = score_to_dict(summary, display)
-            print(f"Score: {score_dict['overall']:.1f}/100 ({score_dict['letter']})")
+            if score_dict.get("compute_mark"):
+                c = score_dict["compute_mark"]
+                print(f"ComputeMark v2: single {c['single_points']}, multi {c['points']} points ({c['scope']}; stable={c['stable']})")
         except Exception as e:
             print(f"# WARN: scoring failed: {e}", file=sys.stderr)
     else:
         print(f"# WARN: report_score not available: {_SCORE_ERR}", file=sys.stderr)
 
-    html_str = build_html(score_dict)
+    html_str = build_html(score_dict, modules, manifest, args.legacy_scores)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(html_str)
+    args.output.write_text(html_str, encoding="utf-8")
     size_kb = args.output.stat().st_size / 1024
     print(f"HTML report written: {args.output}  ({size_kb:.1f} KB)")
     return 0

@@ -1,0 +1,42 @@
+name: Portability contracts (not performance rankings)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            cc: gcc
+          - os: ubuntu-24.04
+            cc: clang
+          - os: macos-15
+            cc: clang
+          - os: macos-15-intel
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CC: ${{ matrix.cc }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build seven module entry points
+        run: make -j2 tests
+      - name: Independent numerical references and bounded native CPU run
+        run: make check-compute
+      - name: Selection, isolation, failures and unsupported reporting
+        run: make check-workflow
+      - name: Native macOS public APIs and bounded memory/cache checks
+        run: make check-platform

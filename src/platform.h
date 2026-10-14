@@ -28,9 +28,9 @@
 Architecture platform_arch_detect(void);
 
 /* Detect actual SIMD capabilities at runtime.
- * x86: parses CPUID (no -march required)
- * arm: ID_AA64PFR0_EL1 / id_aa64isar0_el1
- * riscv: misa.V + vlenb
+ * x86: CPUID + OSXSAVE/XCR0 state (no -march required)
+ * arm: Linux ELF HWCAP (no direct EL1 register probe)
+ * riscv: Linux ELF HWCAP; vector width remains unknown
  * ppc: __builtin_cpu_supports("altivec"/"vsx")
  * Result is cached in the same SIMDInfo struct returned by get_simd_info(). */
 const SIMDInfo *platform_simd_detect(void);

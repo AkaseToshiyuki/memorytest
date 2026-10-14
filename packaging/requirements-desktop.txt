@@ -1,0 +1,4 @@
+# Keep GUI-only essentials: no Addons/WebEngine, scientific stack or web server.
+PySide6-Essentials==6.10.2
+pyinstaller==6.22.3
+psutil==7.1.0

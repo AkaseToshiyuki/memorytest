@@ -75,8 +75,8 @@
     },
     "cpu_multi": {
       "name": "CPU Multi-Core Test",
-      "description": "Multi-core speedup and efficiency",
-      "description_zh": "多核并行性能和扩展性测试",
+      "description": "ComputeMark v2 measured single/multi scalar throughput and scaling",
+      "description_zh": "ComputeMark v2 单线程/多线程实测标量吞吐量评分",
       "category": "cpu",
       "section": "CPU Multi-Core Scaling",
       "source": "src/test_cpu_multi.c",

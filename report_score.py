@@ -11,6 +11,10 @@ Scoring philosophy (deliberately simple, deliberately explainable):
 
   - Latency metrics (lower = better): score = 100 * (best_known / max(measured, best_known))
     where best_known is a physically-reasonable minimum.
+
+Memorytest ComputeMark v2 reads direct, counted scalar workloads from the CPU
+multi module. It never extrapolates single-core rates using unrelated speedups.
+The immutable protocol, strict input checks and formula live in compute_score.py.
   - Bandwidth / throughput (higher = better): score = 100 * (min(measured, best_known) / best_known)
   - IPC (higher = better for ALU): score = 100 * (measured / 1.0) clamped to [0, 100]
   - Branch latency ns (lower = better): score = 100 * (1.0 / max(measured, 0.5)) capped at 100
@@ -31,6 +35,8 @@ import statistics
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Callable
+from benchmark_registry import TESTS
+from compute_score import ComputeMarkScore, compute_mark_score
 
 ROOT = Path(__file__).parent.resolve()
 REPORTS = ROOT / "reports"
@@ -81,6 +87,10 @@ METRICS = [
     MetricSpec("simd_dot_ns",  "lower", 0.6, 1.0, "SIMD dot-product latency", "simd"),
 ]
 
+# Keep this stable once released. A formula or workload change requires a new
+# version so scores remain comparable only within a ComputeMark version.
+COMPUTE_MARK_VERSION = "v2"
+
 
 @dataclass
 class MetricScore:
@@ -113,6 +123,7 @@ class ScoreSummary:
     n_metrics_total: int
     n_metrics_scored: int
     warnings: list[str] = field(default_factory=list)
+    compute_mark: ComputeMarkScore | None = None
 
 
 def score_metric(value: float, spec: MetricSpec) -> float:
@@ -469,6 +480,7 @@ def parse_cpu_alu(text: str) -> dict:
     if not tbl: return out
     headers, rows = tbl
     ipc_col = _col_index(headers, "ipc")
+    ops_col = _col_index(headers, "ops/sec", "ops per sec")
     if ipc_col is None: ipc_col = len(headers) - 2
     targets = {"add": "alu_add_ipc", "mul": "alu_mul_ipc", "div": "alu_div_ipc",
                "and": "alu_and_ipc", "or": "alu_or_ipc", "xor": "alu_xor_ipc"}
@@ -479,6 +491,10 @@ def parse_cpu_alu(text: str) -> dict:
                 v = _safe_float(row[ipc_col])
                 if v is not None and 0 < v < 10:
                     out[key] = v
+                if tgt_lbl == "add" and ops_col is not None:
+                    ops = _safe_float(row[ops_col] if ops_col < len(row) else None)
+                    if ops is not None and ops > 0:
+                        out["alu_add_ops_sec"] = ops
                 break
     return out
 
@@ -489,6 +505,7 @@ def parse_cpu_float(text: str) -> dict:
     if not tbl: return out
     headers, rows = tbl
     ns_col = _col_index(headers, "ns/op", "ns_per_op", "nsec/op")
+    ops_col = _col_index(headers, "ops/sec", "ops per sec")
     if ns_col is None: ns_col = 3
     targets = {"simd fadd": "simd_fadd_ns", "simd fmul": "simd_fmul_ns",
                "simd fma":  "simd_fma_ns",  "simd dot":  "simd_dot_ns"}
@@ -499,6 +516,10 @@ def parse_cpu_float(text: str) -> dict:
                 v = _safe_float(row[ns_col])
                 if v is not None and 0.01 < v < 1000:
                     out[key] = v
+                if tgt_lbl == "simd fma" and ops_col is not None:
+                    ops = _safe_float(row[ops_col] if ops_col < len(row) else None)
+                    if ops is not None and ops > 0:
+                        out["simd_fma_ops_sec"] = ops
                 break
     return out
 
@@ -530,17 +551,49 @@ def parse_cpu_multi(text: str) -> dict:
     key containing a list of {op, threads, speedup, efficiency, status} records,
     plus 'bw_saturation' for the bandwidth saturation table."""
     out = {}
-    # Multi-core scaling table
-    tbl = _find_data_table_after(text, "Multi-Core Scaling")
-    if tbl:
-        headers, rows = tbl
+    # The report writes one scaling table per operation, separated by blank
+    # lines. Scan every Markdown table with the expected columns rather than
+    # relying on a single heading or only accepting the first table.
+    import re
+    lines = text.splitlines()
+    delim_re = re.compile(r"^[\s\-:|]+\|?$")
+
+    def all_tables():
+        for i in range(len(lines) - 1):
+            if "|" not in lines[i] or not delim_re.match(lines[i + 1]):
+                continue
+            headers = [c.strip().rstrip("*").strip() for c in lines[i].split("|")]
+            if headers and not headers[0]: headers = headers[1:]
+            if headers and not headers[-1]: headers = headers[:-1]
+            rows = []
+            j = i + 2
+            while j < len(lines):
+                if lines[j].lstrip().startswith("#"):
+                    break
+                # The C report separates operation groups with blank lines
+                # but deliberately keeps the original table header. Retain
+                # compatible rows across those visual separators.
+                if not lines[j].strip():
+                    j += 1
+                    continue
+                if "|" not in lines[j] or delim_re.match(lines[j]):
+                    break
+                row = [c.strip() for c in lines[j].split("|")]
+                if row and not row[0]: row = row[1:]
+                if row and not row[-1]: row = row[:-1]
+                if len(row) == len(headers): rows.append(row)
+                j += 1
+            if rows: yield headers, rows
+
+    scaling = []
+    for headers, rows in all_tables():
         op_col = _col_index(headers, "operation")
         th_col = _col_index(headers, "threads")
         sp_col = _col_index(headers, "speedup")
         ef_col = _col_index(headers, "efficiency")
         st_col = _col_index(headers, "status")
-        scaling = []
-        if op_col is not None and th_col is not None:
+        time_col = _col_index(headers, "time(ms)", "time")
+        if op_col is not None and th_col is not None and sp_col is not None and ef_col is not None:
             for row in rows:
                 op = _row_label(row)
                 threads = _safe_int(row[th_col] if th_col < len(row) else None)
@@ -548,15 +601,17 @@ def parse_cpu_multi(text: str) -> dict:
                 speedup = _safe_float(speedup_str)
                 eff_str = row[ef_col].strip().rstrip("%") if ef_col is not None and ef_col < len(row) else ""
                 efficiency = _safe_float(eff_str)
+                time_ms = _safe_float(row[time_col] if time_col is not None and time_col < len(row) else None)
                 status = row[st_col].strip() if st_col is not None and st_col < len(row) else ""
                 if op and threads is not None:
                     scaling.append({
                         "op": op, "threads": threads,
                         "speedup": speedup, "efficiency": efficiency,
+                        "time_ms": time_ms,
                         "status": status,
                     })
-        if scaling:
-            out["multi_scaling"] = scaling
+    if scaling:
+        out["multi_scaling"] = scaling
     # Bandwidth saturation table
     tbl2 = _find_data_table_after(text, "Memory Bandwidth Saturation")
     if tbl2:
@@ -602,28 +657,34 @@ PARSERS = {
 }
 
 
-def collect_metrics() -> dict:
-    """Parse all reports/*.md and return {metric_key: value}."""
+def collect_metrics(reports_dir=None, modules=None) -> dict:
+    """Parse only the selected modules from the explicit run directory."""
+    reports_dir = Path(reports_dir) if reports_dir is not None else REPORTS
     metrics = {}
-    for category, parser in PARSERS.items():
-        candidates = list(REPORTS.glob(f"{category}_report.md"))
-        if not candidates:
-            candidates = list(REPORTS.glob(f"{category}*report*.md"))
-        if not candidates:
+    for name in (TESTS if modules is None else modules):
+        path = reports_dir / TESTS[name]["report"]
+        category = path.name.removesuffix("_report.md")
+        parser = PARSERS[category]
+        if not path.is_file():
             continue
-        text = candidates[0].read_text()
         try:
-            metrics.update(parser(text))
+            metrics.update(parser(path.read_text(encoding="utf-8")))
         except Exception as e:
             print(f"# WARN: parser {category} failed: {e}", file=__import__("sys").stderr)
     return metrics
 
 
-def score_run() -> ScoreSummary:
+def score_run(reports_dir=None, modules=None) -> ScoreSummary:
     """Score the current run: read reports, score each metric, aggregate by category."""
-    values = collect_metrics()
+    selected = set(TESTS if modules is None else modules)
+    values = collect_metrics(reports_dir, selected)
+    score_categories = {"cache_hierarchy": "cache", "memory_bandwidth": "bandwidth",
+                        "inter_core": "inter_core", "cpu_alu": "alu", "cpu_float": "simd"}
+    active_categories = {score_categories[name] for name in selected if name in score_categories}
     metric_scores: list[MetricScore] = []
     for spec in METRICS:
+        if spec.category not in active_categories:
+            continue
         v = values.get(spec.key)
         if v is None:
             metric_scores.append(MetricScore(
@@ -679,11 +740,21 @@ def score_run() -> ScoreSummary:
         missing = [m.key for m in metric_scores if m.score is None]
         warnings.append(f"{n_total - n_scored} metrics missing: {', '.join(missing[:5])}{'...' if len(missing) > 5 else ''}")
 
+    compute_mark = None
+    if "cpu_multi" in selected:
+        path = Path(reports_dir) if reports_dir is not None else REPORTS
+        try:
+            compute_mark = compute_mark_score(json.loads((path / "compute_mark_v2.json").read_text(encoding="utf-8")))
+            if not compute_mark.stable:
+                warnings.append("ComputeMark unstable: repeat spread exceeds 15%; do not rank this run")
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            warnings.append(f"ComputeMark unavailable: {exc}")
+
     return ScoreSummary(
         overall=overall, letter=score_to_letter(overall),
         categories=cat_scores, metrics=metric_scores,
         n_metrics_total=n_total, n_metrics_scored=n_scored,
-        warnings=warnings,
+        warnings=warnings, compute_mark=compute_mark,
     )
 
 
@@ -693,6 +764,12 @@ def format_score_summary(summary: ScoreSummary) -> str:
     lines.append(f"=== Score Summary ===")
     lines.append(f"Overall: {summary.overall:.1f}/100  (Grade: {summary.letter})")
     lines.append(f"Metrics: {summary.n_metrics_scored}/{summary.n_metrics_total} scored")
+    if summary.compute_mark:
+        c = summary.compute_mark
+        lines.append(f"Memorytest ComputeMark {c.version}: {c.points:,} points")
+        lines.append(f"  single: {c.single_points:,} points; multi: {c.points:,} points at {c.threads} threads")
+        lines.append(f"  measured: {c.integer_gops:.3f} Gop/s integer, {c.fp64_gflops:.3f} GFLOP/s scalar FP64")
+        lines.append(f"  profile={c.profile}; scope={c.scope}; repeat spread={c.max_spread_pct:.1f}%")
     if summary.warnings:
         for w in summary.warnings:
             lines.append(f"  WARN: {w}")
@@ -713,23 +790,11 @@ def format_score_summary(summary: ScoreSummary) -> str:
     return "\n".join(lines)
 
 
-def collect_display_data() -> dict:
+def collect_display_data(reports_dir=None, modules=None) -> dict:
     """Parse branch + multi-core reports for display-only sections (no scoring)."""
-    display = {}
-    for category, parser in [("cpu_branch", parse_cpu_branch),
-                              ("cpu_multi_core", parse_cpu_multi)]:
-        candidates = list(REPORTS.glob(f"{category}_report.md"))
-        if not candidates:
-            candidates = list(REPORTS.glob(f"{category}*report*.md"))
-        if not candidates:
-            continue
-        try:
-            data = parser(candidates[0].read_text())
-            if data:
-                display.update(data)
-        except Exception as e:
-            print(f"# WARN: display parser {category} failed: {e}", file=__import__("sys").stderr)
-    return display
+    selected = [name for name in (TESTS if modules is None else modules)
+                if name in {"cpu_branch", "cpu_multi"}]
+    return collect_metrics(reports_dir, selected)
 
 
 def score_to_dict(summary: ScoreSummary, display: dict | None = None) -> dict:
@@ -753,6 +818,8 @@ def score_to_dict(summary: ScoreSummary, display: dict | None = None) -> dict:
     }
     if display:
         d["display"] = display
+    if summary.compute_mark:
+        d["compute_mark"] = asdict(summary.compute_mark)
     return d
 
 

@@ -12,15 +12,14 @@
 #include <string.h>
 #include <signal.h>
 #include <setjmp.h>
-#include <sys/wait.h>
-#include <linux/types.h>
 
 static uint64_t measure_latency_timing(void *ptr, size_t size, int sequential) {
-    /* asm_helpers.h: rdtsc_ns() replaces clock_gettime (~30-50ns → ~12-20ns).
+    /* asm_helpers.h: rdtsc_ns() now uses portable CLOCK_MONOTONIC time.
      * The pointer cast stays volatile to prevent the compiler from
      * hoisting the load out of the timing window, but we add a
-     * compiler_barrier() before the cycle counter read to guarantee
-     * the load completes first.
+     * compiler_barrier() to limit compiler reordering. The clock overhead
+     * must be amortized across batches; this does not validate the rest
+     * of the architecture-dependent eviction/PMU methodology.
      *
      * Prefetch is conditional: only use it when the working set is larger
      * than L1D (otherwise HW prefetcher would pull the whole buffer into

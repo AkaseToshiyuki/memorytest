@@ -1,5 +1,11 @@
 # Inline ASM Optimizations
 
+> Historical design note. As of 2026-10-14, `rdtsc_ns()` uses
+> `CLOCK_MONOTONIC` rather than converting raw counters with CPU MHz.
+> The old timing claims below do not describe the current scoring protocol.
+> Cache eviction paths are not equivalent across all ISAs; see README's
+> comparability audit. ComputeMark v2 uses no inline assembly or PMU counters.
+
 Documenting the inline-asm primitives added on 2026-06-02 to reduce
 benchmark measurement overhead.
 

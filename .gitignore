@@ -10,6 +10,7 @@ reports/*.pdf
 reports/*.png
 reports/*.html
 reports/charts/
+reports/runs/
 logs/
 *.log
 
@@ -17,6 +18,13 @@ logs/
 release/
 *.tar.gz
 *.zip
+*.deb
+*.dmg
+*.rpm
+*.exe
+build/
+dist/
+.venv-desktop/
 
 # Cache config (should never be committed)
 .cache_config

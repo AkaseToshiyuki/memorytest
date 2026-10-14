@@ -6,7 +6,7 @@
  * and still use the best available SIMD on x86_64, arm64, riscv64, ppc64.
  *
  * Detection cascade per item:
- *   1. Cheap static probe (sysfs, /proc, CPUID cache leaves, ID_*_EL1, misa)
+ *   1. Cheap userspace probe (sysfs, /proc, CPUID/OSXSAVE, kernel ELF HWCAP)
  *   2. Latency-based runtime probe (cache sizes)
  *   3. Interactive prompt (only on TTY)
  *   4. Safe default (always — never crashes, never blocks indefinitely)
@@ -26,11 +26,17 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <termios.h>
 #include <unistd.h>
 
 #ifdef __linux__
   #include <sys/sysinfo.h>
+  #include <sys/auxv.h>
+  #if defined(__aarch64__)
+    #include <asm/hwcap.h>
+  #endif
+#endif
+#if defined(__x86_64__) || defined(__i386__)
+  #include <cpuid.h>
 #endif
 
 /* ============================================================
@@ -141,20 +147,28 @@ static void simd_detect_x86(void) {
 #if defined(__x86_64__) || defined(__i386__)
     /* CPUID leaf 1: SSE family + AVX */
     unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1) : "memory");
+    unsigned int max_leaf = __get_cpuid_max(0, NULL);
+    if (max_leaf < 1) return;
+    __cpuid_count(1, 0, eax, ebx, ecx, edx);
     platform_simd_info.has_sse    = (edx >> 25) & 1;
     platform_simd_info.has_sse2   = (edx >> 26) & 1;
     platform_simd_info.has_sse3   = (ecx >>  0) & 1;
     platform_simd_info.has_ssse3  = (ecx >>  9) & 1;
     platform_simd_info.has_sse4_1 = (ecx >> 19) & 1;
     platform_simd_info.has_sse4_2 = (ecx >> 20) & 1;
-    platform_simd_info.has_avx    = (ecx >> 28) & 1;
+    uint64_t xcr0 = 0;
+    if ((ecx & (1u << 27)) && (ecx & (1u << 26))) {
+        uint32_t lo, hi;
+        __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        xcr0 = ((uint64_t)hi << 32) | lo;
+    }
+    platform_simd_info.has_avx = ((ecx >> 28) & 1) && (xcr0 & 6) == 6;
 
     /* CPUID leaf 7: AVX2 / AVX-512 / FMA / etc. */
-    if (eax >= 7) {
-        __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0) : "memory");
-        platform_simd_info.has_avx2   = (ebx >>  5) & 1;
-        platform_simd_info.has_avx512 = (ebx >> 16) & 1;
+    if (max_leaf >= 7) {
+        __cpuid_count(7, 0, eax, ebx, ecx, edx);
+        platform_simd_info.has_avx2 = ((ebx >> 5) & 1) && platform_simd_info.has_avx;
+        platform_simd_info.has_avx512 = ((ebx >> 16) & 1) && (xcr0 & 0xe6) == 0xe6;
     }
 #else
     /* Non-x86 host: this function is unreachable but the compiler still
@@ -164,31 +178,26 @@ static void simd_detect_x86(void) {
 }
 
 static void simd_detect_arm64(void) {
-#if defined(__aarch64__)
-    /* NEON is mandatory on AArch64 */
-    platform_simd_info.has_neon = 1;
-    /* Read ID_AA64PFR0_EL1 for SVE bits [19:16] and SVE2 [35:32] */
-    uint64_t pfr0 = 0;
-    __asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(pfr0));
-    uint64_t sve_field = (pfr0 >> 32) & 0xF;   /* SVE: bits [35:32] */
-    platform_simd_info.has_sve = (sve_field != 0);
-    /* SVE2 detection is more involved (ID_AA64ZFR0_EL1) — skip for now,
-     * consumers can treat has_sve as "some SVE is available" */
+#if defined(__aarch64__) && defined(__APPLE__)
+    platform_simd_info.has_neon = 1; /* mandatory in the Apple arm64 ABI */
+#elif defined(__aarch64__) && defined(__linux__)
+    /* Kernel-exposed userspace capabilities, not potentially trapped EL1 MRS. */
+    unsigned long caps = getauxval(AT_HWCAP);
+    platform_simd_info.has_neon = (caps & HWCAP_ASIMD) != 0;
+#ifdef HWCAP_SVE
+    platform_simd_info.has_sve = (caps & HWCAP_SVE) != 0;
+#endif
 #else
     (void)platform_simd_info;
 #endif
 }
 
 static void simd_detect_riscv64(void) {
-#if defined(__riscv)
-    uint64_t misa = 0;
-    __asm__ volatile("csrr %0, misa" : "=r"(misa));
-    platform_simd_info.has_rvv = (misa >> 12) & 1;
-    if (platform_simd_info.has_rvv) {
-        uint64_t vlenb = 0;
-        __asm__ volatile("csrr %0, 0xC22" : "=r"(vlenb));
-        platform_simd_info.vector_width = (int)(vlenb * 8);
-    }
+#if defined(__riscv) && defined(__linux__)
+    /* Linux HWCAP base-extension bits use letter offsets. V is 21, not 12.
+     * Do not access machine-mode misa or execute vector CSRs just to probe.
+     * Width remains unknown; future hwprobe/prctl handling can refine it. */
+    platform_simd_info.has_rvv = (getauxval(AT_HWCAP) & (1UL << ('V' - 'A'))) != 0;
 #endif
 }
 
@@ -247,8 +256,8 @@ static void simd_compute_width(void) {
         else if (platform_simd_info.has_neon || platform_simd_info.has_sve) platform_simd_info.vector_width = 128;
         else if (platform_simd_info.has_altivec || platform_simd_info.has_vsx) platform_simd_info.vector_width = 128;
         else if (platform_simd_info.has_rvv) {
-            /* vector_width was already set by simd_detect_riscv64 */
-            if (platform_simd_info.vector_width == 0) platform_simd_info.vector_width = 128;
+            /* Unknown until safely queried; never invent a 128-bit width. */
+            platform_simd_info.vector_width = 0;
         } else {
             platform_simd_info.vector_width = 64;  /* baseline */
         }
@@ -370,6 +379,11 @@ static size_t cache_probe_latency(size_t start, size_t max_size) {
 }
 
 int platform_cache_detect(CacheConfig *cfg) {
+#ifdef __APPLE__
+    detect_cache_sizes();
+    *cfg = global_cache_config;
+    return cfg->detected ? 0 : -1;
+#endif
     if (cfg->detected) return 0;
 
     /* Method 1: sysfs (Linux, very reliable) */
@@ -610,6 +624,9 @@ const PMUCapabilities *platform_pmu_probe(void) {
 void platform_init(void) {
     if (g_initialized) return;
     g_initialized = true;
+#ifdef __APPLE__
+    g_no_sudo = true; /* public sysctl/Mach detection never needs root */
+#endif
     platform_arch_detect();
     platform_simd_detect();
     platform_is_tty();  /* cache the result */

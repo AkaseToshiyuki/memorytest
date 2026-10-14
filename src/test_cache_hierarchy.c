@@ -12,7 +12,6 @@
 #include "asm_helpers.h"
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <math.h>
 
 /* MAX_THREADS: per-stack-array limit. See test_memory_bandwidth.c for
@@ -29,6 +28,29 @@ typedef struct {
 } ThreadArgs;
 
 static __thread double thread_sum;
+
+#if defined(__APPLE__) && defined(__aarch64__)
+/* Capacity pressure only: does not claim to invalidate every cache/SLC line.
+ * Runs outside timing. Bounded allocation, no privileged DC CIVAC instruction. */
+static int macos_evict_cache(void) {
+    static volatile unsigned char *buffer;
+    static size_t bytes;
+    if (!buffer) {
+        size_t last = global_cache_config.l2_size > global_cache_config.l3_size
+                        ? global_cache_config.l2_size : global_cache_config.l3_size;
+        bytes = last > 32 * MB ? 128 * MB : last * 4;
+        if (bytes < 8 * MB) bytes = 8 * MB;
+        size_t available = detect_available_memory();
+        if (available && bytes > available / 8) bytes = available / 8;
+        if (bytes < 4096) return -1;
+        buffer = calloc(1, bytes);
+        if (!buffer) return -1;
+    }
+    for (size_t i = 0; i < bytes; i += 64) buffer[i]++;
+    memory_fence();
+    return 0;
+}
+#endif
 
 /* ========== 序列化CPU以确保准确的内存访问时间 ========== */
 static inline void cpu_relax(void) {
@@ -192,8 +214,10 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * it's chain_indices[0..chain_len-1].  We point flush_order at the
      * appropriate array so the between-run eviction can clflush every
      * node deterministically. */
+#if !defined(__APPLE__) || !defined(__aarch64__)
     size_t *flush_order = (size < SMALL_BUF) ? perm : chain_indices;
     size_t flush_count  = chain_len;
+#endif
 
     /* ---- Step 3: traverse the chain and measure latency ----
      * Each traversal walks chain_len nodes.  Every load is serially
@@ -216,7 +240,8 @@ static double measure_latency(void *ptr, size_t size, int samples) {
      * from finding L1→L2 and L2→L3 transitions. */
     {
         size_t l3_total = global_cache_config.l3_total_size;
-        int evict_every_run = (size > l3_total);
+        size_t last_cache = l3_total ? l3_total : global_cache_config.l2_size;
+        int evict_every_run = (size > last_cache);
 
         int num_runs = samples / (int)chain_len;
         if (num_runs < 31)  num_runs = 31;   /* minimum for stable median */
@@ -230,9 +255,16 @@ static double measure_latency(void *ptr, size_t size, int samples) {
             /* Eviction: always on run 0 (cold start), then selectively
              * on subsequent runs based on buffer size. */
             if (r == 0 || evict_every_run) {
+#if defined(__APPLE__) && defined(__aarch64__)
+                if (macos_evict_cache() != 0) {
+                    fprintf(stderr, "Cache eviction allocation failed; no latency sample\n");
+                    free(latencies); free(perm); free(chain_indices); return 0;
+                }
+#else
                 for (size_t i = 0; i < flush_count; i++)
                     clflush(&p[flush_order[i]]);
                 memory_fence();
+#endif
             }
 
             volatile uint64_t *next = (volatile uint64_t *)start_ptr;
@@ -544,6 +576,12 @@ static int run_cache_hierarchy_scan(CacheTestResult *results, int max_results,
      * (returns 0), the cap is disabled — the machine has at least enough
      * RAM to compile and run, so a single malloc() won't OOM. */
     size_t mem_avail = detect_available_memory();
+#ifdef __APPLE__
+    if (!mem_avail) {
+        fprintf(stderr, "Cannot determine a safe macOS cache-scan memory budget\n");
+        return 0;
+    }
+#endif
     __attribute__((unused)) size_t mem_cap = (mem_avail > 0) ? (mem_avail * 70 / 100) : 0;
     if (mem_cap > 0) {
         printf("[cache] Available memory: %.1f GB → test cap: %.1f GB (70%%)\n",

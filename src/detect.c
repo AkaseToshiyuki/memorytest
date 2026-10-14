@@ -1420,11 +1420,10 @@ void initialize_system_config(void) {
 
     /* Detect CPU core count: logical (with HT/SMT) + physical distinction.
      *
-     * /proc/cpuinfo gives both on x86:
-     *   siblings  = total logical cores visible to this CPU package
-     *   cpu cores = physical cores in this package
-     * So physical = unique value of "cpu cores" across all entries, and
-     * logical = sysconf(_SC_NPROCESSORS_ONLN) (counts all HT threads).
+     * /proc/cpuinfo gives both on x86. "cpu cores" is per package, so we
+     * sum the value once for each unique "physical id"; this is essential on
+     * multi-socket hosts. Logical = sysconf(_SC_NPROCESSORS_ONLN), including
+     * SMT threads.
      *
      * On ARM there is usually no "siblings" / "cpu cores" line, so we fall
      * back to sysconf alone and report physical = 0 (unknown).
@@ -1439,22 +1438,63 @@ void initialize_system_config(void) {
         FILE *f = fopen("/proc/cpuinfo", "r");
         if (f) {
             char line[256];
+            enum { MAX_CPU_PACKAGES = 256 };
+            int package_ids[MAX_CPU_PACKAGES];
+            int package_cores[MAX_CPU_PACKAGES];
+            int package_count = 0;
+            int record_package = -1;
+            int record_cores = 0;
+            int fallback_cores = 0;
             while (fgets(line, sizeof(line), f)) {
-                /* "cpu cores : N" — appears on x86 with multi-core packages.
-                 * Use the first non-zero value we see (they should all be
-                 * identical for a single package; for multi-socket servers
-                 * the max is reported by siblings, but per-package "cpu
-                 * cores" stays constant). */
-                if (strncmp(line, "cpu cores", 9) == 0 ||
-                    strncmp(line, "cpu cores\t", 10) == 0) {
+                if (strncmp(line, "physical id", 11) == 0) {
+                    char *colon = strchr(line, ':');
+                    if (colon) record_package = atoi(colon + 1);
+                } else if (strncmp(line, "cpu cores", 9) == 0) {
                     char *colon = strchr(line, ':');
                     if (colon) {
-                        int v = atoi(colon + 1);
-                        if (v > 0) physical = v;
+                        record_cores = atoi(colon + 1);
+                        if (record_cores > fallback_cores)
+                            fallback_cores = record_cores;
                     }
+                } else if (line[0] == '\n') {
+                    if (record_package >= 0 && record_cores > 0) {
+                        int slot;
+                        for (slot = 0; slot < package_count; slot++) {
+                            if (package_ids[slot] == record_package) break;
+                        }
+                        if (slot == package_count && package_count < MAX_CPU_PACKAGES) {
+                            package_ids[package_count] = record_package;
+                            package_cores[package_count++] = record_cores;
+                        } else if (slot < package_count && record_cores > package_cores[slot]) {
+                            package_cores[slot] = record_cores;
+                        }
+                    }
+                    record_package = -1;
+                    record_cores = 0;
+                }
+            }
+            /* cpuinfo normally ends with a blank line, but accept a final
+             * record without one to avoid silently dropping a package. */
+            if (record_package >= 0 && record_cores > 0) {
+                int slot;
+                for (slot = 0; slot < package_count; slot++) {
+                    if (package_ids[slot] == record_package) break;
+                }
+                if (slot == package_count && package_count < MAX_CPU_PACKAGES) {
+                    package_ids[package_count] = record_package;
+                    package_cores[package_count++] = record_cores;
+                } else if (slot < package_count && record_cores > package_cores[slot]) {
+                    package_cores[slot] = record_cores;
                 }
             }
             fclose(f);
+            if (package_count > 0) {
+                for (int i = 0; i < package_count; i++)
+                    physical += package_cores[i];
+            } else {
+                /* ARM and restricted containers may omit physical id. */
+                physical = fallback_cores;
+            }
         }
         global_system_config.cpu_cores_physical = physical;
     }
@@ -1709,6 +1749,19 @@ static void prompt_dram_speed_from_user(void) {
     }
 }
 
+static void update_theoretical_bandwidth(void) {
+    global_system_config.dram_channels = global_system_config.memory_channels;
+    /* bytes/s/channel = MT/s × 8 bytes/transfer (64-bit data bus). */
+    if (global_system_config.dram_speed_mt_s > 0 &&
+        global_system_config.memory_channels > 0) {
+        global_system_config.theoretical_bw_mbps =
+            (double)global_system_config.dram_speed_mt_s * 8.0 *
+            (double)global_system_config.memory_channels;
+    } else {
+        global_system_config.theoretical_bw_mbps = 0.0;
+    }
+}
+
 void initialize_dram_speed(void) {
     /* If already known (e.g. from HW cross-process cache), skip detection
      * and prompts entirely. */
@@ -1716,6 +1769,9 @@ void initialize_dram_speed(void) {
         printf("[DRAM] Using cached speed: %d MT/s, %s\n",
                global_system_config.dram_speed_mt_s,
                global_system_config.dram_standard);
+        /* The cache persists speed and channels, not derived values. Rebuild
+         * the latter every process so reports never show a false 0 MB/s. */
+        update_theoretical_bandwidth();
         return;
     }
 
@@ -1737,16 +1793,7 @@ void initialize_dram_speed(void) {
 
     global_system_config.dram_speed_mt_s = mt_s;
     snprintf(global_system_config.dram_standard, sizeof(global_system_config.dram_standard), "%s", std);
-    global_system_config.dram_channels = global_system_config.memory_channels;
-
-    /* Compute theoretical bandwidth: bytes/s/channel = MT/s * 8 bytes/transfer.
-     * 8 bytes per transfer = 64-bit bus. */
-    if (mt_s > 0 && global_system_config.memory_channels > 0) {
-        global_system_config.theoretical_bw_mbps =
-            (double)mt_s * 8.0 * (double)global_system_config.memory_channels;
-    } else {
-        global_system_config.theoretical_bw_mbps = 0.0;
-    }
+    update_theoretical_bandwidth();
 }
 
 /* Detect available (free + reclaimable) system memory in bytes.
@@ -1758,6 +1805,11 @@ void initialize_dram_speed(void) {
  *   3. sysinfo() freeram            (Linux/glibc; includes buffers/cache)
  *   4. return 0                     (caller assumes no memory constraint)
  */
+size_t detect_total_memory(void) {
+    long pages = sysconf(_SC_PHYS_PAGES), size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (size_t)pages * (size_t)size : 0;
+}
+
 size_t detect_available_memory(void) {
 #ifdef __linux__
     /* 1. /proc/meminfo MemAvailable — the kernel's best estimate of memory

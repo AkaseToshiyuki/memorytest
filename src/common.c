@@ -15,7 +15,6 @@
  */
 
 #include "common.h"
-#include <linux/perf_event.h>
 
 #define REPORTS_DIR "reports"
 

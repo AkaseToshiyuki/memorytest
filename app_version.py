@@ -1,0 +1,2 @@
+VERSION = "0.1.0"
+RELEASE_TAG = "V" + VERSION

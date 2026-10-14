@@ -2,6 +2,9 @@
 #define COMMON_H
 
 #define _GNU_SOURCE
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -11,12 +14,21 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include "windows_compat.h"
+#else
+#include <sys/ioctl.h>
 #include <sched.h>
 #include <pthread.h>
+#endif
 #include <stdbool.h>
+#include <sys/types.h>
+#ifdef __linux__
 #include <linux/perf_event.h>
+#else
+struct perf_event_attr; /* opaque: no Linux ABI on macOS */
+#endif
 
 /* SIMD/Vector intrinsics.
  *
@@ -111,14 +123,22 @@ extern CacheConfig global_cache_config;
 extern SystemConfig global_system_config;
 
 static inline uint64_t get_time_ns(void) {
+#ifdef _WIN32
+    return windows_now_ns();
+#else
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        perror("CLOCK_MONOTONIC");
+        abort();  /* Fail closed: no made-up duration or derived score. */
+    }
     return (uint64_t)ts.tv_sec * NS_PER_SEC + ts.tv_nsec;
+#endif
 }
 
 static inline size_t parse_size(const char *str) {
     char *end;
-    unsigned long val = strtoul(str, &end, 0);
+    /* Windows uses LLP64: unsigned long is only 32 bits even on x64/ARM64. */
+    unsigned long long val = strtoull(str, &end, 0);
     if (end && *end) {
         switch (toupper(*end)) {
             case 'K': return val * KB;
@@ -181,6 +201,7 @@ void print_system_info(void);
 int detect_memory_channels(void);
 int detect_cpu_freq(void);
 size_t detect_available_memory(void);
+size_t detect_total_memory(void);
 void initialize_system_config(void);
 int get_memory_channels(void);
 int get_cpu_freq_mhz(void);

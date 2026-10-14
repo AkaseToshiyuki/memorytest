@@ -21,11 +21,18 @@
 
 CC ?= gcc
 HOST_CC ?= $(CC)
-CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers
+COMPILER_DEFINES := $(shell $(CC) -dM -E - </dev/null)
+IS_DARWIN := $(findstring __APPLE__,$(COMPILER_DEFINES))
+IS_WINDOWS := $(findstring _WIN32,$(COMPILER_DEFINES))
+IS_CLANG := $(findstring __clang__,$(COMPILER_DEFINES))
+NATIVE_CPU_FLAG := $(if $(findstring __aarch64__,$(COMPILER_DEFINES)),-mcpu=native,-march=native)
+QUALIFIER_WARNING := $(if $(IS_CLANG),-Wno-incompatible-pointer-types-discards-qualifiers,-Wno-discarded-qualifiers)
+CFLAGS ?= -O2 -Wall -std=c11 -pthread -Wno-unused-function -Wno-unused-result $(QUALIFIER_WARNING)
 LDFLAGS ?=
 SRC_DIR = src
 BUILD_DIR = bin
-VERSION = 1.0.2
+VERSION = 0.1.0
+MODULE_ARGS = $(foreach m,$(MODULE) $(MODULES),--module "$(m)") $(if $(CATEGORY),--category "$(CATEGORY)")
 
 # Test categories
 MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
@@ -34,10 +41,21 @@ ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 
 # Common source modules (split from monolithic common.c).
 # platform.c is the new cross-platform detection layer.
-COMMON_SRCS = src/common.c src/util.c src/platform.c src/detect.c src/report.c \
-              src/simd.c src/pmu.c src/latency.c
+DETECT_SRC = $(if $(IS_WINDOWS),src/detect_windows.c,$(if $(IS_DARWIN),src/detect_macos.c,src/detect.c))
+PMU_SRC = $(if $(or $(IS_DARWIN),$(IS_WINDOWS)),src/pmu_macos.c,src/pmu.c)
+UTIL_SRC = $(if $(IS_WINDOWS),src/util_windows.c,src/util.c)
+PLATFORM_LIBS = $(if $(IS_WINDOWS),-ladvapi32)
+LDFLAGS += $(PLATFORM_LIBS)
+COMMON_SRCS = src/common.c $(UTIL_SRC) src/platform.c $(DETECT_SRC) src/report.c \
+              src/simd.c $(PMU_SRC) src/latency.c
+COMMON_HEADERS = $(wildcard src/*.h)
+# Scored scalar protocol is deliberately independent of opt/native/fast-math
+# presets. A different workload/build profile needs a different score version.
+override CM_VECTOR_FLAGS := $(if $(IS_CLANG),-fno-vectorize -fno-slp-vectorize,-fno-tree-vectorize -fno-tree-slp-vectorize)
+override CM_CFLAGS := -O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=off $(CM_VECTOR_FLAGS) -fno-lto
+CM_SOURCE_HASH := $(shell python3 -c 'import hashlib; print(hashlib.sha256(open("src/compute_kernel.c", "rb").read()).hexdigest())')
 
-.PHONY: all clean tests memory cpu help release test smoke sanity regression lint report score \
+.PHONY: all clean tests memory cpu help release test list-tests check-workflow check-compute check-platform smoke sanity regression lint report score \
         opt opt3 ofast lto perf-asan opt-native platform-check
 
 # Default: build all
@@ -52,7 +70,7 @@ memory: $(addprefix $(BUILD_DIR)/, $(MEMORY_TESTS))
 # Build CPU performance tests
 cpu: $(addprefix $(BUILD_DIR)/, $(CPU_TESTS))
 
-# Layer 1 smoke test: run all 7 binaries, verify reports are produced
+# Optional developer check, separate from the user benchmark workflow.
 smoke: tests
 	@bash test_smoke.sh
 
@@ -76,22 +94,32 @@ interactive: tests
 interactive-sudo: tests
 	@bash bin/run_interactive.sh --sudo
 
-# Layer 2 sanity test: assert each metric falls within plausible physical range
+# Optional developer check: assert each metric falls within plausible physical range
 # --skip-missing tells sanity to count missing reports (e.g. test_inter_core
 # skipped on big machines) as SKIP rather than FAIL.
 sanity:
 	@python3 test_sanity.py --skip-missing
 
-# `make test` runs all 3 layers then generates the HTML report.
-# All layers are advisory — failures are reported but do not block later steps.
-# This is the ONLY recommended test target. Individual layers exist for debugging.
-test: tests
-	-@bash test_smoke.sh
-	-@python3 test_sanity.py --skip-missing
-	-@python3 test_regression.py
-	@$(MAKE) report
+# User workflow: select modules, build/run only those modules, always report.
+# Examples: make test; make test MODULE=cpu_alu; make test CATEGORY=cpu
+test:
+	@python3 run_benchmarks.py --bin-dir "$(abspath $(BUILD_DIR))" $(MODULE_ARGS) $(ARGS)
 
-# Layer 3 regression: record current metrics, compare to median of last 3 runs
+list-tests:
+	@python3 run_benchmarks.py --list
+
+# Unit/integration fixtures only; does not run hardware benchmarks.
+check-workflow:
+	@python3 -m unittest discover -s tests -p 'test_workflow.py' -v
+
+# Independent kernel references, scoring contract, fault injection, bounded 2-CPU run.
+check-compute:
+	@python3 -m unittest discover -s tests -p 'test_compute.py' -v
+
+check-platform:
+	@python3 -m unittest discover -s tests -p 'test_platform.py' -v
+
+# Optional developer regression: record current metrics, compare to median of last 3 runs
 # Exits 1 if any metric deviates >50% from baseline.
 regression:
 	@python3 test_regression.py
@@ -100,16 +128,9 @@ regression:
 regression-record:
 	@python3 test_regression.py --record-only
 
-# Run all benchmarks (assumes binaries are built and reports/*.md are fresh)
-# and produce the canonical HTML report. The HTML is the single source of truth —
-# open it in any browser, or use the browser's print-to-PDF. Also computes the
-# 0-100 score with letter grade.
-report: deps
-	@echo "=== generating HTML report ==="
-	@python3 report_html.py
-	@echo ""
-	@echo "=== score summary ==="
-	@python3 report_score.py | head -10
+# Regenerate an archived run; no benchmarks and no legacy data mixing.
+report:
+	@python3 report_html.py $(if $(RUN_DIR),--run-dir "$(RUN_DIR)",--latest-run) $(foreach m,$(MODULE) $(MODULES),--module "$(m)") $(ARGS)
 
 # Verify Python dependencies needed for chart generation.
 # Does NOT auto-install — prints the command you need.
@@ -130,10 +151,10 @@ deps:
 
 # Print score summary only (no report)
 score:
-	@python3 report_score.py | head -10
+	@python3 compute_score.py $(if $(RUN_DIR),--run-dir "$(RUN_DIR)",--latest-run)
 
-# platform-check: a build-host diagnostic — prints detected arch / SIMD / PMU
-# without compiling anything. Useful to verify what the toolchain supports.
+# platform-check: a build-host diagnostic — compiles a tiny probe and prints
+# detected arch / SIMD / PMU. Useful to verify what the toolchain supports.
 platform-check:
 	@echo "=== build host ==="
 	@$(HOST_CC) -dumpmachine
@@ -147,23 +168,23 @@ platform-check:
 		'    init_platform_layer();' \
 		'    const SIMDInfo *s = get_simd_info();' \
 		'    const PMUCapabilities *p = platform_pmu_probe();' \
-		'    printf("arch=%s simd=\"%s\" vwidth=%d\\n",' \
+		'    printf("arch=%s simd=\"%s\" vwidth=%d\n",' \
 		'           arch_names[current_arch], s->simd_flags, s->vector_width);' \
-		'    printf("pmu: available=%d paranoia=%d hw=%d self=%d\\n",' \
+		'    printf("pmu: available=%d paranoia=%d hw=%d self=%d\n",' \
 		'           p->available, p->paranoia, p->can_profile_hw, p->can_profile_self);' \
 		'    return 0;' \
 		'}' > /tmp/_pc.c
-	@$(HOST_CC) $(CFLAGS) -I. /tmp/_pc.c src/util.c src/platform.c src/common.c src/detect.c src/simd.c src/report.c -o /tmp/_pc 2>&1 | head -20
-	@/tmp/_pc 2>&1 | head -10
+	@$(HOST_CC) $(CFLAGS) -I. /tmp/_pc.c $(COMMON_SRCS) -o /tmp/_pc
+	@/tmp/_pc
 	@rm -f /tmp/_pc /tmp/_pc.c
 
 # lint: static sanity checks — CFLAGS warning hardening + Python compile + shellcheck
 # Uses portable -O2 + -Werror, no -march, so it works on any build host.
 lint:
 	@echo "--- C: recompile with -Werror on key warnings ---"
-	$(MAKE) clean tests CFLAGS="-O2 -Wall -std=c11 -pthread -Werror -Wno-unused-function -Wno-unused-result -Wno-discarded-qualifiers"
+	$(MAKE) clean tests CFLAGS="-O2 -Wall -std=c11 -pthread -Werror -Wno-unused-function -Wno-unused-result $(QUALIFIER_WARNING)"
 	@echo "--- Python: py_compile all .py ---"
-	@python3 -m py_compile generate_report.py report_html.py test_sanity.py test_regression.py
+	@python3 -m py_compile generate_report.py report_html.py report_score.py compute_score.py run_benchmarks.py benchmark_registry.py test_sanity.py test_regression.py
 	@echo "--- bash: -n syntax check ---"
 	@bash -n test_smoke.sh
 	@echo "lint: all passed"
@@ -191,8 +212,12 @@ $(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) | $(BUIL
 $(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) $(LDFLAGS)
 
-$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_multi.c $(COMMON_SRCS) -lm $(LDFLAGS)
+.PHONY: force-compute-build
+# Rebuild to capture the actual compiler/profile; never reuse a native/old v1 binary.
+$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(SRC_DIR)/compute_kernel.c $(SRC_DIR)/compute_kernel.h Makefile force-compute-build | $(BUILD_DIR)
+	$(CC) $(CM_CFLAGS) -DCM_BUILD_PROFILE='"portable-scalar-v2"' -DCM_BUILD_FLAGS='"$(CM_CFLAGS)"' -DCM_SOURCE_HASH='"$(CM_SOURCE_HASH)"' -o $@ src/test_cpu_multi.c src/compute_kernel.c -lm $(PLATFORM_LIBS)
+
+$(addprefix $(BUILD_DIR)/, $(ALL_TESTS)): $(COMMON_HEADERS)
 
 # Clean build artifacts
 clean:
@@ -235,13 +260,13 @@ lto:     tests
 # Will emit a warning unless MARCH_OVERRIDE=1 is set.
 opt-native:
 	@if [ "$(MARCH_OVERRIDE)" != "1" ]; then \
-		echo "WARNING: opt-native adds -march=native. The resulting binary"; \
+		echo "WARNING: opt-native adds $(NATIVE_CPU_FLAG). The resulting binary"; \
 		echo "         may use illegal instructions on a different CPU model."; \
 		echo "         Set MARCH_OVERRIDE=1 to confirm you understand this."; \
 		echo "         Use 'make opt' for a portable optimised build."; \
 		exit 1; \
 	fi
-	$(MAKE) tests CFLAGS="$(CFLAGS) -O3 -march=native -DNDEBUG -fomit-frame-pointer"
+	$(MAKE) tests CFLAGS="$(CFLAGS) -O3 $(NATIVE_CPU_FLAG) -DNDEBUG -fomit-frame-pointer"
 
 # ASan build for memory-safety checks (not used in perf analysis but useful)
 perf-asan: CFLAGS += -O1 -g -fsanitize=address -fno-omit-frame-pointer
@@ -256,17 +281,8 @@ size: tests
 SIZE ?= size
 
 # Build release package
-release: opt
-	@mkdir -p release/bin release/src
-	@cp bin/* release/bin/
-	@cp Makefile generate_report.py report_html.py report_score.py README.md LICENSE tests.json release/
-	@cp test_smoke.sh test_sanity.py test_regression.py release/
-	@cp ASM_OPTIMIZATIONS.md TEST_LAYERS.md release/
-	@cp src/common.h src/platform.h src/util.h src/asm_helpers.h release/src/
-	@tar -czf memorytest-$(VERSION).tar.gz -C . release
-	@rm -rf release/
-	@echo "Release package: memorytest-$(VERSION).tar.gz"
-	@ls -lh memorytest-$(VERSION).tar.gz
+release:
+	@python3 packaging/build_source.py
 
 help:
 	@echo "Memory Benchmark Suite v$(VERSION)"
@@ -292,17 +308,24 @@ help:
 	@echo "  distclean     - Remove all generated files"
 	@echo "  release       - Create release package (uses opt flags)"
 	@echo ""
-	@echo "Test (all 3 layers, mandatory):"
-	@echo "  test          - smoke + sanity + regression (full suite)"
+	@echo "Benchmarks (each run generates a self-contained HTML report):"
+	@echo "  test          - Run all 7 modules (default selection)"
+	@echo "  test MODULE=cpu_alu - Run one module and create its own HTML report"
+	@echo '  test MODULES="cpu_alu cpu_float" - Run selected modules'
+	@echo "  test CATEGORY=cpu - Run all CPU modules (or CATEGORY=memory)"
+	@echo "  list-tests    - List selectable modules"
+	@echo "  check-workflow - Run workflow fixtures without hardware benchmarks"
+	@echo "  check-compute - Check scored kernels + bounded native CPU validation"
+	@echo "  check-platform - Public API contracts + bounded macOS-native checks"
 	@echo ""
-	@echo "Individual layers (for debugging only; prefer 'make test'):"
-	@echo "  smoke         - Layer 1: run 7 binaries, verify reports produced"
-	@echo "  sanity        - Layer 2: assert each metric within plausible range"
-	@echo "  regression    - Layer 3: compare to history.jsonl baseline"
+	@echo "Optional legacy developer checks (not invoked by 'make test'):"
+	@echo "  smoke         - Run 7 binaries, check report presence in legacy reports/"
+	@echo "  sanity        - Check plausible ranges in legacy reports/"
+	@echo "  regression    - Compare legacy reports/ to history.jsonl baseline"
 	@echo ""
 	@echo "Post-test:"
-	@echo "  report        - Generate HTML report from markdown sources"
-	@echo "  score         - Print score summary only"
+	@echo "  report        - Regenerate latest run HTML (or RUN_DIR=reports/runs/<id>)"
+	@echo "  score         - Print v2 absolute scores from latest run (or RUN_DIR=...)"
 	@echo "  lint          - Static checks (C -Werror, py_compile, bash -n)"
 	@echo ""
 	@echo "Test categories:"

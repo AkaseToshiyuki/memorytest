@@ -35,7 +35,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BUILD_DIR = os.path.join(SCRIPT_DIR, "bin")
 REPORTS_DIR = os.path.join(SCRIPT_DIR, "reports")
 CHARTS_DIR = os.path.join(REPORTS_DIR, "charts")
-os.makedirs(CHARTS_DIR, exist_ok=True)
 
 # Global sudo password cache
 _sudo_password = None

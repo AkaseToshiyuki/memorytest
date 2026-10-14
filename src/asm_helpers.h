@@ -6,7 +6,7 @@
  * serializing effect of `volatile` pointers can dominate the signal.
  *
  * This header provides:
- *   - rdtsc_ns() / cntvct_ns() - read the cycle counter in user space
+ *   - rdtsc_ns() - portable CLOCK_MONOTONIC timestamp (legacy function name)
  *   - memory_fence() - full memory barrier (dmb ish on ARM64, mfence on x86)
  *   - prefetch_l1() - L1 cache prefetch hint
  *   - compiler_barrier() - prevent compiler reordering only (no hw fence)
@@ -26,7 +26,9 @@ extern "C" {
 #endif
 
 /* ============================================================
- * Cycle counter (low-overhead timestamp)
+ * Legacy raw counters: not used by the portable elapsed-time path or scoring.
+ * Callers must establish access, ordering and frequency themselves. There is
+ * no SIGILL recovery here, and the PPC split read is not rollover-safe.
  *
  *   ARM64:     cntvct_el0   - Virtual Cycle Count. ~20ns read.
  *   x86_64:    rdtsc        - ~12ns read. Invariant TSC (constant_tsc) is required
@@ -35,7 +37,7 @@ extern "C" {
  *   RISC-V:    rdcycle      - User-mode cycle counter. Requires the Zicntr extension
  *                            (ratified in RV64G/RV32G). Reads CSR 0xC00. ~10-30ns.
  *                            Caveat: not all RISC-V cores expose it to U-mode; the
- *                            kernel may trap (SIGILL) and the fallback path takes over.
+ *                            kernel may trap (SIGILL); no automatic fallback exists.
  *   PowerPC:   mftb         - Time Base register. 64-bit, ticks at bus/4 frequency.
  *                            Reads SPR 268. Requires -mno-ppc-relative-workaround.
  *   Other:     fall back to get_time_ns() from common.h.
@@ -70,64 +72,16 @@ static inline uint64_t rdtsc_cycles(void) {
 #endif
 }
 
-/* ============================================================
- * Calibration state for rdtsc_ns().
- * cycles_per_ns is initialized lazily on first call, guarded by
- * an atomic flag so multi-threaded tests don't race on the init.
- * Each translation unit gets its own copy (inline static header),
- * so there is no cross-TU contention — the flag protects within-TU
- * thread races only.
- * ============================================================ */
-static atomic_flag cycles_calibrated = ATOMIC_FLAG_INIT;
-static double cycles_per_ns = 1.0;
-
-/* Calibrated: convert cycles to nanoseconds. Lazily initialized.
- *
- * IMPORTANT: on ARM64, cntvct_el0 ticks at the *counter frequency* (cntfrq_el0),
- * NOT the CPU core frequency. On this dev host (Kunpeng 920) cntfrq_el0=100MHz
- * even though the CPU runs at 3GHz. Using get_cpu_freq_mhz() here would
- * underestimate time by 30x. We read cntfrq_el0 directly for ARM64.
- * On x86 with invariant TSC, rdtsc ticks at the CPU frequency. */
+/* Portable elapsed-time clock. Raw cycle counters do not share a portable
+ * frequency or access policy across ISAs. Time batches of dependent operations
+ * with CLOCK_MONOTONIC instead; amortize its overhead, never divide by CPU MHz.
+ * The legacy name remains for source compatibility; values are nanoseconds.
+ */
 static inline uint64_t rdtsc_ns(void) {
-    if (!atomic_flag_test_and_set(&cycles_calibrated)) {
-#if defined(__aarch64__)
-        uint64_t cntfrq;
-        __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(cntfrq));
-        cycles_per_ns = (double)cntfrq / 1e9;  /* Hz -> cycles/ns */
-#elif defined(__x86_64__) || defined(__i386__)
-        int freq_mhz = get_cpu_freq_mhz();
-        /* CRITICAL: no hardcoded fallback. If detection failed, this entire
-         * x86_64 TSC->ns conversion is unsound. Caller must check return
-         * value of get_cpu_freq_mhz() before using rdtsc_ns(). We return
-         * a sentinel of 1.0 cycles/ns (i.e. 1GHz) here so a misuse cannot
-         * produce wildly wrong numbers; the test will still report, but
-         * the latency values will be uncalibrated. Callers needing real
-         * ns should use get_time_ns() when freq is unknown. */
-        if (freq_mhz <= 0) {
-            cycles_per_ns = 1.0;  /* uncalibrated sentinel: 1 cycle = 1 ns */
-        } else {
-            cycles_per_ns = (double)freq_mhz / 1000.0;
-        }
-#elif defined(__riscv)
-        /* RISC-V does not have a portable user-mode way to read the cycle
-         * counter frequency. Calibration is done lazily via get_time_ns()
-         * by reading the counter, sleeping, and re-reading — but to keep
-         * the inline path cheap, we use get_cpu_freq_mhz() as a best-effort
-         * estimate. If the kernel does not expose rdcycle to U-mode, the
-         * surrounding code falls back to get_time_ns() anyway. */
-        int freq_mhz = get_cpu_freq_mhz();
-        if (freq_mhz <= 0) freq_mhz = 1000;
-        cycles_per_ns = (double)freq_mhz / 1000.0;
-#elif defined(__powerpc__) || defined(__powerpc64__)
-        /* PowerPC Time Base frequency = bus_frequency / 4 (typically 100-500 MHz).
-         * get_cpu_freq_mhz() returns the core frequency which is wrong here.
-         * Default to 100 MHz (Power8 default) if we can't determine it. */
-        cycles_per_ns = 0.1;  /* 100 MHz -> 0.1 cycles/ns */
-#else
-        cycles_per_ns = 1.0;  /* fallback path already returns ns */
-#endif
-    }
-    return (uint64_t)((double)rdtsc_cycles() / cycles_per_ns);
+    atomic_signal_fence(memory_order_seq_cst);
+    uint64_t ns = get_time_ns();
+    atomic_signal_fence(memory_order_seq_cst);
+    return ns;
 }
 
 /* ============================================================
@@ -199,6 +153,11 @@ static inline void prefetch_l2(const void *p) {
 static inline void clflush(const void *p) {
 #if defined(__x86_64__) || defined(__i386__)
     __asm__ __volatile__("clflush (%0)" :: "r"(p) : "memory");
+#elif defined(__APPLE__) && defined(__aarch64__)
+    /* No userspace per-line invalidation contract. Cache tests must use
+     * the explicitly labelled capacity-eviction path, NOT this fence. */
+    (void)p;
+    memory_fence();
 #elif defined(__aarch64__)
     /* DC CIVAC - Data Cache line Clean and Invalidate by VA to Point of Coherence.
      * On ARM64 this both flushes and invalidates, more aggressive than x86 clflush. */

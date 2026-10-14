@@ -7,6 +7,10 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <string.h>
+#ifdef __APPLE__
+#include "darwin_helpers.h"
+#include <inttypes.h>
+#endif
 
 /* ========== Report Generation ========== */
 static const char *format_extension(ReportFormat format) {
@@ -86,7 +90,8 @@ void report_write_system_info(ReportContext *ctx) {
         initialize_system_config();
     }
 
-    long pages = sysconf(_SC_PHYS_PAGES);
+    size_t total_memory = detect_total_memory();
+    size_t available_memory = detect_available_memory();
     long page_size = sysconf(_SC_PAGESIZE);
     long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     /* Prefer the fields populated by initialize_system_config(); fall back to
@@ -107,10 +112,16 @@ void report_write_system_info(ReportContext *ctx) {
             report_write(ctx, "    \"cpu_cores_physical\": %d,\n", cpu_cores_phys);
             report_write(ctx, "    \"cpu_freq_mhz\": %d,\n", global_system_config.cpu_freq_mhz);
             report_write(ctx, "    \"memory_channels\": %d,\n", global_system_config.memory_channels);
-            report_write(ctx, "    \"memory_total_gb\": %.2f,\n", (double)pages * page_size / (1024.0 * MB));
-            report_write(ctx, "    \"memory_available_gb\": %.2f,\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
+            report_write(ctx, "    \"memory_total_gb\": %.2f,\n", (double)total_memory / GB);
+            report_write(ctx, "    \"memory_available_gb\": %.2f,\n", (double)available_memory / GB);
             report_write(ctx, "    \"page_size\": %ld,\n", page_size);
-            /* Cache sizes: per-core, with explicit total (per_core × physical) */
+            /* macOS heterogeneous/cluster-shared caches cannot be multiplied
+             * by the total CPU count to manufacture an aggregate. */
+#ifdef __APPLE__
+            report_write(ctx, "    \"cache_l1d_kb_sysctl\": %zu,\n", global_cache_config.l1d_size / KB);
+            report_write(ctx, "    \"cache_l2_kb_sysctl\": %zu,\n", global_cache_config.l2_size / KB);
+#else
+            /* Legacy Linux per-core summaries. */
             report_write(ctx, "    \"cache_l1d_kb_per_core\": %zu,\n", global_cache_config.l1d_size / KB);
             if (cpu_cores_phys > 0) {
                 report_write(ctx, "    \"cache_l1d_kb_total\": %zu,\n",
@@ -121,6 +132,7 @@ void report_write_system_info(ReportContext *ctx) {
                 report_write(ctx, "    \"cache_l2_kb_total\": %zu,\n",
                              (global_cache_config.l2_size / KB) * (size_t)cpu_cores_phys);
             }
+#endif
             report_write(ctx, "    \"cache_l3_kb\": %zu", global_cache_config.l3_size / KB);
             if (global_cache_config.l3_ccd_count > 1) {
                 report_write(ctx, ",\n    \"cache_l3_per_ccd_kb\": %zu", global_cache_config.l3_size / KB);
@@ -145,7 +157,29 @@ void report_write_system_info(ReportContext *ctx) {
             } else {
                 report_write(ctx, "| CPU Cores | %d |\n", cpu_cores_log);
             }
-            report_write(ctx, "| CPU Frequency | %d MHz |\n", global_system_config.cpu_freq_mhz);
+            if (global_system_config.cpu_freq_mhz > 0)
+                report_write(ctx, "| CPU Frequency | %d MHz |\n", global_system_config.cpu_freq_mhz);
+            else report_write(ctx, "| CPU Frequency | N/A (not exposed) |\n");
+#ifdef __APPLE__
+            report_write(ctx, "| Platform | macOS; OS scheduled, no exact CPU pinning |\n");
+            report_write(ctx, "| PMU | Unsupported via public APIs; timing only |\n");
+            report_write(ctx, "| L1 Cache (D) | %zu KB (sysctl summary; core types may differ) |\n", global_cache_config.l1d_size / KB);
+            report_write(ctx, "| L2 Cache | %zu KB (sysctl summary; may be cluster-shared) |\n", global_cache_config.l2_size / KB);
+            report_write(ctx, "| L3 Cache | %zu KB (0 = absent or not exposed, not SLC size) |\n", global_cache_config.l3_size / KB);
+            report_write(ctx, "| Cache policy | Capacity eviction on Apple Silicon; no guaranteed per-line invalidation or DRAM residency |\n");
+            DarwinPerfLevel levels[DARWIN_MAX_PERF_LEVELS];
+            size_t count = darwin_perflevels(levels, DARWIN_MAX_PERF_LEVELS);
+            for (size_t i = 0; i < count; ++i)
+                report_write(ctx, "| CPU perflevel%zu (%s) | %" PRIu64 " physical / %" PRIu64
+                             " logical; L1D %" PRIu64 " KiB; L2 %" PRIu64 " KiB / %" PRIu64 " CPUs |\n",
+                             i, levels[i].name, levels[i].physical, levels[i].logical,
+                             levels[i].l1d / 1024, levels[i].l2 / 1024, levels[i].cpus_per_l2);
+#elif defined(_WIN32)
+            report_write(ctx, "| Platform | Windows; timing only, no PMU |\n");
+            report_write(ctx, "| L1 Cache (D) | %zu KB (largest OS-reported instance) |\n", global_cache_config.l1d_size / KB);
+            report_write(ctx, "| L2 Cache | %zu KB (largest instance, possibly shared) |\n", global_cache_config.l2_size / KB);
+            report_write(ctx, "| L3 Cache | %zu KB (largest instance; 0 = absent/unknown) |\n", global_cache_config.l3_size / KB);
+#else
             /* Cache numbers are per-core; show aggregate. Use physical when
              * known (x86 with SMT), otherwise fall back to logical (ARM/older
              * kernels without siblings line). */
@@ -178,13 +212,17 @@ void report_write_system_info(ReportContext *ctx) {
             } else {
                 report_write(ctx, "| L3 Cache | %zu KB |\n", global_cache_config.l3_size / KB);
             }
+#endif
             if (global_system_config.memory_channels > 0) {
                 report_write(ctx, "| Memory Channels | %d |\n", global_system_config.memory_channels);
             } else {
                 report_write(ctx, "| Memory Channels | N/A (unable to auto-detect) |\n");
             }
-            report_write(ctx, "| Memory Total | %.2f GB |\n", (double)pages * page_size / (1024.0 * MB));
-            report_write(ctx, "| Memory Available | %.2f GB |\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
+            report_write(ctx, "| Memory Total | %.2f GB |\n", (double)total_memory / GB);
+            report_write(ctx, "| Memory Available | %.2f GB |\n", (double)available_memory / GB);
+#ifdef __APPLE__
+            report_write(ctx, "| Memory budget source | Mach free + inactive pages (conservative, not Linux MemAvailable) |\n");
+#endif
             report_write(ctx, "| Page Size | %ld bytes |\n", page_size);
             break;
         default:
@@ -199,8 +237,8 @@ void report_write_system_info(ReportContext *ctx) {
             } else {
                 report_write(ctx, "  Memory Channels : N/A\n");
             }
-            report_write(ctx, "  Memory Total    : %.2f GB\n", (double)pages * page_size / (1024.0 * MB));
-            report_write(ctx, "  Memory Available: %.2f GB\n", (double)sysconf(_SC_AVPHYS_PAGES) * page_size / (1024.0 * MB));
+            report_write(ctx, "  Memory Total    : %.2f GB\n", (double)total_memory / GB);
+            report_write(ctx, "  Memory Available: %.2f GB\n", (double)available_memory / GB);
             report_write(ctx, "  Page Size       : %ld bytes\n", page_size);
             report_write(ctx, "  L1 Cache        : %zu KB\n", global_cache_config.l1d_size / KB);
             report_write(ctx, "  L2 Cache        : %zu KB\n", global_cache_config.l2_size / KB);

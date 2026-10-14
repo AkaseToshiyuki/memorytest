@@ -11,8 +11,9 @@
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 
 /* MAX_THREADS: the per-stack-array limit for pthread_t, args, results.
  * Chosen large enough to cover current and foreseeable server CPUs
@@ -331,9 +332,17 @@ void run_memory_bandwidth_test(size_t size, int threads) {
 
     /* 使用 mmap 分配大内存,确保物理对齐 */
     size_t total_size = size * 2;  /* 复制需要两倍空间 */
-    void *ptr = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+#ifdef _WIN32
+    void *ptr = VirtualAlloc(NULL, total_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    int using_mmap = ptr != NULL;
+#else
+    int map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_HUGETLB
+    map_flags |= MAP_HUGETLB;
+#endif
+    void *ptr = mmap(NULL, total_size, PROT_READ | PROT_WRITE, map_flags, -1, 0);
     int using_mmap = (ptr != MAP_FAILED);
+#endif
     if (!using_mmap) {
         /* fallback to malloc */
         ptr = malloc(total_size);
@@ -453,7 +462,11 @@ void run_memory_bandwidth_test(size_t size, int threads) {
 
     /* 清理 */
     if (using_mmap) {
+#ifdef _WIN32
+        VirtualFree(ptr, 0, MEM_RELEASE);
+#else
         munmap(ptr, total_size);
+#endif
     } else {
         free(ptr);
     }
@@ -487,13 +500,20 @@ int main(int argc, char *argv[]) {
      * measurement stability. */
     if (min_size > 8ULL * 1024 * 1024 * 1024) min_size = 8ULL * 1024 * 1024 * 1024;
 
-    /* Safety cap: never allocate more than 70% of available system memory.
-     * On machines with ≤4 GB RAM this protects against swap/OOM. */
+    /* Copy requires two buffers. Limit their combined size to 50% of the
+     * observed available memory; this is a budget, not an OOM guarantee. */
     size_t mem_avail = detect_available_memory();
+#ifdef __APPLE__
+    if (!mem_avail) {
+        fprintf(stderr, "Cannot determine a safe macOS memory budget\n");
+        return 1;
+    }
+#endif
+    size_t mem_cap = 0;
     if (mem_avail > 0) {
-        size_t mem_cap = mem_avail * 70 / 100;
+        mem_cap = mem_avail / 4;
         if (min_size > mem_cap) {
-            printf("[mem] Available memory: %.1f GB → capping buffer from %.1f GB to %.1f GB (70%%)\n",
+            printf("[mem] Available memory: %.1f GB → capping each of two buffers from %.1f GB to %.1f GB (combined <=50%%)\n",
                    (double)mem_avail / (1024.0*1024*1024),
                    (double)min_size / (1024.0*1024*1024),
                    (double)mem_cap / (1024.0*1024*1024));
@@ -517,17 +537,43 @@ int main(int argc, char *argv[]) {
         threads = MAX_THREADS;
     }
 
-    /* 用户可以通过 -t 参数覆盖 */
+    /* 用户可以通过参数覆盖默认值；所有覆盖值在解析后再次校验。 */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
-        } else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--size") == 0) {
+        } else if ((strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--size") == 0) && i + 1 < argc) {
             size = parse_size(argv[++i]);
-        } else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) {
+        } else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) && i + 1 < argc) {
             threads = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Invalid option or missing value: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 2;
         }
+    }
+
+    if (size < sizeof(uint64_t) || size > SIZE_MAX / 2) {
+        fprintf(stderr, "Memory size must fit two buffers and hold at least one word\n");
+        return 2;
+    }
+    if (mem_cap > 0 && size > mem_cap) {
+        fprintf(stderr, "[mem] Requested size %.1f GB exceeds the two-buffer memory budget; using %.1f GB\n",
+                (double)size / (1024.0 * 1024 * 1024),
+                (double)mem_cap / (1024.0 * 1024 * 1024));
+        size = mem_cap;
+    }
+    if (threads < 1 || threads > MAX_THREADS) {
+        fprintf(stderr, "Thread count must be between 1 and %d\n", MAX_THREADS);
+        return 2;
+    }
+    /* Every worker needs whole words; round down to an equal, aligned slice. */
+    size_t quantum = (size_t)threads * sizeof(uint64_t);
+    size -= size % quantum;
+    if (size < quantum) {
+        fprintf(stderr, "Memory budget too small for one word per thread\n");
+        return 2;
     }
 
     pmu_init_cache_counters();

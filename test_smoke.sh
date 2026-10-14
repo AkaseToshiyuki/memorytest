@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Memorytest — Run all 7 binaries and verify they produce valid reports.
 #
-# This is the first of three test layers (smoke → sanity → regression).
-# All three are mandatory; run `make test` to execute them in sequence.
+# Optional legacy developer check. The user-facing `make test` command instead
+# selects benchmark modules and produces isolated HTML reports via run_benchmarks.py.
 #
 # Timeouts scale with CPU count so large servers (96-core EPYC, 128-core
 # Ampere) get enough wall time.
