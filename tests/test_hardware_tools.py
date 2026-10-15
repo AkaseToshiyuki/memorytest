@@ -118,11 +118,17 @@ Memory Device
     def test_windows_memory_type_and_no_wrapped_vram(self):
         reader = Mock()
         reader.powershell.return_value = [{"DeviceLocator": "DIMM 0", "Capacity": 32 * 2**30,
-            "SMBIOSMemoryType": 34, "ConfiguredClockSpeed": 5600}]
+            "SMBIOSMemoryType": 34, "ConfiguredClockSpeed": 5600, "Speed": 6400}]
         with patch("sys.platform", "win32"):
             devs = dram_info(reader)
             self.assertEqual(fields(devs[1])["memory_type"], "DDR5")
             self.assertEqual(fields(devs[1])["capacity"], "32 GiB")
+            self.assertEqual(fields(devs[1])["configured_speed"], "5600 MHz (CIM)")
+            self.assertIsNone(fields(devs[1])["rated_speed"])
+            reader.powershell.return_value = [{"DeviceLocator": "DIMM 0", "ConfiguredClockSpeed": 0, "ConfiguredVoltage": 0}]
+            unknown = fields(dram_info(reader)[1])
+            self.assertIsNone(unknown["configured_speed"])
+            self.assertIsNone(unknown["configured_voltage"])
             reader.powershell.return_value = [{"Name": "Example GPU", "PNPDeviceID": "PCI/test", "AdapterRAM": 0xFFFFFFFF}]
             with patch("hardware_inspector.find_tool", return_value=None):
                 gpu = gpu_info(reader)[0]
@@ -220,6 +226,8 @@ class HardwarePageTests(unittest.TestCase):
         page = self.window.hardware_tools["disk"]
         self.seed(page)
         self.assertNotIn("SECRET-SERIAL", page.serialized())
+        self.assertNotIn("smart_not_guarantee", page.serialized())
+        self.assertNotIn("hardware_readonly", page.serialized())
         self.assertNotIn("SECRET-SERIAL", " ".join(x.text() for x in page.findChildren(QLabel)))
         page.copy_snapshot()
         self.assertNotIn("SECRET-SERIAL", QApplication.clipboard().text())

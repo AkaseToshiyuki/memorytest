@@ -559,6 +559,8 @@ SMART 读取保留 smartctl 非零退出码中的健康告警，区分命令失�
 NVMe 已用耐久度可超过 100%，不转换成武断的剩余寿命。ATA 原始值保留提供方格式和名称，
 不套用统一寿命算法。使用 `-n standby` 请求避免唤醒休眠盘，但设备／桥接不支持时不能保证。
 工具不会联网查询型号数据库或上传设备信息。参数查看本身不启动基准或压力负载。
+Windows 内存只使用单位明确的 `ConfiguredClockSpeed`；0 频率／电压显示为不可用。
+不把文档单位与 SMBIOS 来源含义不一致的旧 `Speed` 属性强行标成额定 MHz／MT/s。
 
 设计依据：[CPU-Z 官方字段说明](https://www.cpuid.com/softwares/cpu-z.html)的分组参数、
 [GPU-Z 官方功能与界面](https://www.techpowerup.com/gpuz/)的设备选择／显卡与传感器信息、

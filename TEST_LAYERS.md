@@ -304,3 +304,10 @@ inventory commands. `inspector-check.json` records available field names and
 backend status, without hardware serial numbers. Final CI/artifact verification
 is recorded separately after the build; fixture coverage does not certify every
 device's SPD/SMART access or equivalence to the four reference applications.
+
+Final CIM-unit refinement: inspector suite **18/18, 14.943 s**,
+`/tmp/memorytest-hardware-tools-units-final.log`. The ambiguous legacy CIM `Speed`
+field is not relabelled as MHz; zero configured clock/voltage means unavailable.
+Screen/clipboard/export copy checks passed **2/2**,
+`/tmp/memorytest-hardware-tools-export-final.log`; exported snapshots also omit
+non-operational commentary metadata.

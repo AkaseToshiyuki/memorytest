@@ -18,6 +18,10 @@ MAX_OUTPUT = 2_000_000
 
 def public_snapshot(snapshot, show_serials=False):
     result = copy.deepcopy(snapshot)
+    operational = {"smartctl_missing", "smart_read_error", "hardware_read_failed", "hardware_no_devices"}
+    result["notices"] = [key for key in result.get("notices", []) if key in operational]
+    for dev in result.get("devices", []):
+        dev["notices"] = [key for key in dev.get("notices", []) if key in operational]
     if not show_serials:
         for dev in result.get("devices", []):
             for group in dev.get("groups", []):

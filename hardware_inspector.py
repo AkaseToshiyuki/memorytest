@@ -309,16 +309,16 @@ def dram_info(reader):
                 visit(row.get("_items", []))
         visit(reader.profiler("SPMemoryDataType"))
     elif sys.platform == "win32":
-        data = reader.powershell("@(Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,BankLabel,Capacity,Manufacturer,PartNumber,SerialNumber,Speed,ConfiguredClockSpeed,SMBIOSMemoryType,DataWidth,TotalWidth,ConfiguredVoltage)")
+        data = reader.powershell("@(Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,BankLabel,Capacity,Manufacturer,PartNumber,SerialNumber,ConfiguredClockSpeed,SMBIOSMemoryType,DataWidth,TotalWidth,ConfiguredVoltage)")
         for index, row in enumerate(items(data)):
             result.append(device(row.get("DeviceLocator", f"dimm{index}"), row.get("DeviceLocator"), [
                 group("memory_module", "Win32_PhysicalMemory (SMBIOS)", slot=row.get("DeviceLocator"), bank=row.get("BankLabel"),
                       capacity=size(row.get("Capacity")), vendor=row.get("Manufacturer"), part_number=row.get("PartNumber"),
                       serial=row.get("SerialNumber"), memory_type=MEMORY_TYPES.get(row.get("SMBIOSMemoryType")),
-                      rated_speed=with_unit(row.get("Speed"), "MHz (CIM)"),
-                      configured_speed=with_unit(row.get("ConfiguredClockSpeed"), "MHz (CIM)"),
+                      rated_speed=None,
+                      configured_speed=with_unit(row.get("ConfiguredClockSpeed") or None, "MHz (CIM)"),
                       data_width=with_unit(row.get("DataWidth"), "bit"), total_width=with_unit(row.get("TotalWidth"), "bit"),
-                      configured_voltage=with_unit(row.get("ConfiguredVoltage"), "mV"))], notices=["firmware_not_spd"]))
+                      configured_voltage=with_unit(row.get("ConfiguredVoltage") or None, "mV"))], notices=["firmware_not_spd"]))
     else:
         dmi = find_tool("dmidecode")
         if dmi:
