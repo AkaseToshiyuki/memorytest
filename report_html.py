@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from benchmark_registry import TESTS, select_modules, report_filename
+from benchmark_registry import TASKS as TESTS, select_modules, report_filename
 
 ROOT = Path(__file__).parent.resolve()
 REPORTS = ROOT / "reports"
@@ -61,7 +61,7 @@ def build_html(score_dict=None, modules=None, manifest=None, legacy_scores=False
     """Compatibility signature; external/precomputed grades are deliberately ignored."""
     from report_view import build_report
     _report_cache.clear()
-    return build_report(REPORTS, modules or list(TESTS), manifest, language, theme)
+    return build_report(REPORTS, modules or select_modules(), manifest, language, theme)
 
 
 def main():

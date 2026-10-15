@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 
-from benchmark_registry import ROOT, TESTS, CATEGORIES, select_modules, report_filename
+from benchmark_registry import ROOT, TESTS, TASKS, CATEGORIES, select_modules, report_filename
 from report_html import _parse_all_tables
 from process_control import Cancellation, app_command, stop_process_tree
 from result_storage import archive_identity, prune_archives
@@ -36,10 +36,16 @@ def positive_seconds(value):
 
 
 def default_timeout(name):
+    name = TASKS[name].get("engine", name)
     cores = os.cpu_count() or 1
     if name == "inter_core":
-        return min(2400, 120 + cores * cores / 3)
-    return positive_seconds(os.environ.get("CPU_TIMEOUT", str(min(2400, max(300, 300 + (cores - 24) * 4)))))
+        return min(14400, 300 + cores * cores * 2)
+    # Cache uses 5 samples, other diagnostics 20 and ALU/FP 50. Explicit user
+    # timeout/CPU_TIMEOUT overrides still win. This is a ceiling, not an ETA.
+    limits = {"cache_hierarchy": 600, "memory_bandwidth": 900,
+              "cpu_alu": 900, "cpu_float": 1200, "cpu_branch": 600}
+    default = limits.get(name, min(2400, max(300, 300 + (cores - 24) * 4)))
+    return positive_seconds(os.environ.get("CPU_TIMEOUT", str(default)))
 
 
 def run_command(command, cwd, log, timeout, cancelled=None):
@@ -171,7 +177,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
     event(type="run", path=str(run_dir), total=len(modules))
     print(f"Run: {run_dir}\nSelected: {', '.join(modules)}", flush=True)
     for name in modules:
-        info = TESTS[name]
+        info = TASKS[name]
         work = run_dir / name
         (work / "reports").mkdir(parents=True)
         log = work / "output.log"
@@ -189,7 +195,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
             if cancelled and cancelled():
                 raise KeyboardInterrupt
             if not skip_build:
-                build = ([sys.executable, str(ROOT / "packaging/build_engines.py"), "--output-dir", str(bin_dir), "--module", name]
+                build = ([sys.executable, str(ROOT / "packaging/build_engines.py"), "--output-dir", str(bin_dir), "--module", info.get("engine", name)]
                          if os.name == "nt" else ["make", f"BUILD_DIR={bin_dir}", str(bin_dir / info["bin"])])
                 code = run_command(build,
                                    ROOT, log, 300, cancelled)
@@ -200,7 +206,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
             if os.name == "nt":
                 binary = binary.with_suffix(".exe")
             result["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-            command = [str(binary)]
+            command = [str(binary), *info.get("args", [])]
             if name == "cpu_multi" and cpu_threads is not None:
                 command.extend(["--threads", str(cpu_threads)])
             result["command"] = command
@@ -219,6 +225,9 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
                 result.update(status="invalid_report", message=error)
                 continue
             shutil.copy2(source, raw_dir / info["report"])
+            samples = work / "reports" / f"{name}_samples.json"
+            if samples.is_file():
+                shutil.copy2(samples, raw_dir / samples.name)
             sidecars = {"inter_core": "inter_core_heatmap_data.json", "cpu_multi": "compute_mark_v2.json"}
             if name in sidecars:
                 sidecar = work / "reports" / sidecars[name]
@@ -285,7 +294,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--module", "-m", action="append", choices=TESTS, help="repeat to select several modules")
+    parser.add_argument("--module", "-m", action="append", choices=TASKS, help="repeat to select several modules")
     parser.add_argument("--category", choices=CATEGORIES, help="select a group (union with --module)")
     parser.add_argument("--list", action="store_true", help="list modules without building or running")
     parser.add_argument("--system-info", action="store_true", help="print read-only system/topology metadata as JSON; no benchmarks")
@@ -307,7 +316,7 @@ def main(argv=None):
         print(json.dumps(environment_snapshot(), indent=2, ensure_ascii=False))
         return 0
     if args.list:
-        for name, info in TESTS.items():
+        for name, info in TASKS.items():
             print(f"{name:20s} [{info['category']}] {info['description_zh']}")
         return 0
     if "CPU_TIMEOUT" in os.environ:

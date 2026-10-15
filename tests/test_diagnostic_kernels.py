@@ -1,6 +1,7 @@
 """Independent references, retained work, counts and bounded diagnostic reports."""
 from decimal import Decimal, localcontext
 import math
+import json
 import os
 from pathlib import Path
 import platform
@@ -36,7 +37,7 @@ class DiagnosticKernelTests(unittest.TestCase):
         for kind in ("branch", "float", "alu"):
             path = cls.root / (kind + (".exe" if windows else ""))
             command = shlex.split(os.environ.get("CC", "cc")) + ["-O2", "-std=c11", "-pthread",
-                "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000", "-DBENCH_SAMPLES=3",
+                "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000",
                 "-DBRANCH_PATTERN_SIZE=4096", str(ROOT / "tests/diagnostic_regression.c"),
                 *[str(ROOT / "src" / source) for source in sources], "-lm", "-o", str(path)]
             if kind == "branch":
@@ -133,7 +134,15 @@ class DiagnosticKernelTests(unittest.TestCase):
                 path = reports / f"cpu_{kind}_report.md"
                 self.assertIsNone(validate_report(path))
                 text = path.read_text()
-                self.assertIn("- Samples: 3", text)
+                count = 20 if kind == "branch" else 50
+                self.assertIn(f"- Samples: {count}", text)
+                audit = json.loads((reports / f"cpu_{kind}_samples.json").read_text())
+                self.assertEqual(audit["protocol"], "diagnostic-v3")
+                self.assertTrue(audit["records"])
+                for record in audit["records"]:
+                    self.assertEqual(len(record["elapsed_ns"]), count)
+                    self.assertGreaterEqual(record["statistics"]["kept"], count * .9)
+                    self.assertEqual(record["statistics"]["count"], count)
                 self.assertNotIn("Estimated", text)
                 self.assertNotIn("Mispred Rate", text)
                 for _, headers, rows in tables(text):
@@ -174,3 +183,11 @@ class DiagnosticKernelTests(unittest.TestCase):
         self.assertRegex(body, r"\bje\b")
         self.assertRegex(body, r"\bjne\b")
         self.assertRegex(body, r"\bcmpb\b")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and platform.machine() == "x86_64" and shutil.which("objdump"), "x86 Linux disassembly check")
+    def test_integer_chains_keep_register_work_and_real_multiply_divide(self):
+        assembly = subprocess.check_output(["objdump", "-d", str(self.binaries["alu"])], text=True)
+        for name, instruction in (("add", "add"), ("mul", "imul"), ("div", "div"), ("mod", "div")):
+            body = re.search(r"<test_" + name + r"(?:\.[^>]*)?>:\n(.*?)(?=\n\n)", assembly, re.S).group(1)
+            self.assertRegex(body, r"\b" + instruction + r"\b")
+            self.assertNotRegex(body, r"\([^\n)]*%(?:rsp|rbp)\b")

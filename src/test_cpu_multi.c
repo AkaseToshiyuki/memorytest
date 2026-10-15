@@ -7,6 +7,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #include "compute_kernel.h"
+#include "sample_statistics.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
@@ -74,6 +75,7 @@ typedef struct {
     int kind, threads;
     uint64_t iterations;
     Sample samples[CM_REPEATS];
+    SampleStatistics statistics;
     double rate;
 } Result;
 
@@ -266,9 +268,15 @@ static int benchmark(Result *result, const int *cpus, size_t slots) {
             rates[i] = (double)result->samples[i].operations / (double)result->samples[i].elapsed_ns;
         }
         if (short_sample) { iterations *= 2; continue; }
-        qsort(rates, CM_REPEATS, sizeof(double), compare_rates);
+        double elapsed[CM_REPEATS], kept[CM_REPEATS];
+        for (unsigned i = 0; i < CM_REPEATS; ++i) elapsed[i] = (double)result->samples[i].elapsed_ns;
+        if (sample_statistics(elapsed, CM_REPEATS, &result->statistics)) return 1;
+        unsigned n = 0;
+        for (unsigned i = 0; i < CM_REPEATS; ++i)
+            if (!result->statistics.excluded[i]) kept[n++] = rates[i];
+        qsort(kept, n, sizeof(double), compare_rates);
         result->iterations = iterations;
-        result->rate = rates[CM_REPEATS / 2];
+        result->rate = sample_quantile(kept, n, .5);
         return 0;
     }
     fprintf(stderr, "Could not obtain sufficiently long samples; no score\n");
@@ -359,14 +367,17 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
         double speedup = r->rate / single[r->kind];
         fprintf(md, "| %s | %s | %d | %.3f | %.3fx | %.2f%% | measured | %.9f |\n",
                 r->kind ? "FP64 logistic" : "U64 xorshift", r->kind ? "FP64" : "Integer",
-                r->threads, (double)r->samples[0].elapsed_ns / 1e6,
+                r->threads, r->statistics.median / 1e6,
                 speedup, speedup / r->threads * 100.0, r->rate);
     }
     fprintf(md, "\n## Protocol\n\n"
                 "- Workload: %s; scalar only, binary64 FP, uint64 modulo arithmetic.\n"
                 "- Integer: 24 semantic bitwise operations/iteration; FP64: 12 FLOPs/iteration.\n"
-                "- Rate: median of %d measured total-operations/common-wall-time samples, each >= 100 ms.\n"
-                "- Time column shows the first accepted sample, not the median-rate denominator.\n"
+                "- Sampling protocol: " CM_SAMPLING "; %d measured samples, each >= 100 ms.\n"
+                "- Rate: median of retained operations/common-wall-time rates; even medians average both middle values.\n"
+                "- Outliers: outer 3*IQR fences; drift >10%% or >10%% candidates disables filtering.\n"
+                "- Time column: retained median time, not the reciprocal of an even-count median rate.\n"
+                "- Raw samples and exclusion indices are saved; legacy 5-sample archives remain readable but are a different protocol.\n"
                 "- Same deterministic seeds and kernels on every ISA; warmup/creation excluded.\n"
                 "- Placement: %s; exact affinity verified: %s.\n"
                 "- macOS QoS is a scheduling hint, not P-core selection or CPU pinning.\n"
@@ -375,6 +386,16 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
                 "- Measures this process's available CPU capacity; quotas, virtualization, temperature,\n"
                 "  background load and compiler version affect results. Compare matching protocol/profile.\n",
             CM_WORKLOAD, CM_REPEATS, CM_PLACEMENT, CM_AFFINITY);
+    fprintf(md, "\n## Sampling Statistics\n\n"
+                "| Workload | Threads | Samples | Kept | Rejected | Raw median(ms) | Drift(%%) | Status |\n"
+                "|---|---:|---:|---:|---:|---:|---:|---|\n");
+    for (int i = 0; i < count; ++i) {
+        Result *r = &results[i];
+        SampleStatistics *s = &r->statistics;
+        fprintf(md, "| %s | %d | %u | %u | %u | %.6f | %.3f | %s |\n",
+                r->kind ? "FP64" : "Integer", r->threads, s->count, s->kept, s->rejected,
+                s->raw_median / 1e6, s->drift_pct, s->unstable ? "unstable; unfiltered" : "measured");
+    }
     fprintf(json, "{\"schema_version\":2,\"version\":\"%s\",\"workload\":\"%s\","
                   "\"profile\":", CM_VERSION, CM_WORKLOAD);
     json_string(json, CM_BUILD_PROFILE);
@@ -410,7 +431,7 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
     for (int i = 0; i < available; ++i) fprintf(json, "%s%d", i ? "," : "", cpus[i]);
     fprintf(json, "]");
 #endif
-    fprintf(json, ",\"records\":[");
+    fprintf(json, ",\"sampling_protocol\":\"" CM_SAMPLING "\",\"sample_count\":%u,\"records\":[", CM_REPEATS);
     for (int i = 0; i < count; ++i) {
         Result *r = &results[i];
         fprintf(json, "%s{\"workload\":\"%s\",\"threads\":%d,\"iterations_per_thread\":%" PRIu64
@@ -423,7 +444,9 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
                           ",\"checksum\":\"%016" PRIx64 "\"}",
                     j ? "," : "", s->elapsed_ns, s->operations, s->checksum);
         }
-        fprintf(json, "]}");
+        fprintf(json, "],\"statistics\":");
+        sample_statistics_json(json, &r->statistics);
+        fprintf(json, "}");
     }
     fprintf(json, "]}\n");
     int failed = ferror(md) || ferror(json);

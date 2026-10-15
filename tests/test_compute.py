@@ -15,6 +15,7 @@ import unittest
 
 from benchmark_registry import ROOT
 from compute_score import FLAGS, CLANG_FLAGS, KERNEL_HASH, PROFILE, WORKLOAD, compute_mark_score
+from test_sample_statistics import reference_rates
 
 
 def fixture(threads=2):
@@ -36,6 +37,28 @@ def fixture(threads=2):
 
 
 class ScoreContractTests(unittest.TestCase):
+    def test_repeat20_protocol_recomputes_and_preserves_legacy(self):
+        data = fixture()
+        data.update(sampling_protocol="repeat20-outer-iqr3-v1", sample_count=20)
+        for record in data["records"]:
+            record["samples"] = [dict(s) for s in record["samples"] * 4]
+            durations = [198, 199, 200, 201, 202] * 4
+            durations[0], durations[9] = 100, 1000
+            for sample, elapsed in zip(record["samples"], durations):
+                sample["elapsed_ns"] = elapsed * 1_000_000
+            record["statistics"] = {"median": 1, "excluded_indices": list(range(20))}
+        score = compute_mark_score(data)
+        self.assertEqual((score.sample_count, score.sampling_protocol), (20, "repeat20-outer-iqr3-v1"))
+        self.assertEqual(score.integer_gops, reference_rates(data)["integer", 2])
+        self.assertEqual(score.integer_gops, 24)
+        self.assertFalse(score.stable)
+        self.assertEqual(compute_mark_score(fixture()).sample_count, 5)
+        for key, value in (("sampling_protocol", "future"), ("sample_count", 5), ("sample_count", True), ("sample_count", 20.0)):
+            bad = copy.deepcopy(data)
+            bad[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                compute_mark_score(bad)
+
     def test_windows_pinned_group_and_qpc_contract(self):
         data = fixture()
         data.update(os="Windows", timer="QueryPerformanceCounter", placement_policy="windows-pinned-process-group",
@@ -262,8 +285,7 @@ class NativeKernelTests(unittest.TestCase):
         self.assertEqual(score.threads, len(chosen))
         self.assertEqual(score.scope, "all-allowed")
         # Independent calculation from the raw samples, not score_to_dict output.
-        rates = {(r["workload"], r["threads"]): sorted(s["operations"] / s["elapsed_ns"] for s in r["samples"])[2]
-                 for r in data["records"]}
+        rates = reference_rates(data)
         expected = math.floor(1000 * (rates["integer", len(chosen)] * rates["fp64", len(chosen)]) ** 0.5 + 0.5)
         self.assertEqual(score.points, expected)
         report = work / "result.html"
@@ -311,8 +333,7 @@ class NativeKernelTests(unittest.TestCase):
         self.assertEqual(score.placement_policy, "windows-pinned-process-group")
         self.assertTrue(score.affinity_verified)
         self.assertEqual(score.threads, 2)
-        rates = {(r["workload"], r["threads"]): sorted(s["operations"] / s["elapsed_ns"] for s in r["samples"])[2]
-                 for r in data["records"]}
+        rates = reference_rates(data)
         expected = math.floor(1000 * math.sqrt(rates["integer", 2] * rates["fp64", 2]) + 0.5)
         self.assertEqual(score.points, expected)
 
@@ -335,8 +356,7 @@ class NativeKernelTests(unittest.TestCase):
         self.assertEqual(score.threads, threads)
         self.assertFalse(score.affinity_verified)
         self.assertIsNone(data["available_cpus"])
-        rates = {(r["workload"], r["threads"]): sorted(s["operations"] / s["elapsed_ns"] for s in r["samples"])[2]
-                 for r in data["records"]}
+        rates = reference_rates(data)
         self.assertEqual(score.points, math.floor(1000 * (rates["integer", threads] * rates["fp64", threads]) ** .5 + .5))
         report = work / "macos.html"
         render = subprocess.run([sys.executable, str(ROOT / "report_html.py"), "--reports-dir", str(work / "reports"),

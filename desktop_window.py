@@ -9,13 +9,13 @@ from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QGridLayout, QMessageBox)
-from benchmark_registry import ROOT, TESTS
+from benchmark_registry import ROOT, TASKS as TESTS, SELECTION_GROUPS as GROUPS, SUBTESTS
 from process_control import app_command
 from desktop_results import ModulePage, supported
 from desktop_theme import apply_theme, card, label, set_tone
 from desktop_widgets import ReadableSpinBox, ElidingLabel
 from i18n import tr, display, default_language
-from result_model import GROUPS, ModuleResult, build_module
+from result_model import ModuleResult, build_module, split_legacy_result
 from app_version import RELEASE_TAG
 from result_storage import (application_directory, writable_output, recent_archives,
                             local_file, prune_archives)
@@ -163,7 +163,6 @@ class MainWindow(QMainWindow):
         self.saved_run.setWordWrap(True)
         self.saved_run.setTextFormat(Qt.PlainText)
         config.addWidget(self.saved_run)
-        config.addStretch()
         self.run_all = self.button("run_all", self.begin_all)
         self.run_all.setProperty("role", "primary")
         config.addWidget(self.run_all)
@@ -179,6 +178,7 @@ class MainWindow(QMainWindow):
             button.setProperty("role", "quiet")
             links.addWidget(button)
         config.addLayout(links)
+        config.addStretch()
         columns.addWidget(config_card, 2)
         layout.addLayout(columns)
         progress_card, progress_layout = card()
@@ -435,6 +435,7 @@ class MainWindow(QMainWindow):
         for _, directory, data in recent_archives(roots, "benchmark"):
             try:
                 rows = data["modules"]
+                restored = []
                 # Do not mix independent rounds or expose paths outside the archive.
                 for row in rows:
                     name = row["module"]
@@ -444,19 +445,28 @@ class MainWindow(QMainWindow):
                     if name == "cpu_multi" and row.get("status") == "passed":
                         if local_file(directory, "reports/compute_mark_v2.json") is None:
                             raise ValueError("missing score data")
-                    if row.get("status") == "passed" and build_module(name, directory / "reports", row).status != "passed":
+                    model = build_module(name, directory / "reports", row)
+                    if row.get("status") == "passed" and model.status != "passed":
                         raise ValueError("invalid result")
+                    restored.extend((row, part) for part in split_legacy_result(model))
                 self.run_dir = directory
                 self.report = local_file(directory, data.get("html_report"))
                 self.completed.clear()
-                self.progress.setRange(0, len(rows))
-                for row in rows:
+                self.progress.setRange(0, len(restored))
+                for row, model in restored:
                     row = dict(row)
+                    row["module"] = model.name
                     if row.get("status") in {"running", "queued"}:
-                        row["status"] = "interrupted"
+                        model.status = "interrupted"
+                    row["status"] = model.status
                     row["log"] = str(local_file(directory, row.get("log")) or "")
-                    self.handle_event({"type": "module", **row})
-                    page = self.pages[row["module"]]
+                    self.module_status[model.name] = model.status
+                    self.labels[model.name].setText(tr(model.status, self.language))
+                    set_tone(self.labels[model.name], model.status)
+                    self.completed.add(model.name)
+                    self.progress.setValue(len(self.completed))
+                    page = self.pages[model.name]
+                    page.completed(directory, row, model=model)
                     page.html = self.report
                     page.open.setEnabled(self.report is not None)
                     page.saved_run_id = directory.name
@@ -501,7 +511,7 @@ class MainWindow(QMainWindow):
             self.close()
 
     def begin_all(self):
-        self.begin([name for name in TESTS if supported(name)])
+        self.begin([name for name in self.modules if supported(name)])
 
     def begin(self, modules=None):
         if self.benchmark_active or self.stress_active:

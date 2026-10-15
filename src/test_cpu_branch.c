@@ -103,7 +103,7 @@ int run_cpu_branch_test(void) {
         double count = (double)results[i].repetitions * BRANCH_PATTERN_SIZE;
         double ns = (double)results[i].elapsed_ns / count;
         printf("%s: %.6f ns/branch (%d samples)\n", pattern_names[i], ns, BENCH_SAMPLES);
-        report_write(report, "| %s | %.6f | %.6f | %.0f | %.3f | Measured |\n", pattern_names[i],
+        report_write(report, "| %s | %.9f | %.6f | %.0f | %.3f | Measured |\n", pattern_names[i],
                      (double)results[i].elapsed_ns / 1e6, ns, count, bench_spread(&results[i]));
     }
     report_section(report, "Notes");
@@ -111,6 +111,10 @@ int run_cpu_branch_test(void) {
                  "Balanced patterns use identical input size, kernel and taken-path work.\n"
                  "Elapsed time includes loads and loop overhead; it is not a misprediction percentage.\n"
                  "Branch accuracy requires supported hardware counters and is not estimated here.\n");
+    FILE *audit = bench_audit_begin(report);
+    if (!audit) { report_free(report); return 1; }
+    for (unsigned i = 0; i < PATTERNS; ++i) bench_audit_row(report, audit, pattern_names[i], &results[i], i);
+    if (bench_audit_finish(audit)) { report_free(report); return 1; }
     report_finalize_json(report);
     return report_finish(report) ? 1 : 0;
 }

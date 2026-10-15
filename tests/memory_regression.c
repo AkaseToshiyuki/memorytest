@@ -1,8 +1,8 @@
 #include "../src/common.h"
-static int fail_allocation, fail_creation, creations;
-static void *test_malloc(size_t bytes) { return fail_allocation ? NULL : malloc(bytes); }
+static int fail_allocation, fail_creation, creations, allocations;
+static void *test_malloc(size_t bytes) { ++allocations; return fail_allocation ? NULL : malloc(bytes); }
 static int test_create(pthread_t *thread, const void *attributes, void *(*entry)(void *), void *argument) {
-    if (fail_creation && creations++ == 1) return 1;
+    if (++creations == 2 && fail_creation) return 1;
     return pthread_create(thread, attributes, entry, argument);
 }
 #define malloc test_malloc
@@ -19,6 +19,13 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         fail_allocation = !strcmp(argv[1], "allocation");
         fail_creation = !strcmp(argv[1], "creation");
+        if (!strcmp(argv[1], "latency_only")) {
+            memory_mode = 2;
+            int status = run_memory_bandwidth_test(128 * KB, 2);
+            if (allocations != 1 || creations != 0) return 15;
+            return status;
+        }
+        if (!strcmp(argv[1], "bandwidth_only")) memory_mode = 1;
         return run_memory_bandwidth_test(128 * KB, 2);
     }
     double a[65], b[65], c[65];

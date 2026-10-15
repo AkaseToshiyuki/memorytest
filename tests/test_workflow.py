@@ -88,6 +88,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("CAS latency", report)
         self.assertIn("20", report)
 
+    def test_split_selection_passes_engine_mode_and_preserves_raw_samples(self):
+        from benchmark_registry import SUBTESTS
+        for name, (parent, mode) in SUBTESTS.items():
+            with self.subTest(name=name):
+                result = self.run_cli("-m", name, modes={name: "audit"})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                path, manifest = self.latest()
+                self.assertEqual(manifest["selected_modules"], [name])
+                self.assertEqual(manifest["modules"][0]["command"][-2:], ["--mode", mode])
+                self.assertEqual((path / name / "executed").read_text(), name)
+                audit = json.loads((path / "reports" / f"{name}_samples.json").read_text())
+                self.assertEqual(audit["elapsed_ns"], [100, 99, 101, 98, 102])
+                self.assertFalse((path / "reports" / TESTS[parent]["report"]).exists())
+                self.assertIn(f'data-module="{name}"', (path / manifest["html_report"]).read_text())
+
     def test_each_single_module_has_only_its_own_html(self):
         for name in TESTS:
             with self.subTest(module=name):

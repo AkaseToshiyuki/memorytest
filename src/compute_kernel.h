@@ -10,7 +10,8 @@
 #define CM_VERSION "v2"
 #define CM_WORKLOAD "u64-xorshift4-fp64-logistic4-r1"
 #define CM_PROFILE "portable-scalar-v2"
-#define CM_REPEATS 5
+#define CM_REPEATS 20
+#define CM_SAMPLING "repeat20-outer-iqr3-v1"
 #define CM_MIN_NS UINT64_C(100000000)
 #define CM_INT_OPS 24
 #define CM_FP_OPS 12

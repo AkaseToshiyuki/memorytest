@@ -14,7 +14,7 @@ import shutil
 import sys
 import tempfile
 
-from benchmark_registry import ROOT, TESTS
+from benchmark_registry import ROOT, TASKS as TESTS
 
 OWNER = "MemoryTest/archive-v1"
 KEEP_RUNS = 10

@@ -1,5 +1,6 @@
 """Small independent memory references and two-worker, 384-KiB acceptance."""
 import os
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -24,7 +25,7 @@ class MemoryKernelTests(unittest.TestCase):
                    "detect_windows.c" if windows else "detect_macos.c" if sys.platform == "darwin" else "detect.c",
                    "pmu_macos.c" if windows or sys.platform == "darwin" else "pmu.c"]
         command = shlex.split(os.environ.get("CC", "cc")) + ["-O2", "-std=c11", "-pthread",
-            "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000", "-DBENCH_SAMPLES=3",
+            "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000",
             str(ROOT / "tests/memory_regression.c"), *[str(ROOT / "src" / s) for s in sources], "-lm", "-o", str(cls.binary)]
         if windows:
             command.append("-ladvapi32")
@@ -86,3 +87,26 @@ class MemoryKernelTests(unittest.TestCase):
                 run = subprocess.run([str(self.binary), mode], cwd=folder, capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(run.returncode, 0)
                 self.assertFalse((Path(folder) / "reports/memory_bandwidth_report.md").exists())
+
+    def test_separate_modes_and_raw_timing_evidence(self):
+        for mode, count in (("bandwidth", 8), ("latency", 1)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                run = subprocess.run([str(self.binary), mode + "_only"], cwd=folder,
+                                     capture_output=True, text=True, timeout=15)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                reports = Path(folder) / "reports"
+                name = f"memory_{mode}_test"
+                path = reports / f"{name}_report.md"
+                self.assertIsNone(validate_report(path))
+                text = path.read_text()
+                self.assertEqual("## Memory Bandwidth Test Results" in text, mode == "bandwidth")
+                self.assertEqual("## Memory Latency" in text, mode == "latency")
+                self.assertIn("- Thread Count: " + ("1" if mode == "latency" else "2"), text)
+                audit = json.loads((reports / f"{name}_samples.json").read_text())
+                self.assertEqual(len(audit["records"]), count)
+                for record in audit["records"]:
+                    self.assertEqual(len(record["elapsed_ns"]), 20)
+                    self.assertGreaterEqual(record["statistics"]["kept"], 18)
+                model = build_module(name, reports)
+                self.assertEqual(model.status, "passed")
+                self.assertEqual(len(model.charts), 1)

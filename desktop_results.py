@@ -182,12 +182,12 @@ class ModulePage(QWidget):
         for button in (self.cancel, self.open, self.log_button):
             button.setEnabled(False)
         for button in (self.run, self.cancel, self.open, self.log_button):
-            if name == "cache_hierarchy":
+            if name.startswith("cache_"):
                 button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
                 controls.addWidget(button, 1)
             else:
                 controls.addWidget(button)
-        if name != "cache_hierarchy":
+        if not name.startswith("cache_"):
             controls.addStretch()
         layout.addLayout(controls)
         self.summary = label("", "status")
@@ -229,11 +229,11 @@ class ModulePage(QWidget):
         self.progress.setRange(0, 0)
         self.retranslate()
 
-    def completed(self, run_dir, data):
+    def completed(self, run_dir, data, model=None):
         self.log_path = run_dir / data.get("log", "")
         self.log_button.setEnabled(self.log_path.is_file())
-        self.model = build_module(self.name, run_dir / "reports", data)
-        if self.name == "cache_hierarchy" and self.model.status == "passed":
+        self.model = model if model is not None else build_module(self.name, run_dir / "reports", data)
+        if self.name in {"cache_hierarchy", "cache_detection"} and self.model.status == "passed":
             try:
                 levels = perflevel_table(json.loads((run_dir / "manifest.json").read_text()))
                 if levels.rows:

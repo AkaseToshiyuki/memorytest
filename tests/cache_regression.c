@@ -27,6 +27,18 @@ int main(int argc, char **argv) {
         rows[3].ns = 4.2;
         rows[1].latency.max_ns = 1200; /* overlapping noisy samples */
         if (cache_transition(rows, 5, 2)) return 3;
+        for (unsigned i = 0; i < 5; ++i) {
+            rows[i].latency.statistics.count = 5;
+            rows[i].latency.statistics.q1 = rows[i].ns * 250;
+            rows[i].latency.statistics.q3 = rows[i].ns * 262;
+        }
+        /* A single extreme raw maximum must not suppress separated IQR bands. */
+        if (!cache_transition(rows, 5, 2)) return 4;
+        rows[2].latency.statistics.q1 = rows[1].latency.statistics.q3;
+        if (cache_transition(rows, 5, 2)) return 5;
+        rows[2].latency.statistics.q1 = rows[2].ns * 250;
+        rows[3].latency.statistics.unstable = 1;
+        if (cache_transition(rows, 5, 2)) return 6;
         return 0;
     }
     global_system_config.detected = 1;
@@ -45,5 +57,8 @@ int main(int argc, char **argv) {
     }
     if (argc > 1 && !strcmp(argv[1], "allocation")) fail_alloc = 1;
     if (argc > 1 && !strcmp(argv[1], "memory")) available = 0;
+    if (argc > 1 && !strcmp(argv[1], "bandwidth_only")) cache_mode = 1;
+    if (argc > 1 && !strcmp(argv[1], "latency_only")) cache_mode = 2;
+    if (argc > 1 && !strcmp(argv[1], "detection_only")) cache_mode = 3;
     return run_cache_hierarchy_test();
 }

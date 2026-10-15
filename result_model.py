@@ -6,12 +6,14 @@ from pathlib import Path
 import re
 import statistics
 
-from benchmark_registry import TESTS
+from benchmark_registry import TASKS as TESTS, SELECTION_GROUPS, select_modules
 from compute_score import compute_mark_score
 from i18n import ref
 
 GROUPS = {"cache_group": ["cache_hierarchy"], "memory_group": ["memory_bandwidth"],
           "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core"]}
+for _group in ("cache_group", "memory_group"):
+    GROUPS[_group] += SELECTION_GROUPS[_group]
 
 
 @dataclass
@@ -112,7 +114,7 @@ OPS = {"add": "add", "sub": "sub", "mul": "mul", "div": "div", "mod": "mod", "sq
        "write": "write", "copy": "copy", "always taken": "always", "never taken": "never",
        "random 50%": "random50", "2-bit counter": "counter2", "increasing": "increasing"}
 OPS.update({"alternating": "alternating", "ttnn": "ttnn", "scale": "scale", "triad": "triad",
-            "dependent random read": "dependent_read", "mul+add": "muladd"})
+            "dependent random read": "dependent_read", "mul+add": "muladd", "integer": "integer", "fp64": "fp64"})
 
 
 def operation(value, index=1):
@@ -146,6 +148,67 @@ HEADERS.update({"spread(%)": ("spread", "%"), "operations": ("operations", ""),
 
 def column(key, unit=""):
     return {"label": ref(key), "unit": unit}
+
+
+def bandwidth_scale(values):
+    """Input is decimal MB/s; choose one readable axis/column unit, capped at GB/s."""
+    maximum = max((abs(v) for v in values if isinstance(v, (int, float)) and math.isfinite(v)), default=0)
+    if maximum >= 1000:
+        return 0.001, "GB/s"
+    if maximum >= 1 or maximum == 0:
+        return 1, "MB/s"
+    if maximum >= 0.001:
+        return 1000, "kB/s"
+    return 1_000_000, "B/s"
+
+
+def scale_bandwidth(result):
+    # Change only this presentation model; the Markdown/JSON evidence is untouched.
+    for table in result.tables:
+        for i, col in enumerate(table.columns):
+            if col["unit"] != "MB/s":
+                continue
+            factor, col["unit"] = bandwidth_scale(row[i] for row in table.rows)
+            for row in table.rows:
+                if isinstance(row[i], (int, float)):
+                    row[i] *= factor
+    for chart in result.charts:
+        if chart.unit == "MB/s":
+            factor, chart.unit = bandwidth_scale(v for series in chart.series for v in series["values"])
+            for series in chart.series:
+                series["values"] = [v * factor if isinstance(v, (int, float)) else v for v in series["values"]]
+    for item in result.kpis:
+        if item["unit"] == "MB/s":
+            factor, item["unit"] = bandwidth_scale([item["value"]])
+            if isinstance(item["value"], (int, float)):
+                item["value"] *= factor
+    return result
+
+
+def sampling_tables(headers, rows, cache=False):
+    if "Samples" not in headers or "Rejected" not in headers or "Drift(%)" not in headers:
+        return []
+    titles = ("cache_bandwidth_statistics", "cache_latency_statistics") if cache else ("sampling_statistics",)
+    result = []
+    for title in titles:
+        selected = [row for row in rows if not cache or
+                    (("dependent load" in row[0]) == (title == "cache_latency_statistics"))]
+        if not selected:
+            continue
+        values = []
+        for row in selected:
+            size = re.fullmatch(r"(\d+)B (.*)", row[0])
+            label = (ref("sized_measurement", size=f"{int(size[1]) / 1024:g} KiB",
+                         measurement=ref("dependent_read") if size[2] == "dependent load" else operation(size[2]))
+                     if size else operation(row[0]))
+            if "Threads" in headers:
+                label = ref("threaded_measurement", measurement=label, threads=row[headers.index("Threads")])
+            values.append([label, *[number(row[headers.index(h)]) for h in
+                                   ("Samples", "Kept", "Rejected", "Raw median(ms)", "Drift(%)")],
+                           ref("unstable" if "unstable" in row[headers.index("Status")] else "measured")])
+        result.append(Table(title, [column("measurement"), column("samples"), column("kept"), column("rejected"),
+                                    column("raw_median", "ms"), column("drift", "%"), column("status")], values))
+    return result
 
 
 def add_generic(result, headers, rows, title="results"):
@@ -189,6 +252,7 @@ def build_module(name, reports, record=None):
         parsed = list(tables(text))
         result.status = "passed"
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
+                             (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),
                              (r"^- Thread Count: (\d+)\s*$", "threads"),
                              (r"^- Samples: (\d+)\s*$", "samples"),
                              (r"^- Warmup minimum: ([\d.]+ ms)\s*$", "warmup"),
@@ -212,8 +276,12 @@ def build_module(name, reports, record=None):
                                {"label": ref("fp64"), "value": score.fp64_gflops, "unit": "GFLOP/s"}]
                 policy = {"macos-qos-user-initiated": "qos", "linux-pinned": "pinned",
                           "windows-pinned-process-group": "process_group"}[score.placement_policy]
-                result.conditions = [(ref("protocol"), "ComputeMark v2"), (ref("threads"), score.threads),
+                result.conditions = [(ref("protocol"), "ComputeMark v2 / " + score.sampling_protocol),
+                                     (ref("samples"), score.sample_count), (ref("threads"), score.threads),
+                                     (ref("spread"), f"{score.max_spread_pct:.3f}%"),
                                      (ref("placement"), ref(policy)), (ref("compiler"), score.compiler)]
+                if not score.stable:
+                    result.notice = "unstable_score"
                 ns = sorted({1, score.threads})
                 for kind, single, multi, unit in [("integer", score.single_integer_gops, score.integer_gops, "Gop/s"),
                                                 ("fp64", score.single_fp64_gflops, score.fp64_gflops, "GFLOP/s")]:
@@ -222,19 +290,27 @@ def build_module(name, reports, record=None):
                         [{"label": ref(kind), "values": rates}], ns, "threads"))
                     result.tables.append(Table("scaling", [column("threads"), column(kind, unit), column("speedup", "×")],
                                                [[n, rate, rate / single] for n, rate in zip(ns, rates)]))
+                for title, headers, rows in parsed:
+                    if title == "Sampling Statistics":
+                        result.tables.extend(sampling_tables(headers, rows))
                 return result
             except (OSError, ValueError, KeyError, TypeError):
                 result.notice = "score_unavailable"
         for title, headers, rows in parsed:
-            if name == "cache_hierarchy" and title == "Reported Cache Hierarchy" and rows:
+            if title == "Sampling Statistics":
+                result.tables.extend(sampling_tables(headers, rows, name.startswith("cache_")))
+                continue
+            if name.startswith("cache_") and title == "Reported Cache Hierarchy" and rows:
                 result.tables.append(Table("reported_cache", [column("level"), column("capacity", "KiB")],
                     [[ref({"L1D": "l1d", "L2": "l2", "L3": "l3"}.get(row[0], "level")), number(row[1])] for row in rows]))
                 continue
-            if name == "cache_hierarchy" and title == "Cache Hierarchy Detection":
+            if name.startswith("cache_") and title == "Cache Hierarchy Detection":
                 if rows:
                     result.tables.append(Table("cache_transitions", [column("transition"), column("lower_bound", "KiB"),
                         column("upper_bound", "KiB"), column("before", "ns"), column("after", "ns"), column("ratio", "×")],
                         [[number(value) for value in row] for row in rows]))
+                elif name == "cache_detection":
+                    result.notice = "no_transition"
                 continue
             if not rows or headers[0].lower() in {"item", "level"}:
                 continue
@@ -256,7 +332,7 @@ def build_module(name, reports, record=None):
                     result.kpis.append({"label": ref(label), "value": statistics.median(finite), "unit": unit})
                 continue
             lower = [header.lower() for header in headers]
-            if name == "cache_hierarchy" and title == "Cache Bandwidth Test":
+            if name.startswith("cache_") and title == "Cache Bandwidth Test":
                 add_generic(result, headers, rows, "cache_bandwidth_test")
                 sizes = sorted({size_kib(row[0]) for row in rows if size_kib(row[0]) is not None})
                 series = []
@@ -265,7 +341,7 @@ def build_module(name, reports, record=None):
                     series.append({"label": operation(op), "values": [by_size.get(size) for size in sizes]})
                 result.charts.append(Chart("cache_bandwidth_test", "line", "MB/s", sizes, series, sizes, "workset", True))
                 continue
-            table_title = "cache_latency_test" if title == "Cache Latency Test" else "cache_scan" if "rdlat(ns)" in lower else "memory_latency" if title == "Memory Latency" else "results"
+            table_title = "cache_latency_test" if title == "Cache Latency Test" else "cache_scan" if "rdlat(ns)" in lower else "memory_latency" if title == "Memory Latency" else "memory_bandwidth_test" if title == "Memory Bandwidth Test Results" else "results"
             add_generic(result, headers, rows, table_title)
             if "rdlat(ns)" in lower:
                 valid = sorted([(size_kib(row[0]), row) for row in rows if size_kib(row[0]) is not None], key=lambda pair: pair[0])
@@ -307,16 +383,16 @@ def build_module(name, reports, record=None):
             result.status, result.reason = "invalid_report", "read_error"
     except (OSError, ValueError, KeyError, TypeError):
         result.status, result.reason = "invalid_report", "read_error"
-    return result
+    return scale_bandwidth(result)
 
 
 def cache_parts(result):
     """Three independently browsable views, preserving one compatible CLI ID."""
     parts = []
     for key in ("cache_bandwidth_test", "cache_latency_test", "cache_detection"):
-        titles = {"cache_bandwidth_test": {"cache_bandwidth_test", "cache_bw"},
-                  "cache_latency_test": {"cache_latency_test", "cache_scan"},
-                  "cache_detection": {"reported_cache", "cache_transitions"}}[key]
+        titles = {"cache_bandwidth_test": {"cache_bandwidth_test", "cache_bw", "cache_bandwidth_statistics"},
+                  "cache_latency_test": {"cache_latency_test", "cache_scan", "cache_latency_statistics"},
+                  "cache_detection": {"reported_cache", "cache_transitions", "cache_latency_statistics"}}[key]
         part = replace(result, name=key, tables=[table for table in result.tables if table.title in titles],
                        charts=[chart for chart in result.charts if chart.title in titles],
                        kpis=result.kpis if key == "cache_latency_test" else [])
@@ -324,6 +400,33 @@ def cache_parts(result):
             part.notice = "no_transition"
         parts.append(part)
     return parts
+
+
+def split_legacy_result(result):
+    """Restore old combined archives into new pages without inventing fresh runs."""
+    if result.name == "cache_hierarchy":
+        return cache_parts(result)
+    if result.name == "memory_bandwidth":
+        parts = []
+        for key in ("memory_bandwidth_test", "memory_latency_test"):
+            latency = key == "memory_latency_test"
+            part = replace(result, name=key,
+                tables=[t for t in result.tables if (t.title == "memory_latency") == latency
+                        and t.title != "sampling_statistics"],
+                charts=[c for c in result.charts if (c.title == "memory_latency") == latency],
+                kpis=[k for k in result.kpis if (k["unit"] == "ns/op") == latency])
+            for table in result.tables:
+                if table.title == "sampling_statistics":
+                    rows = [row for row in table.rows if
+                            (isinstance(row[0], dict) and row[0].get("key") == "dependent_read") == latency]
+                    if rows:
+                        part.tables.append(Table(table.title, table.columns, rows))
+            # Very old bandwidth-only archives contain no latency evidence.
+            if result.status == "passed" and not part.tables:
+                part.status, part.reason = "not_run", "no_data"
+            parts.append(part)
+        return parts
+    return [result]
 
 
 def system_data(reports, modules, manifest=None):
@@ -360,13 +463,13 @@ def perflevel_table(manifest):
 
 
 def load_results(reports, modules=None, manifest=None):
-    modules = list(modules or TESTS)
+    modules = list(modules or select_modules())
     records = {record["module"]: record for record in (manifest or {}).get("modules", [])}
     results = [build_module(name, reports, records.get(name, {"status": "not_run"}) if manifest is not None else None) for name in modules]
     levels = perflevel_table(manifest)
     if levels.rows:
         for result in results:
-            if result.name == "cache_hierarchy" and result.status == "passed":
+            if result.name in {"cache_hierarchy", "cache_detection"} and result.status == "passed":
                 result.tables = [table for table in result.tables if table.title != "reported_cache"]
                 result.tables.insert(0, levels)
     return results

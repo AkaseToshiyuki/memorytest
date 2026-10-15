@@ -1,5 +1,6 @@
 """Bounded real cache pipeline checks; never perform a full scan."""
 import os
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -9,6 +10,7 @@ import unittest
 
 from benchmark_registry import ROOT
 from run_benchmarks import validate_report
+from result_model import build_module
 
 
 class CacheReportTests(unittest.TestCase):
@@ -23,7 +25,7 @@ class CacheReportTests(unittest.TestCase):
                    "detect_windows.c" if windows else "detect_macos.c" if sys.platform == "darwin" else "detect.c",
                    "pmu_macos.c" if windows or sys.platform == "darwin" else "pmu.c"]
         command = shlex.split(os.environ.get("CC", "cc")) + ["-O2", "-std=c11", "-pthread",
-                    "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000", "-DBENCH_SAMPLES=3",
+                    "-DBENCH_TARGET_NS=1000000", "-DBENCH_WARMUP_NS=500000",
                     str(ROOT / "tests/cache_regression.c"),
                     *[str(ROOT / "src" / name) for name in sources], "-lm", "-o", str(cls.binary)]
         if windows:
@@ -64,6 +66,37 @@ class CacheReportTests(unittest.TestCase):
 
     def test_no_l3_still_writes_scan(self):
         self.run_case("no_l3")
+
+    def test_independent_modes_only_measure_selected_work(self):
+        for mode, name, per_size in (("bandwidth", "cache_bandwidth_test", 3),
+                                    ("latency", "cache_latency_test", 1),
+                                    ("detection", "cache_detection", 1)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                run = subprocess.run([str(self.binary), mode + "_only"], cwd=folder,
+                                     capture_output=True, text=True, timeout=15)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                reports = Path(folder) / "reports"
+                path = reports / f"{name}_report.md"
+                self.assertIsNone(validate_report(path))
+                audit = json.loads((reports / f"{name}_samples.json").read_text())
+                self.assertEqual(len(audit["records"]), 5 * per_size)
+                for record in audit["records"]:
+                    self.assertEqual("dependent load" in record["measurement"], mode != "bandwidth")
+                    self.assertEqual(len(record["elapsed_ns"]), 5)
+                    self.assertEqual(record["statistics"]["rejected"], 0)
+                text = path.read_text()
+                self.assertEqual("## Cache Bandwidth Test" in text, mode == "bandwidth")
+                self.assertEqual("## Cache Hierarchy Detection" in text, mode == "detection")
+                self.assertEqual(build_module(name, reports).status, "passed")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires /dev/full")
+    def test_raw_sample_write_failure_fails_module(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as folder:
+            reports = Path(folder) / "reports"
+            reports.mkdir()
+            (reports / "cache_hierarchy_samples.json").symlink_to("/dev/full")
+            run = subprocess.run([str(self.binary), "no_l3"], cwd=folder, capture_output=True, timeout=15)
+            self.assertNotEqual(run.returncode, 0)
 
     def test_synthetic_transitions_require_persistence_and_separated_ranges(self):
         result = subprocess.run([str(self.binary), "transitions"], capture_output=True, text=True, timeout=5)

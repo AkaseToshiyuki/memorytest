@@ -4,6 +4,7 @@
  * This module is deliberately separate from ComputeMark's scoring kernels. */
 #include "common.h"
 #include "util.h"
+#define BENCH_DEFAULT_SAMPLES 50
 #include "bench_protocol.h"
 #include <math.h>
 #if defined(HAVE_SSE2_INTRINSICS)
@@ -179,7 +180,7 @@ int run_cpu_float_test(void) {
         double operations = (double)results[i].repetitions * float_tests[i].operations;
         double ns = (double)results[i].elapsed_ns / operations;
         printf("%s: %.6f ns/op (%d samples)\n", float_tests[i].name, ns, BENCH_SAMPLES);
-        report_write(report, "| %s | %s | %.6f | %.0f | %.6f | %.0f | %.3f |\n",
+        report_write(report, "| %s | %s | %.9f | %.0f | %.6f | %.0f | %.3f |\n",
                      float_tests[i].name, float_tests[i].type, (double)results[i].elapsed_ns / 1e6,
                      1e9 / ns, ns, operations, bench_spread(&results[i]));
     }
@@ -188,6 +189,10 @@ int run_cpu_float_test(void) {
                  "Mixed counts add, multiply and sqrt. SIMD counts actual lanes, not loop-counter increments.\n"
                  "Timing includes loop, input, reduction and result-validation overhead. Not peak instruction throughput.\n"
                  "No CPI/IPC is derived from nominal frequency. Unsupported SIMD is omitted.\n");
+    FILE *audit = bench_audit_begin(report);
+    if (!audit) { report_free(report); return 1; }
+    for (unsigned i = 0; i < count; ++i) bench_audit_row(report, audit, float_tests[i].name, &results[i], i);
+    if (bench_audit_finish(audit)) { report_free(report); return 1; }
     report_finalize_json(report);
     return report_finish(report) ? 1 : 0;
 }

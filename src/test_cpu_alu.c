@@ -3,12 +3,13 @@
  *
  * 测试CPU整数运算性能:
  * - 加减乘除, 位运算
- * - CPI/IPC测量 (使用PMU)
- * - 跨平台支持: X86_64, ARM64, RISC-V, PowerPC
+ * - Register dependency-chain diagnostics, not inferred CPI/IPC
+ * - Counted work on the native compiler/ISA
  */
 
 #include "common.h"
 #include "util.h"
+#define BENCH_DEFAULT_SAMPLES 50
 #include "bench_protocol.h"
 #include <stdlib.h>
 #include <string.h>
@@ -19,16 +20,19 @@ static uint64_t alu_iterations;
 
 /* ========== Thread-safe result storage ========== */
 static volatile uint64_t g_result = 0;
+/* The read/write register constraint prevents algebraic loop removal without
+ * forcing an extra memory load/store on every iteration. This is a compiler
+ * barrier, not a CPU fence, and does not claim peak instruction throughput. */
+#define KEEP_REGISTER(value) __asm__ volatile("" : "+r"(value))
 
 /* ========== 跨平台整数运算测试 ==========
  *
  * Anti-optimization strategy:
- *   - Use a volatile sink (compiler_barrier + final write) to prevent the
- *     compiler from hoisting or removing the loop. This is the standard idiom
- *     and retains the dependency-chain workload. It is not a peak-IPC test.
+ *   - Keep the dependency in registers with compiler barriers and a final
+ *     volatile sink. Per-iteration volatile accesses would measure memory too.
  *   - For test_div, use a non-zero, non-flipped divisor to avoid div-by-zero
  *     and to defeat the compiler's "constant divisor" optimization.
- *   - test_count uses volatile sink (a simple count++ loop is otherwise
+ *   - test_count uses a register barrier (a simple count++ loop is otherwise
  *     optimized away by -O2 — the "IPC=833K" bug we previously caught).
  *   - test_mod is intentionally % (mod is the op being measured, not noise).
  */
@@ -38,9 +42,10 @@ static volatile uint64_t g_result = 0;
  *  vectorize or hoist). */
 static void test_add(void *arg) {
     (void)arg;
-    volatile uint64_t sum = 0;
+    uint64_t sum = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         sum = sum + i;
+        KEEP_REGISTER(sum);
     }
     g_result = sum;
 }
@@ -48,9 +53,10 @@ static void test_add(void *arg) {
 /* Sub: pure subtract. */
 static void test_sub(void *arg) {
     (void)arg;
-    volatile uint64_t val = 0;
+    uint64_t val = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         val = val - i;
+        KEEP_REGISTER(val);
     }
     g_result = val;
 }
@@ -58,9 +64,12 @@ static void test_sub(void *arg) {
 /* Mul: pure multiply. */
 static void test_mul(void *arg) {
     (void)arg;
-    volatile uint64_t product = 1;
+    uint64_t product = 1;
+    uint64_t factor = 3;
     for (uint64_t i = 1; i < ITERATIONS; i++) {
-        product = product * 3;
+        KEEP_REGISTER(factor);
+        product = product * factor;
+        KEEP_REGISTER(product);
     }
     g_result = product;
 }
@@ -70,11 +79,13 @@ static void test_mul(void *arg) {
  * a magic multiply). Use OR with i to keep divisor varying. */
 static void test_div(void *arg) {
     (void)arg;
-    volatile uint64_t divisor = 0xDEADBEEF;
-    volatile uint64_t quotient = 1;
+    uint64_t divisor = 0xDEADBEEF;
+    uint64_t quotient = 1;
     for (uint64_t i = 1; i < ITERATIONS; i++) {
         divisor = (divisor * 1103515245ULL + 12345ULL) | 1ULL;  /* LCG, always odd */
+        KEEP_REGISTER(divisor);
         quotient = quotient / divisor + 1;
+        KEEP_REGISTER(quotient);
     }
     g_result = quotient;
 }
@@ -84,9 +95,10 @@ static void test_div(void *arg) {
  * timing remains accurate even after the result stabilizes. */
 static void test_and(void *arg) {
     (void)arg;
-    volatile uint64_t result = 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t result = 0xFFFFFFFFFFFFFFFFULL;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = result & i;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
@@ -94,9 +106,10 @@ static void test_and(void *arg) {
 /* Bitwise OR: real OR. */
 static void test_or(void *arg) {
     (void)arg;
-    volatile uint64_t result = 0;
+    uint64_t result = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = result | i;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
@@ -104,9 +117,10 @@ static void test_or(void *arg) {
 /* Bitwise XOR: real XOR. */
 static void test_xor(void *arg) {
     (void)arg;
-    volatile uint64_t result = 0;
+    uint64_t result = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = result ^ i;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
@@ -114,10 +128,11 @@ static void test_xor(void *arg) {
 /* Left shift: shift by a varying amount. Reset to keep within bounds. */
 static void test_shift_left(void *arg) {
     (void)arg;
-    volatile uint64_t result = 1;
+    uint64_t result = 1;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = (result << 1) | 1;
         if (result > (UINT64_MAX >> 1)) result = 1;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
@@ -125,10 +140,11 @@ static void test_shift_left(void *arg) {
 /* Right shift: shift by varying amount. */
 static void test_shift_right(void *arg) {
     (void)arg;
-    volatile uint64_t result = UINT64_MAX;
+    uint64_t result = UINT64_MAX;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         result = result >> 1;
         if (result < 1024) result = UINT64_MAX;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
@@ -136,20 +152,23 @@ static void test_shift_right(void *arg) {
 /* Mod: real modulo. Mod is the op being measured (not anti-opt noise). */
 static void test_mod(void *arg) {
     (void)arg;
-    volatile uint64_t divisor = 1000003;
-    volatile uint64_t result = 0;
+    uint64_t divisor = 1000003;
+    uint64_t result = 0;
     for (uint64_t i = 1; i < ITERATIONS; i++) {
+        KEEP_REGISTER(divisor);
         result = result % divisor + i;
+        KEEP_REGISTER(result);
     }
     g_result = result;
 }
 
-/* Increment loop: simple counter. Volatile sink prevents optimization. */
+/* Increment loop: simple counter, retained in a register. */
 static void test_count_loop(void *arg) {
     (void)arg;
-    volatile uint64_t count = 0;
+    uint64_t count = 0;
     for (uint64_t i = 0; i < ITERATIONS; i++) {
         count = count + 1;
+        KEEP_REGISTER(count);
     }
     g_result = count;
 }
@@ -216,13 +235,18 @@ int run_cpu_alu_test(void) {
         double operations = (double)results[i].repetitions * 256;
         double ns = (double)results[i].elapsed_ns / operations;
         printf("%s: %.6f ns/op (%d samples)\n", tests[i].name, ns, BENCH_SAMPLES);
-        report_write(report, "| %s | %.6f | %.0f | %.6f | %.0f | %.3f | Measured |\n",
+        report_write(report, "| %s | %.9f | %.0f | %.6f | %.0f | %.3f | Measured |\n",
                      tests[i].name, (double)results[i].elapsed_ns / 1e6, 1e9 / ns, ns,
                      operations, bench_spread(&results[i]));
     }
     report_section(report, "Notes");
-    report_write(report, "Counts describe dependency-chain iterations, including volatile accesses and auxiliary work.\n"
+    report_write(report, "Counts describe register dependency-chain iterations, including loop and auxiliary work.\n"
+                 "Compiler barriers retain the work without per-iteration volatile spills; Load+ALU intentionally loads memory.\n"
                  "Not peak instruction throughput. No CPI/IPC is derived from nominal frequency.\n");
+    FILE *audit = bench_audit_begin(report);
+    if (!audit) { report_free(report); return 1; }
+    for (unsigned i = 0; i < count; ++i) bench_audit_row(report, audit, tests[i].name, &results[i], i);
+    if (bench_audit_finish(audit)) { report_free(report); return 1; }
     report_finalize_json(report);
     return report_finish(report) ? 1 : 0;
 }

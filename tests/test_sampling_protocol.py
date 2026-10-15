@@ -1,5 +1,6 @@
 """Clock-scripted protocol acceptance, independent of the real timing backend."""
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -16,6 +17,9 @@ class SamplingProtocolTests(unittest.TestCase):
         command = shlex.split(os.environ.get("CC", "cc")) + ["-O2", "-std=c11", "-pthread",
                    str(ROOT / "tests/sampling_protocol.c"), "-o", str(cls.binary)]
         subprocess.run(command, check=True, capture_output=True, timeout=60)
+        cls.even = cls.binary.with_name("even" + cls.binary.suffix)
+        command[-1] = str(cls.even)
+        subprocess.run([*command, "-DBENCH_SAMPLES=4"], check=True, capture_output=True, timeout=60)
 
     @classmethod
     def tearDownClass(cls):
@@ -37,3 +41,21 @@ class SamplingProtocolTests(unittest.TestCase):
             status, calls, *_ = self.run_mode(mode)
             self.assertNotEqual(status, 0, mode)
             self.assertLess(calls, 16, mode)
+
+    def test_even_median_keeps_half_nanosecond(self):
+        run = subprocess.run([str(self.even), "even"], check=True, capture_output=True, text=True, timeout=3)
+        self.assertEqual(list(map(float, run.stdout.split())), [0, 6, 1, 101.5, 100, 103])
+
+    def test_module_defaults_are_cache5_compute20_and_alu_float50(self):
+        cc = shlex.split(os.environ.get("CC", "cc"))
+        for module, expected in (("cache_hierarchy", 5), ("memory_bandwidth", 20),
+                                 ("cpu_alu", 50), ("cpu_float", 50), ("cpu_branch", 20)):
+            output = subprocess.check_output([*cc, "-dM", "-E", "-std=c11", "-pthread",
+                                              str(ROOT / f"src/test_{module}.c")], text=True)
+            macros = dict(re.findall(r"^#define (\w+) ([^\n]+)$", output, re.M))
+            value = macros["BENCH_SAMPLES"]
+            while value in macros:
+                value = macros[value]
+            self.assertEqual(int(value), expected, module)
+        output = subprocess.check_output([*cc, "-dM", "-E", str(ROOT / "src/compute_kernel.h")], text=True)
+        self.assertRegex(output, r"#define CM_REPEATS 20\b")

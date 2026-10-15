@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
+#include "sample_statistics.h"
 #include <errno.h>
 #if !defined(__APPLE__) && !defined(_WIN32)
 #include <sched.h>
@@ -49,7 +50,7 @@ int main(void) {
 
 /* ===== Tunables (compile-time; runtime scaling for big machines below) ===== */
 #ifndef NUM_SAMPLES
-#define NUM_SAMPLES             15      /* measured latency samples, after warmup */
+#define NUM_SAMPLES             20      /* measured latency samples, after warmup */
 #endif
 #ifndef ROUND_TRIPS_PER_SAMPLE
 #define ROUND_TRIPS_PER_SAMPLE  20000   /* CAS round-trips per sample */
@@ -58,7 +59,12 @@ int main(void) {
 #define BW_ITERATIONS_LARGE     100000  /* used when nproc > 64 */
 #define BW_MIN_DURATION_NS      20000000 /* target ≥20ms per pair (less clock noise) */
 #define BW_WARMUP_ITERS         10000   /* separate discarded dispatch */
-#define BW_SAMPLES              5
+#ifndef BW_SAMPLES
+#define BW_SAMPLES              20
+#endif
+#if NUM_SAMPLES < 3 || NUM_SAMPLES > SAMPLE_STATS_MAX || BW_SAMPLES < 3 || BW_SAMPLES > SAMPLE_STATS_MAX
+#error Intercore sample counts must be between 3 and 200
+#endif
 
 /* Runtime-scaled BW iterations (set in main) */
 static int g_bw_iterations = BW_ITERATIONS_DEFAULT;
@@ -85,6 +91,7 @@ typedef struct {
     worker_role_t   state_role;    /* ping/pong — read by worker after wake */
     /* Results from the last completed task. */
     double          samples[NUM_SAMPLES]; /* latency in ns per sample */
+    SampleStatistics statistics;
     int             n_samples;
     uint64_t        cas_ops;       /* for bandwidth: ops the worker contributed */
     /* Synchronization: per-worker cond+mutex so master wakes only the
@@ -417,59 +424,33 @@ static int compare_doubles(const void *a, const void *b) {
     return (da < db) ? -1 : (da > db) ? 1 : 0;
 }
 
-/* Trim outliers: drop bottom 5% and top 5% of sorted samples. */
-static void trim_outliers(const double *sorted_in, int n_in,
-                          double *out, int *n_out) {
-    if (n_in <= 0) { *n_out = 0; return; }
-    int lo = n_in / 20;     /* 5% */
-    int hi = n_in - 1 - lo;
-    if (hi < lo) hi = lo;
-    int k = 0;
-    for (int i = lo; i <= hi; i++) out[k++] = sorted_in[i];
-    *n_out = k;
-}
-
 /* ===== Per-pair execution ===== */
 
 static int run_pair_latency(int i, int j, double *p25, double *med, double *p75) {
     /* The "ping" role in the dispatch protocol records samples in
      * workers[i].samples (we measure in ping). Pong doesn't time. */
     dispatch_pair(i, j, WORKER_BUSY_LATENCY);
-    double sorted[NUM_SAMPLES];
     int n = g_workers[i].n_samples;
-    if (n <= 0) return 0;
-    memcpy(sorted, g_workers[i].samples, n * sizeof(double));
-    qsort(sorted, (size_t)n, sizeof(double), compare_doubles);
-
-    /* Trim 5% from each end when the sample count permits it. */
-    double trimmed[NUM_SAMPLES];
-    int n_trim;
-    trim_outliers(sorted, n, trimmed, &n_trim);
-    if (n_trim <= 0) {
-        /* Fallback to all samples. */
-        memcpy(trimmed, sorted, n * sizeof(double));
-        n_trim = n;
-    }
-    /* Robust filter: drop any sample > 3x median (catastrophic
-     * scheduling delays, not real signal). */
-    double rough_med = sorted[n / 2];
-    double good[NUM_SAMPLES];
-    int n_good = 0;
-    for (int k = 0; k < n_trim; k++) {
-        if (trimmed[k] < 3.0 * rough_med) {
-            good[n_good++] = trimmed[k];
-        }
-    }
-    if (n_good == 0) {
-        /* All samples were > 3x median; use full trimmed set. */
-        memcpy(good, trimmed, n_trim * sizeof(double));
-        n_good = n_trim;
-    }
-    qsort(good, (size_t)n_good, sizeof(double), compare_doubles);
-    *p25 = good[n_good / 4];
-    *med = good[n_good / 2];
-    *p75 = good[(3 * n_good) / 4];
+    SampleStatistics *stats = &g_workers[i].statistics;
+    if (n != NUM_SAMPLES || sample_statistics(g_workers[i].samples, (unsigned)n, stats)) return 0;
+    *p25 = stats->q1;
+    *med = stats->median;
+    *p75 = stats->q3;
     return 1;
+}
+
+static int write_pair_samples(FILE *file, const char *kind, const char *unit, int i, int j,
+                              const double *values, const SampleStatistics *stats,
+                              uint64_t operations, unsigned record) {
+    fprintf(file, "%s{\"kind\":\"%s\",\"unit\":\"%s\",\"cpu_ids\":[%d,%d],"
+        "\"operations_per_sample\":%llu,\"values\":[", record ? ",\n" : "", kind, unit,
+        g_cpu_ids[i], g_cpu_ids[j], (unsigned long long)operations);
+    for (unsigned sample = 0; sample < stats->count; ++sample)
+        fprintf(file, "%s%.17g", sample ? "," : "", values[sample]);
+    fputs("],\"statistics\":", file);
+    sample_statistics_json(file, stats);
+    fputc('}', file);
+    return ferror(file) ? -1 : 0;
 }
 
 /* (Bandwidth timing is done inline in run_inter_core_latency_test()
@@ -542,6 +523,12 @@ int run_inter_core_latency_test(void) {
         fprintf(stderr, "[inter_core] matrix alloc failed\n");
         worker_pool_destroy(); return 1;
     }
+    double *bw_array = NULL;
+    mkdir(REPORTS_DIR, 0755);
+    FILE *audit = fopen(REPORTS_DIR "/inter_core_samples.json", "w");
+    if (!audit) { matrix_free(M); worker_pool_destroy(); return 1; }
+    fputs("{\"schema_version\":1,\"protocol\":\"intercore-v3\",\"records\":[\n", audit);
+    unsigned audit_rows = 0, rejected_samples = 0, unstable_pairs = 0;
 
     printf("Using %d allowed logical CPUs, including any allowed SMT siblings\n", n);
     printf("CPU IDs:");
@@ -566,9 +553,15 @@ int run_inter_core_latency_test(void) {
                     M->lat_p25[i*n+j] = p25;
                     M->lat_med[i*n+j] = med;
                     M->lat_p75[i*n+j] = p75;
+                    SampleStatistics *stats = &g_workers[i].statistics;
+                    rejected_samples += stats->rejected;
+                    unstable_pairs += stats->unstable;
+                    if (write_pair_samples(audit, "latency", "ns_per_cas", i, j, g_workers[i].samples,
+                                           stats, 2 * ROUND_TRIPS_PER_SAMPLE, audit_rows++)) goto failed;
                     printf("%5.1f", med);
                 } else {
-                    printf("%5s", "N/A");
+                    fputs("Invalid latency samples; no matrix published\n", stderr);
+                    goto failed;
                 }
             }
         }
@@ -621,11 +614,18 @@ int run_inter_core_latency_test(void) {
                 for (unsigned sample = 0; sample < BW_SAMPLES; ++sample) {
                     uint64_t t0 = get_time_ns();
                     dispatch_pair(i, j, WORKER_BUSY_BANDWIDTH);
-                    uint64_t elapsed = get_time_ns() - t0;
-                    samples[sample] = elapsed ? (double)(g_workers[i].cas_ops + g_workers[j].cas_ops) * 1000.0 / elapsed : NAN;
+                    uint64_t end = get_time_ns();
+                    if (end <= t0 || g_workers[i].cas_ops + g_workers[j].cas_ops != (uint64_t)g_bw_iterations * 2)
+                        goto failed;
+                    samples[sample] = (double)(end - t0);
                 }
-                qsort(samples, BW_SAMPLES, sizeof(double), compare_doubles);
-                double mops = samples[BW_SAMPLES / 2];
+                SampleStatistics stats;
+                if (sample_statistics(samples, BW_SAMPLES, &stats)) goto failed;
+                rejected_samples += stats.rejected;
+                unstable_pairs += stats.unstable;
+                uint64_t operations = (uint64_t)g_bw_iterations * 2;
+                if (write_pair_samples(audit, "throughput", "ns", i, j, samples, &stats, operations, audit_rows++)) goto failed;
+                double mops = (double)operations * 1000 / stats.median;
                 M->bw_mops[i*n+j] = mops;
                 printf("%5.1f", mops);
             }
@@ -634,11 +634,16 @@ int run_inter_core_latency_test(void) {
         fflush(stdout);
     }
     printf("\n");
+    fputs("\n]}\n", audit);
+    int audit_failed = ferror(audit);
+    if (fclose(audit)) audit_failed = 1;
+    audit = NULL;
+    if (audit_failed) goto failed;
 
     /* ===== Stats summary (p25/median/p75 instead of avg/min/max) ===== */
     double lat_sum = 0; int lat_n = 0;
     double lat_min = 1e9, lat_max = 0;
-    double *bw_array = NULL; int bw_n = 0;
+    int bw_n = 0;
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
             if (i == j) continue;
@@ -804,12 +809,15 @@ int run_inter_core_latency_test(void) {
         report_write(report, "- Matrix measured once; reused for console / JSON / Markdown\n");
         report_write(report, "- Latency: two discarded warmup batches, %d measured batches of %d round trips\n", NUM_SAMPLES, ROUND_TRIPS_PER_SAMPLE);
         report_write(report, "- Throughput: discarded warmup dispatch, median of %d measured dispatches\n", BW_SAMPLES);
-        report_write(report, "- Outlier filter: 5% trim + 3×median cap, then p25/median/p75\n");
+        report_write(report, "- Sampling policy: " SAMPLE_STATS_POLICY "; raw p25/p75 and retained median\n");
+        report_write(report, "- More than 10%% candidates or >10%% first/last-half drift disables filtering; zero IQR is not filtered\n");
+        report_write(report, "- Rejected samples: %u; unstable directional pair/metric records: %u\n", rejected_samples, unstable_pairs);
+        report_write(report, "- Raw ordered samples and exclusions: inter_core_samples.json\n");
 
         printf("\n[报告] 已生成: %s\n", report_get_filename(report));
         report_finalize_json(report);
-        report_free(report);
-    }
+        if (report_finish(report)) goto failed;
+    } else goto failed;
 
     matrix_free(M);
     free(bw_array);
@@ -818,6 +826,12 @@ int run_inter_core_latency_test(void) {
     printf("\n[DONE] Inter-core latency test complete.\n");
     printf("  Heatmap: run 'make report' to generate reports/charts/inter_core_heatmap.png\n");
     return 0;
+failed:
+    if (audit) fclose(audit);
+    matrix_free(M);
+    free(bw_array);
+    worker_pool_destroy();
+    return 1;
 }
 
 int main(int argc, char *argv[]) {

@@ -137,6 +137,18 @@ class WindowTests(unittest.TestCase):
             self.window.pages["cpu_alu"].run.click()
         begin.assert_called_once_with(["cpu_alu"])
 
+    def test_cache_and_memory_selection_are_real_independent_tasks(self):
+        from benchmark_registry import SUBTESTS
+        self.assertNotIn("cache_hierarchy", self.window.modules)
+        self.assertNotIn("memory_bandwidth", self.window.modules)
+        self.assertEqual(self.window.group_tabs["cache_group"].count(), 3)
+        self.assertEqual(self.window.group_tabs["memory_group"].count(), 2)
+        for name in SUBTESTS:
+            self.assertIn(name, self.window.modules)
+            with patch.object(self.window, "begin") as begin:
+                self.window.pages[name].run.click()
+            begin.assert_called_once_with([name])
+
     def test_home_runs_all_supported_regardless_of_checkboxes(self):
         for check in self.window.modules.values():
             check.setChecked(False)

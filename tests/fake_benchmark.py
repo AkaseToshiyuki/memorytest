@@ -8,6 +8,16 @@ import time
 
 config = json.loads((Path(__file__).resolve().parents[1] / "tests.json").read_text())["tests"]
 name, info = next((name, info) for name, info in config.items() if info["bin"] == Path(sys.argv[0]).name)
+parent = name
+if "--mode" in sys.argv:
+    selected = sys.argv[sys.argv.index("--mode") + 1]
+    child_names = {("cache_hierarchy", "bandwidth"): "cache_bandwidth_test",
+                   ("cache_hierarchy", "latency"): "cache_latency_test",
+                   ("cache_hierarchy", "detection"): "cache_detection",
+                   ("memory_bandwidth", "bandwidth"): "memory_bandwidth_test",
+                   ("memory_bandwidth", "latency"): "memory_latency_test"}
+    name = child_names[parent, selected]
+    info = dict(info, report=f"{name}_report.md")
 mode = os.environ.get("FIXTURE_" + name, "pass")
 Path("executed").write_text(name)
 if mode == "timeout":
@@ -29,11 +39,13 @@ tables = {
 }
 report = Path("reports") / info["report"]
 system = "## System Configuration\n\n| Item | Value |\n|---|---|\n| CPU Model | Fixture CPU " + name + " |\n"
-content = f"# {name} Test Report\n\n{system}\n## Results\n\n{tables[name]}"
+content = f"# {name} Test Report\n\n{system}\n## Results\n\n{tables[parent]}"
 if mode == "invalid":
     content = "# Empty Report\n"
 elif mode == "system_only":
     content = "# Incomplete Report\n" + system
 report.write_text(content, encoding="utf-8")
+if mode == "audit":
+    (report.parent / f"{name}_samples.json").write_text(json.dumps({"elapsed_ns": [100, 99, 101, 98, 102]}))
 if mode == "fail":
     sys.exit(7)

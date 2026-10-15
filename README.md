@@ -164,15 +164,17 @@ Hardware discovery uses the following sources; some legacy fallback values remai
 
 ### Latency (Pointer Chase)
 
-A serial dependency chain makes each load produce the next address. Diagnostic v2
+A serial dependency chain makes each load produce the next address. Diagnostic v3
 uses one randomized permutation cycle with a node every 64 bytes over the full
 listed working set, with no auxiliary permutation allocation or sparse-chain shortcut.
 
 ### Warmup and hierarchy detection
 
 Ordinary OS pages, a complete warm traversal and discarded calibration precede
-five equal-work samples. The default minimum warmup is 50 ms and the per-sample
-target is 150 ms. Results use the median and include the sample range/median.
+five equal-work cache samples (20 for memory/branch, 50 for integer/floating-point).
+The default minimum warmup is 50 ms and the per-sample target is 150 ms. Results
+use the declared median/outlier policy and preserve ordered raw samples, raw spread,
+quartiles and drift. Five-sample cache measurements are never automatically trimmed.
 No privileged flush is used. Hierarchy detection reports sustained latency-jump
 intervals separately from OS-reported cache sizes; TLB, page and scheduling
 effects can also cause transitions. Old eviction-based results are incompatible.
@@ -228,8 +230,10 @@ against a reference machine. The two components are measured, never extrapolated
   logical CPU, with verified USER_INITIATED QoS but OS-selected placement. Separate
   these policies when comparing; QoS does not guarantee P-core-only execution.
 - Warmup and thread creation are excluded. Total completed work is divided by a
-  common monotonic wall-time interval; calibration work is excluded. Five accepted
-  samples per workload/thread count, each at least 100 ms, median throughput.
+  common monotonic wall-time interval; calibration work is excluded. Twenty accepted
+  samples per workload/thread count, each at least 100 ms, retained median throughput.
+  `repeat20-outer-iqr3-v1` identifies the new sampling policy; legacy five-sample
+  archives remain readable but must not be silently mixed with this protocol.
 - `portable-scalar-v2` has pinned flags, no vectorization, fast-math, contraction
   or LTO. `make opt`/`ofast`/`opt-native` do not change this scored profile.
 - Independent reference-vector self-tests, source hash, exact operation accounting,
@@ -461,7 +465,8 @@ make check-compute                              # 独立参考与最多 2 CPU �
 整数每轮 4 路 xorshift，共 24 个移位/XOR 操作；FP64 每轮 4 路 logistic 递推，
 共 12 个浮点操作。使用同一套 C 内核、固定种子、明确操作数与独立参考向量。
 
-每个负载与线程数均预热后实测 5 次、每次至少 100 ms，取吞吐量中位数。
+每个负载与线程数均预热后实测 20 次、每次至少 100 ms，按声明的异常值策略取保留样本的吞吐量中位数。
+采样协议为 `repeat20-outer-iqr3-v1`；旧 5 次报告仍可读取，但比较时必须区分采样协议。
 操作数除以所有线程共同的墙钟时间；不计校准、预热或创建线程时间。
 使用 `CLOCK_MONOTONIC`，不按 MHz 换算时间，不依赖 PMU 或特权探测。
 内核固定为 `portable-scalar-v2`：禁用自动向量化、fast-math、浮点收缩和 LTO；
@@ -578,6 +583,63 @@ or active archives. Diagnostic v2.1 separates warmup from calibration and reject
 batches; streaming output validation is untimed. ComputeMark v2 is unchanged. Starting stress reuses
 the live monitoring stream; report statistics remain scoped to the stress session. The references
 above are methodological comparisons, not bundled third-party benchmark engines.
+
+### 独立测试入口与重复采样修订（diagnostic-v3，2026-10-15）
+
+此节是最新方法；上文 v2／v2.1 记录描述此前版本，不代表当前采样默认值。
+
+| 测试 | 默认正式样本数 | 范围 |
+|---|---:|---|
+| 缓存带宽／缓存延迟／层级检测 | 5 | 每个工作集、每个实际测量操作；不自动剔除 |
+| 内存带宽／内存延迟／分支 | 20 | 每个测点／模式 |
+| 整数／浮点诊断 | 50 | 每个运算项目 |
+| 核间延迟／CAS 吞吐量 | 20 | 每个有向核对、每种指标；仅 Linux 已验证后端 |
+| ComputeMark v2 | 20 | 每种负载、每个线程数；评分内核、公式、100 ms 校准下限不变 |
+
+- 正式样本不包含预热和校准。诊断测试仍默认每个样本目标 150 ms、最低预热 50 ms；
+  有界自动测试会缩短这个时长，不把测试夹具的运行时间当成用户测试时长。
+- 统计策略 `outer-iqr3-median-drift10-cap10-v1`：Type-7 四分位数；只有 N ≥ 10 且
+  IQR > 0 才标记外侧 `Q1−3×IQR`／`Q3+3×IQR` 候选。候选超过 10%，或者按采样顺序
+  前后半段中位数的差超过原始中位数的 10%，均标记不稳定并禁用剔除。偶数中位数取中间两项平均。
+  IQR 为零时不臆造阈值；这可能保留量化噪声／极端值，但不隐藏证据。该策略不保证消除热漂移。
+- 每个诊断模块写入 `*_samples.json`，保存有序原始时间、工作重复数、候选数、排除索引、
+  原始与使用的中位数、四分位数及漂移；排除只影响汇总，绝不删除原始样本。写入失败使模块失败。
+  极差始终按全部样本计算；四分位区间不是置信区间。
+- ComputeMark 的新 JSON 显式保存采样协议和样本数；Python 从原始时间重新计算排除集合和分数，
+  不信任已写入的汇总。偶数情况下“吞吐量的中位数”不等于“时间中位数的倒数”，两者分开计算。
+- 整数依赖链移除每轮不必要的 `volatile` 内存访问，采用寄存器读写约束和最终结果 sink；
+  乘除数阻止常量折叠，仍包含循环与辅助计算。`Load+ALU` 刻意保留真实内存加载。
+  新整数时间不能直接与旧 volatile 循环比较，改善的是测量对象，不是 CPU 本身变快。
+- 缓存跃迁改为持续中位数变化、分离的原始四分位区间，并拒绝有漂移标记的邻近测点。
+  5 次采样仍有限，检测不到稳定跃迁是有效结果，不补造缓存容量。
+
+桌面选择区和结果页均拆为缓存三个子项、内存两个子项，各自有状态、报告和独立执行参数。
+内存延迟只分配一个数组且不创建带宽线程池；仅选缓存带宽不会执行依赖链扫描。
+层级检测本身需要一次延迟扫描；同时选择缓存延迟与层级检测会分别测量，不借用历史轮次。
+旧合并报告恢复到对应子页；旧内存报告若没有延迟数据，不显示延迟测试已完成。
+表格／图表／数值卡片按十进制换算带宽，最高到 GB/s，例如 `10000 MB/s = 10 GB/s`；
+同一列／图使用统一单位，原始 Markdown／JSON 保持原单位与精度。
+
+CLI 的旧合并 ID 和默认行为兼容；需要单独执行可用：
+
+```sh
+python run_benchmarks.py -m cache_bandwidth_test
+python run_benchmarks.py -m cache_latency_test
+python run_benchmarks.py -m cache_detection
+python run_benchmarks.py -m memory_bandwidth_test
+python run_benchmarks.py -m memory_latency_test
+```
+
+本轮在上方全部模块对照之外，进一步检查
+[uarch-bench 的编译器优化控制](https://github.com/travisdowns/uarch-bench/blob/e4f54d5a8fa7e735d356ba83b5b1cdc8982a6650/opt-control.hpp)
+和 [Criterion.rs 的分析流程](https://github.com/bheisler/criterion.rs/blob/3dbc6c618acb48885066422d81d50729aa17b2b7/book/src/analysis.md)。
+前者用于对照寄存器屏障与最终 sink 的区别；后者用于对照预热、原始数据保存、异常值分类。
+另核对 [uarch-bench 的分支夹具](https://github.com/travisdowns/uarch-bench/blob/e4f54d5a8fa7e735d356ba83b5b1cdc8982a6650/branch-benches.cpp)：
+它包含 x86 特定的跳转间距／间接分支测试，本软件当前是条件分支模式测试，不能据此宣称测到了 BTB 容量。
+**Criterion 不删除异常值**；本软件按用户要求制定的有限剔除策略不同，不冒充 Criterion 的回归或置信区间。
+STREAM 偏重最佳带宽、core-to-core-latency 的统计方法也不同，本软件不把中位数结果冒充这些项目的官方成绩。
+压力测试仍是持续负载和逐批校验，不套用 20／50 次“跑分”采样，也不宣称完整显存故障检测。
+本轮没有复制／链接这些基准项目代码；方法级对照和独立正确性检查，不等于完成所有项目的同机 A/B 性能对照。
 
 ### 追加的测试方法修订（diagnostic-v2）
 

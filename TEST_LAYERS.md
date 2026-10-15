@@ -214,3 +214,50 @@ conservatively retains uncertain writers; test roots are canonicalized. The
 standard-library-only workflow (`python -S`, 17/17, 4.265 s) and storage with the
 new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
 `/tmp/memorytest-oct15-stdlib-workflow.log`, `/tmp/memorytest-oct15-stdlib-storage.log`.
+
+### Repeat sampling and independently selectable tasks (diagnostic-v3)
+
+- Defaults: cache **5**, memory/branch/intercore/ComputeMark **20**, ALU/FP **50**.
+  `test_sampling_protocol.py` checks compiled module defaults. Native cache, memory,
+  ALU/FP/branch tests use these real counts with 1 ms targets and small allocations;
+  ComputeMark retains its real 100 ms lower bound with at most two CPUs.
+- `test_sample_statistics.py` uses exact rational order-statistic references plus
+  hand-worked quartiles, both-tail outliers at 20/50/100/200 samples, drift, excessive
+  contamination, zero IQR, small N and invalid inputs. C/Python agreement alone is
+  not the oracle. ComputeMark rates use this separate oracle and raw operation/time
+  records; forged precomputed statistics cannot change points.
+- Native audit files must retain ordered samples and exclusion metadata. Cache and
+  two-CPU intercore tests inject `/dev/full` to verify evidence-write errors fail.
+  The two-CPU matrix fixture is bounded (3 samples, 64 round trips, fixed throughput
+  count), not a whole-machine matrix; an 80-dispatch completion check remains.
+- ALU checks masked-integer references and x86 disassembly for actual multiply/divide
+  without stack-backed dependency chains. FP retains high-precision/scalar lane and
+  exact operation-count references. These are correctness/retention checks, not a
+  measured speedup claim or certification of every compiler's generated assembly.
+- Split-mode tests check actual native reports/audit record sets; memory latency
+  additionally asserts one array allocation and zero bandwidth-worker creations.
+  Workflow tests check explicit engine mode arguments, isolated report names and
+  copied raw sidecars. Legacy combined IDs and archives remain compatible.
+- Presentation checks exercise cache three-way and memory two-way selection,
+  standalone run buttons, old archive mapping, decimal units capped at GB/s, equal
+  cache controls, compact layouts, both languages/themes and unchanged raw data.
+
+Local full regression: **169 discovered, 163 passed, 6 platform-dependent skips,
+255.225 s**; `/tmp/memorytest-repeat-split-full-final.log`. Final report/selection
+checks: **25/25, 5.105 s**, `/tmp/memorytest-repeat-split-final-views.log`.
+The extra two-CPU raw-to-matrix reference check passed **1/1, 3.928 s** in
+`/tmp/memorytest-repeat-intercore-reference.log`; standalone dependency-free CLI
+checks passed **18/18, 5.040 s**, `/tmp/memorytest-repeat-split-stdlib.log`.
+All seven native engines built; `/tmp/memorytest-repeat-split-build-final.log`.
+`git diff --check` passed. UI fixture previews: `build/ui-revision/`.
+
+The first full pass found two reconstruction failures: even sample medians may
+contain half a nanosecond, but old Markdown time formatting rounded to whole
+nanoseconds. Diagnostic time fields now retain nine decimal places in milliseconds;
+raw JSON was already lossless for these durations. Assertions were not loosened.
+The scripted-clock case also explicitly checks a **101.5 ns** median.
+
+Six-target native installer / four-target portability CI evidence is recorded
+after completion; local Linux checks alone do not establish Mac/Windows runtime behavior.
+No long default working sets, whole-machine matrix, new privileged access or
+unbounded stress load is part of this acceptance run.

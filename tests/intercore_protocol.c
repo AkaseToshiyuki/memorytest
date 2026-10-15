@@ -14,6 +14,7 @@ static int test_create(pthread_t *thread, const pthread_attr_t *attr, void *(*en
 #define sched_setaffinity test_bind
 #define pthread_create test_create
 #define NUM_SAMPLES 3
+#define BW_SAMPLES 3
 #define ROUND_TRIPS_PER_SAMPLE 64
 #define main intercore_program_main
 #include "../src/test_inter_core.c"
@@ -21,6 +22,12 @@ static int test_create(pthread_t *thread, const pthread_attr_t *attr, void *(*en
 #undef sched_setaffinity
 #undef pthread_create
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "matrix")) {
+        global_system_config.detected = global_cache_config.detected = 1;
+        global_system_config.cpu_cores = global_system_config.cpu_cores_physical = 2;
+        g_bw_iterations = 800000; /* fixed upper bound; only two allowed CPUs */
+        return run_inter_core_latency_test();
+    }
     if (argc > 1) {
         fail_bind = !strcmp(argv[1], "binding");
         fail_create = !strcmp(argv[1], "creation");

@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import math
 import statistics
+from sample_statistics import summarize
 
 VERSION = "v2"
 WORKLOAD = "u64-xorshift4-fp64-logistic4-r1"
@@ -10,6 +11,7 @@ FLAGS = "-O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=off -f
 CLANG_FLAGS = "-O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=off -fno-vectorize -fno-slp-vectorize -fno-lto"
 KERNEL_HASH = "a05a8fc6700545d9a6dd5dfa6221caf7550ff89b65ad3749b586af5dde51e5d5"
 REPEATS = 5
+SAMPLING_PROTOCOL = "repeat20-outer-iqr3-v1"
 MIN_NS = 100_000_000
 
 
@@ -36,6 +38,8 @@ class ComputeMarkScore:
     placement_policy: str
     affinity_verified: bool
     os: str
+    sampling_protocol: str
+    sample_count: int
 
 
 def _positive_int(value, name):
@@ -68,6 +72,13 @@ def compute_mark_score(data):
         raise ValueError("kernel self-test is required")
     if data.get("translated", False) is not False:
         raise ValueError("translated execution cannot produce a native score")
+    sampling = data.get("sampling_protocol", "legacy5-median")
+    if sampling not in {"legacy5-median", SAMPLING_PROTOCOL}:
+        raise ValueError("unsupported sampling protocol")
+    repeats = 20 if sampling == SAMPLING_PROTOCOL else REPEATS
+    if (type(data.get("sample_count", repeats)) is not int or data.get("sample_count", repeats) != repeats or
+            sampling == SAMPLING_PROTOCOL and "sample_count" not in data):
+        raise ValueError("sampling protocol and sample count mismatch")
     threads = _positive_int(data.get("threads"), "thread count")
     cpus = data.get("available_cpus")
     # Preserve old Linux v2 archives while making the new unpinned policy
@@ -110,6 +121,7 @@ def compute_mark_score(data):
             raise ValueError(f"missing {key}")
     rates = {}
     spreads = []
+    unstable = False
     records = data.get("records")
     if not isinstance(records, list):
         raise ValueError("missing measured records")
@@ -129,8 +141,8 @@ def compute_mark_score(data):
         iterations = _positive_int(record.get("iterations_per_thread"), "iteration count")
         expected_ops = iterations * count * per_iteration
         samples = record.get("samples")
-        if not isinstance(samples, list) or len(samples) != REPEATS:
-            raise ValueError(f"exactly {REPEATS} repeats required")
+        if not isinstance(samples, list) or len(samples) != repeats:
+            raise ValueError(f"exactly {repeats} repeats required")
         observed = []
         for sample in samples:
             if not isinstance(sample, dict):
@@ -149,9 +161,15 @@ def compute_mark_score(data):
             observed.append(ops / elapsed)  # operations/ns == billions of ops/s
         if len({s["checksum"] for s in samples}) != 1:
             raise ValueError("nondeterministic workload results")
-        median = statistics.median(observed)
+        raw_median = statistics.median(observed)
+        excluded = []
+        if sampling == SAMPLING_PROTOCOL:
+            timing = summarize(sample["elapsed_ns"] for sample in samples)
+            excluded = timing["excluded_indices"]
+            unstable |= timing["unstable"]
+        median = statistics.median(value for i, value in enumerate(observed) if i not in excluded)
         rates[key] = median
-        spreads.append((max(observed) - min(observed)) / median * 100)
+        spreads.append((max(observed) - min(observed)) / raw_median * 100)
     required = {(kind, n) for kind in ["integer", "fp64"] for n in {1, threads}}
     if set(rates) != required:
         raise ValueError("missing single/multi integer or FP64 measurements")
@@ -161,7 +179,8 @@ def compute_mark_score(data):
         VERSION, points(threads), points(1), rates["integer", threads], rates["fp64", threads],
         rates["integer", 1], rates["fp64", 1], threads, available, cpu_ids,
         PROFILE, WORKLOAD, data["compiler"], data["architecture"], KERNEL_HASH,
-        scope, max(spreads), max(spreads) <= 15.0, policy, data["affinity_verified"], data.get("os", "Linux"),
+        scope, max(spreads), max(spreads) <= 15.0 and not unstable, policy, data["affinity_verified"], data.get("os", "Linux"),
+        sampling, repeats,
     )
 
 
@@ -207,6 +226,7 @@ def main():
         print(f"Measured: {score.integer_gops:.3f} Gop/s integer; {score.fp64_gflops:.3f} GFLOP/s scalar FP64")
         print(f"Profile: {score.profile}; compiler: {score.compiler}; max repeat spread: {score.max_spread_pct:.2f}%")
         print(f"Placement: {score.placement_policy}; exact CPU affinity: {score.affinity_verified}")
+        print(f"Sampling: {score.sampling_protocol}, {score.sample_count} samples; do not mix sampling protocols in rankings")
         if not score.affinity_verified:
             print("NOTE: OS-scheduled score; P/E core placement is not guaranteed. Do not mix with pinned-policy rankings.")
         if not score.stable:

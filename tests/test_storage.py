@@ -177,10 +177,11 @@ class DesktopArchiveTests(unittest.TestCase):
         (corrupt / "reports/cache_hierarchy_report.md").write_text("not a report")
         window = self.window()
         self.assertEqual(window.run_dir, latest)
-        self.assertEqual(window.pages["cache_hierarchy"].model.status, "passed")
+        for name in ("cache_bandwidth_test", "cache_latency_test", "cache_detection"):
+            self.assertEqual(window.pages[name].model.status, "passed")
         self.assertEqual(window.pages["cpu_multi"].model.status, "not_run")
         self.assertTrue(window.open_report.isEnabled())
-        self.assertIn(latest.name, window.pages["cache_hierarchy"].summary.text())
+        self.assertIn(latest.name, window.pages["cache_bandwidth_test"].summary.text())
         window.close()
         again = self.window()
         self.assertEqual(again.run_dir, latest)
@@ -236,10 +237,11 @@ class DesktopArchiveTests(unittest.TestCase):
         window = self.window(restore=False)
         window.tabs.setCurrentIndex(1)
         window.show()
-        page = window.pages["cache_hierarchy"]
+        page = window.pages["cache_bandwidth_test"]
         buttons = [page.run, page.cancel, page.open, page.log_button]
         previous = None
         for width, height in ((880, 720), (1400, 1000)):
+            window.group_tabs["cache_group"].setCurrentIndex(0)
             window.resize(width, height)
             self.app.processEvents()
             widths = [button.width() for button in buttons]
@@ -250,9 +252,9 @@ class DesktopArchiveTests(unittest.TestCase):
                 self.assertGreater(widths[0], previous)
             previous = widths[0]
             for i in range(3):
-                page.details.setCurrentIndex(i)
+                window.group_tabs["cache_group"].setCurrentIndex(i)
                 self.app.processEvents()
-                view = page.details.widget(i)
+                view = window.group_tabs["cache_group"].widget(i).details
                 empty = view.findChild(QLabel, "empty-result")
                 self.assertEqual(empty.alignment(), Qt.AlignCenter)
                 center = empty.mapTo(view.viewport(), empty.rect().center())

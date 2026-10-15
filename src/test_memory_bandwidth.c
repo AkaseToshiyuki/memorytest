@@ -8,6 +8,7 @@
 #include <errno.h>
 
 #define MAX_THREADS 256
+static int memory_mode; /* 0: legacy combined; 1: bandwidth; 2: latency. */
 typedef struct MemoryPool MemoryPool;
 typedef struct { MemoryPool *pool; unsigned index; double result; } MemoryWorker;
 struct MemoryPool {
@@ -77,15 +78,19 @@ static void memory_stop(MemoryPool *pool, unsigned created) {
 }
 
 int run_memory_bandwidth_test(size_t bytes, int threads) {
+    int do_bandwidth = memory_mode != 2, do_latency = memory_mode != 1;
+    if (!do_bandwidth) threads = 1;
     if (threads < 1 || threads > MAX_THREADS || bytes < (size_t)threads * 256 || bytes % ((size_t)threads * 256)) return 2;
     MemoryPool pool = {.mutex = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER,
                       .done = PTHREAD_COND_INITIALIZER, .threads = (unsigned)threads, .words = bytes / sizeof(double)};
-    pool.a = malloc(bytes); pool.b = malloc(bytes); pool.c = malloc(bytes);
+    pool.a = do_bandwidth ? malloc(bytes) : NULL;
+    pool.b = do_bandwidth ? malloc(bytes) : NULL;
+    pool.c = malloc(bytes);
     unsigned created = 0;
     int status = 1;
-    if (!pool.a || !pool.b || !pool.c) goto cleanup;
-    if (threads == 1) stream_initialize(pool.a, pool.b, pool.c, pool.words);
-    else {
+    if ((do_bandwidth && (!pool.a || !pool.b)) || !pool.c) goto cleanup;
+    if (do_bandwidth && threads == 1) stream_initialize(pool.a, pool.b, pool.c, pool.words);
+    else if (do_bandwidth) {
         for (unsigned i = 0; i < pool.threads; ++i) {
             pool.workers[i] = (MemoryWorker){&pool, i, 0};
             if (pthread_create(&pool.handles[i], NULL, memory_worker, &pool.workers[i])) goto cleanup;
@@ -96,7 +101,7 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
         pthread_mutex_unlock(&pool.mutex);
     }
     BenchMeasurement bandwidth[STREAM_OPERATIONS], latency;
-    for (unsigned i = 0; i < STREAM_OPERATIONS; ++i) {
+    for (unsigned i = 0; do_bandwidth && i < STREAM_OPERATIONS; ++i) {
         pool.operation = i;
         printf("Warming and sampling: %s\n", stream_names[i]); fflush(stdout);
         if (bench_measure(memory_work, &pool, &bandwidth[i])) goto cleanup;
@@ -110,33 +115,41 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
     /* Retire the workers before using their destination allocation as a chain. */
     memory_stop(&pool, created);
     created = 0;
-    chain_build(pool.c, bytes);
-    ChainWork chain = {pool.c, bytes, (uintptr_t)pool.c};
-    if (chain_work(&chain, (bytes / 64 + CHAIN_STEPS - 1) / CHAIN_STEPS)) goto freed;
-    printf("Warming and sampling: dependent random access\n"); fflush(stdout);
-    if (bench_measure(chain_work, &chain, &latency)) goto freed;
-    ReportContext *report = report_init("memory_bandwidth", REPORT_FORMAT_MARKDOWN);
+    if (do_latency) {
+        chain_build(pool.c, bytes);
+        ChainWork chain = {pool.c, bytes, (uintptr_t)pool.c};
+        if (chain_work(&chain, (bytes / 64 + CHAIN_STEPS - 1) / CHAIN_STEPS)) goto freed;
+        printf("Warming and sampling: dependent random access\n"); fflush(stdout);
+        if (bench_measure(chain_work, &chain, &latency)) goto freed;
+    }
+    const char *names[] = {"memory_bandwidth", "memory_bandwidth_test", "memory_latency_test"};
+    ReportContext *report = report_init(names[memory_mode], REPORT_FORMAT_MARKDOWN);
     if (!report) goto freed;
     report_write_system_info(report);
-    report_section(report, "Memory Bandwidth Test Results");
+    report_section(report, "Memory Test Conditions");
     bench_report_conditions(report);
     report_write(report, "- Memory Size: %.6f MiB\n- Total Allocation: %.6f MiB\n- Thread Count: %d\n\n",
-                 (double)bytes / MB, (double)bytes * 3 / MB, threads);
-    report_write(report, "| Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%%) |\n");
-    report_write(report, "|-----------|------------------|----------|-------|-----------|\n");
-    for (unsigned i = 0; i < STREAM_OPERATIONS; ++i) {
-        double payload = (double)stream_bytes(i, pool.words / threads) * threads * bandwidth[i].repetitions;
-        double rate = payload * 1000.0 / (double)bandwidth[i].elapsed_ns;
-        report_write(report, "| %s | %.6f | %.6f | %.0f | %.3f |\n", stream_names[i], rate,
-                     (double)bandwidth[i].elapsed_ns / 1e6, payload, bench_spread(&bandwidth[i]));
+                 (double)bytes / MB, (double)bytes * (do_bandwidth ? 3 : 1) / MB, threads);
+    if (do_bandwidth) {
+        report_section(report, "Memory Bandwidth Test Results");
+        report_write(report, "| Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%%) |\n");
+        report_write(report, "|-----------|------------------|----------|-------|-----------|\n");
+        for (unsigned i = 0; i < STREAM_OPERATIONS; ++i) {
+            double payload = (double)stream_bytes(i, pool.words / threads) * threads * bandwidth[i].repetitions;
+            double rate = payload * 1000.0 / (double)bandwidth[i].elapsed_ns;
+            report_write(report, "| %s | %.6f | %.9f | %.0f | %.3f |\n", stream_names[i], rate,
+                         (double)bandwidth[i].elapsed_ns / 1e6, payload, bench_spread(&bandwidth[i]));
+        }
     }
-    report_section(report, "Memory Latency");
-    double loads = (double)latency.repetitions * CHAIN_STEPS;
-    report_write(report, "| Operation | Size | ns/op | Time(ms) | Operations | Spread(%%) |\n");
-    report_write(report, "|-----------|------|-------|----------|------------|-----------|\n");
-    report_write(report, "| Dependent random read | %.6f MiB | %.6f | %.6f | %.0f | %.3f |\n",
-                 (double)bytes / MB, (double)latency.elapsed_ns / loads,
-                 (double)latency.elapsed_ns / 1e6, loads, bench_spread(&latency));
+    if (do_latency) {
+        report_section(report, "Memory Latency");
+        double loads = (double)latency.repetitions * CHAIN_STEPS;
+        report_write(report, "| Operation | Size | ns/op | Time(ms) | Operations | Spread(%%) |\n");
+        report_write(report, "|-----------|------|-------|----------|------------|-----------|\n");
+        report_write(report, "| Dependent random read | %.6f MiB | %.6f | %.9f | %.0f | %.3f |\n",
+                     (double)bytes / MB, (double)latency.elapsed_ns / loads,
+                     (double)latency.elapsed_ns / 1e6, loads, bench_spread(&latency));
+    }
     report_section(report, "Notes");
     report_write(report, "MB/s is decimal useful bytes / common elapsed time, including worker release/completion overhead.\n"
                  "Read/write count one array; copy/scale two; add/triad three. Strides count 8 bytes per actual load.\n"
@@ -145,6 +158,13 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
                  "Every written element and read/stride reduction is validated outside the timed interval.\n"
                  "Latency uses one dependent load chain with 64-byte nodes across the full listed size.\n"
                  "Working sets may still be cache-resident; no forced-DRAM guarantee or inferred write latency.\n");
+    FILE *audit = bench_audit_begin(report);
+    if (!audit) { report_free(report); goto freed; }
+    unsigned audit_index = 0;
+    for (unsigned i = 0; do_bandwidth && i < STREAM_OPERATIONS; ++i)
+        bench_audit_row(report, audit, stream_names[i], &bandwidth[i], audit_index++);
+    if (do_latency) bench_audit_row(report, audit, "Dependent random read", &latency, audit_index++);
+    if (bench_audit_finish(audit)) { report_free(report); goto freed; }
     report_finalize_json(report);
     status = report_finish(report) ? 1 : 0;
     goto freed;
@@ -156,7 +176,8 @@ freed:
 }
 
 static void print_usage(const char *name) {
-    printf("Usage: %s [-s SIZE] [-t THREADS]\nThree arrays; total allocation limited to 50%% of available memory.\n", name);
+    printf("Usage: %s [-s SIZE] [-t THREADS] [--mode all|bandwidth|latency]\n"
+           "One array for latency; three for bandwidth. Bounded available-memory budget.\n", name);
 }
 
 int main(int argc, char **argv) {
@@ -176,7 +197,11 @@ int main(int argc, char **argv) {
     if (threads > MAX_THREADS) threads = MAX_THREADS;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(argv[0]); return 0; }
-        if ((!strcmp(argv[i], "-s") || !strcmp(argv[i], "--size")) && i + 1 < argc) bytes = parse_size(argv[++i]);
+        if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
+            const char *mode = argv[++i];
+            memory_mode = !strcmp(mode, "bandwidth") ? 1 : !strcmp(mode, "latency") ? 2 : !strcmp(mode, "all") ? 0 : -1;
+            if (memory_mode < 0) return 2;
+        } else if ((!strcmp(argv[i], "-s") || !strcmp(argv[i], "--size")) && i + 1 < argc) bytes = parse_size(argv[++i]);
         else if ((!strcmp(argv[i], "-t") || !strcmp(argv[i], "--threads")) && i + 1 < argc) {
             char *end; errno = 0; long value = strtol(argv[++i], &end, 10);
             if (errno || *end || value < 1 || value > MAX_THREADS) return 2;
@@ -185,6 +210,7 @@ int main(int argc, char **argv) {
     }
     if (!bytes || bytes > SIZE_MAX / 3) return 2;
     if (bytes > cap) bytes = cap;
+    if (memory_mode == 2) threads = 1;
     size_t quantum = (size_t)threads * 256;
     bytes -= bytes % quantum;
     if (bytes < quantum) return 2;

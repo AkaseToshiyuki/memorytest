@@ -65,12 +65,40 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual([k["value"] for k in result.kpis], [1.25, 4.5])
         self.assertEqual(result.charts[0].x, [4, 1024])
         self.assertEqual(result.charts[0].series[0]["values"], [1.25, 4.5])
-        self.assertEqual(result.charts[1].series[0]["values"], [12000, 8000])
-        self.assertEqual(result.charts[1].unit, "MB/s")
+        self.assertEqual(result.charts[1].series[0]["values"], [12, 8])
+        self.assertEqual(result.charts[1].unit, "GB/s")
         self.assertFalse(any("L3" in str(table.rows) for table in result.tables))
         svg = plot_svg(result.charts[0])
         # 1.25 / maximum 6 on a 185px axis => y=186.4583; x=72 at 4 KiB.
         self.assertIn('cx="72.00" cy="186.46"', svg)
+
+    def test_bandwidth_decimal_scaling_all_views_and_cap(self):
+        from result_model import bandwidth_scale, split_legacy_result
+        for value, expected, unit in ((10000, 10, "GB/s"), (1000, 1, "GB/s"),
+                                      (999, 999, "MB/s"), (0.5, 500, "kB/s"),
+                                      (0.0005, 500, "B/s"), (10_000_000, 10000, "GB/s")):
+            factor, actual_unit = bandwidth_scale([value])
+            self.assertEqual(actual_unit, unit)
+            self.assertEqual(value * factor, expected)
+        content = ("# Memory report\n## Memory Bandwidth Test Results\n"
+                   "| Operation | Bandwidth (MB/s) |\n|---|---|\n| Read | 10000 |\n| Write | 500 |\n"
+                   "## Memory Latency\n| Operation | ns/op |\n|---|---|\n| Dependent random read | 85 |\n")
+        path = self.root / "memory_bandwidth_report.md"
+        path.write_text(content)
+        model = build_module("memory_bandwidth", self.root)
+        self.assertEqual(model.tables[0].columns[1]["unit"], "GB/s")
+        self.assertEqual([row[1] for row in model.tables[0].rows], [10, 0.5])
+        self.assertEqual(model.charts[0].series[0]["values"], [10, 0.5])
+        self.assertEqual([(k["value"], k["unit"]) for k in model.kpis], [(10, "GB/s"), (500, "MB/s"), (85, "ns/op")])
+        parts = split_legacy_result(model)
+        self.assertEqual([p.name for p in parts], ["memory_bandwidth_test", "memory_latency_test"])
+        self.assertEqual([len(p.charts) for p in parts], [1, 1])
+        self.assertEqual(path.read_text(), content)
+        for language in ("zh", "en"):
+            html = module_html(model, language)
+            self.assertIn("GB/s", html)
+            self.assertIn("<td>10</td>", html)
+            self.assertNotIn("<td>10,000</td>", html)
 
     def test_three_cache_parts_have_separate_numbers_and_localized_labels(self):
         from result_model import cache_parts
@@ -78,7 +106,7 @@ class ResultsTests(unittest.TestCase):
         model = build_module("cache_hierarchy", self.root)
         parts = cache_parts(model)
         self.assertEqual([part.name for part in parts], ["cache_bandwidth_test", "cache_latency_test", "cache_detection"])
-        self.assertEqual(parts[0].charts[0].series[2]["values"], [9000, 8000])
+        self.assertEqual(parts[0].charts[0].series[2]["values"], [9, 8])
         self.assertEqual(parts[1].charts[0].series[0]["values"], [1.5, 5])
         self.assertEqual(parts[2].tables[0].rows[0], [1, 128, 192, 1.5, 5, 3.333])
         self.assertEqual(parts[2].tables[1].rows[0], [ref("l1d"), 128])
@@ -165,13 +193,15 @@ class NativePresentationTests(unittest.TestCase):
 
     def test_native_cache_tabs_preserve_selection_and_split_results(self):
         from benchmark_registry import ROOT
+        from result_model import cache_parts
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path / "cache_hierarchy_report.md").write_text(MODERN_CACHE)
-            page = self.window.pages["cache_hierarchy"]
-            page.model = build_module("cache_hierarchy", path)
-            page.retranslate()
-            self.assertEqual(page.details.count(), 3)
+            for model in cache_parts(build_module("cache_hierarchy", path)):
+                self.window.pages[model.name].model = model
+                self.window.pages[model.name].retranslate()
+            tabs = self.window.group_tabs["cache_group"]
+            self.assertEqual(tabs.count(), 3)
             self.window.tabs.setCurrentIndex(1)
             self.window.resize(1080, 720)
             self.window.show()
@@ -182,15 +212,16 @@ class NativePresentationTests(unittest.TestCase):
                 for theme in ("dark", "light"):
                     self.window.theme_combo.setCurrentIndex(self.window.theme_combo.findData(theme))
                     for index, key in enumerate(("cache_bandwidth_test", "cache_latency_test", "cache_detection")):
-                        page.details.setCurrentIndex(index)
+                        page = self.window.pages[key]
+                        tabs.setCurrentIndex(index)
                         page.retranslate()
                         self.app.processEvents()
-                        self.assertEqual(page.details.currentIndex(), index)
-                        self.assertEqual(page.details.tabText(index), tr(key, lang))
+                        self.assertEqual(tabs.currentIndex(), index)
+                        self.assertEqual(tabs.tabText(index), tr(key, lang))
                         self.window.grab().save(str(output / f"cache-{index}-{lang}-{theme}.png"))
-            self.assertEqual(page.details.widget(0).model.charts[0].unit, "MB/s")
-            self.assertEqual(page.details.widget(1).model.charts[0].unit, "ns")
-            self.assertFalse(page.details.widget(2).model.charts)
+            self.assertEqual(self.window.pages["cache_bandwidth_test"].model.charts[0].unit, "GB/s")
+            self.assertEqual(self.window.pages["cache_latency_test"].model.charts[0].unit, "ns")
+            self.assertFalse(self.window.pages["cache_detection"].model.charts)
 
     def test_language_theme_preserve_selection_running_state_and_result(self):
         self.window.modules["cpu_float"].setChecked(False)
