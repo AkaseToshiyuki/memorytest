@@ -49,7 +49,12 @@ class MacOSNativeTests(unittest.TestCase):
         cls.path = Path(cls.temp.name)
         cls.cc = shlex.split(os.environ.get("CC", "cc"))
         cls.bin = cls.path / "bin"
-        build = subprocess.run(["make", f"BUILD_DIR={cls.bin}", "tests"], cwd=ROOT,
+        # Report/API acceptance does not need production-length performance
+        # samples. Keep all 20 samples and the real kernels/validation, but
+        # shorten timing only in this temporary test build.
+        build = subprocess.run(["make", f"BUILD_DIR={cls.bin}",
+                               "CFLAGS=-O2 -std=c11 -pthread -DBENCH_TARGET_NS=1000000 -DBENCH_WARMUP_NS=500000",
+                               "tests"], cwd=ROOT,
                                capture_output=True, text=True)
         if build.returncode:
             raise RuntimeError(build.stdout + build.stderr)
@@ -91,6 +96,8 @@ class MacOSNativeTests(unittest.TestCase):
         self.assertIn("sysctl summary; may be cluster-shared", report)
         self.assertIn("Unsupported via public APIs", report)
         self.assertNotIn("per core,", report)
+        self.assertIn("- Samples: 20", report)
+        self.assertIn("- Sample target: 1 ms", report)
         # Match non-finite numeric tokens, not words such as "inferred".
         self.assertNotRegex(report, r"(?i)\b(?:nan|inf(?:inity)?)\b")
 

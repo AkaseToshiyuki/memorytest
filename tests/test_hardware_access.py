@@ -218,6 +218,25 @@ class InspectionSessionTests(unittest.TestCase):
         self.assertTrue(all(0 < call.args[0] <= .05 for call in access.peer.settimeout.call_args_list))
         access.peer.shutdown.assert_called_once()
 
+    def test_cold_cim_read_has_bounded_headroom_without_extending_other_commands(self):
+        args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Processor"]
+        for command, budget, expected in ((args, 45, 32), (args, 9, 9),
+                                          (["dmidecode", "--type", "17"], 45, 14)):
+            with self.subTest(command=command, budget=budget):
+                access = InspectorAccess()
+                access.peer = Mock()
+                access.peer.recv.side_effect = [bytes([c]) for c in b"0 2\n"] + [b"{}"]
+                with patch("hardware_access.time.monotonic", return_value=0):
+                    self.assertEqual(access.request(command, budget), (b"{}", 0))
+                self.assertTrue(all(call.args[0] == expected for call in access.peer.settimeout.call_args_list))
+
+    def test_cim_timeout_respects_the_reader_snapshot_budget(self):
+        access = Mock(return_value=(b"{}", 0))
+        with patch("hardware_inspector.time.monotonic", return_value=0):
+            reader = Reader(budget=20, access=access)
+            self.assertEqual(reader.powershell("Get-CimInstance Win32_Processor"), {})
+        self.assertEqual(access.call_args.args[1], 20)
+
     def test_native_deadline_does_not_report_success(self):
         access = InspectorAccess()
         access.peer = Mock()
@@ -316,10 +335,12 @@ class NativeInspectionTests(unittest.TestCase):
             return processes[-1]
         try:
             with patch("hardware_access.reader_command", side_effect=command):
+                started = time.monotonic()
                 access.start("cpu", launcher=launch)
-                access.thread.join(timeout=25)
+                access.thread.join(timeout=50)
             self.assertFalse(access.thread.is_alive())
-            self.assertEqual(access.status, "ready")
+            self.assertEqual(access.status, "ready", f"native CPU read ended after {time.monotonic() - started:.3f}s")
+            print(f"Native CPU inventory read: {time.monotonic() - started:.3f}s", flush=True)
             self.assertEqual(access.snapshot["kind"], "cpu")
             self.assertTrue(access.snapshot["devices"])
         finally:

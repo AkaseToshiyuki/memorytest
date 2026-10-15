@@ -141,7 +141,14 @@ static int inspection_query(const char *request, long parent) {
      * smartctl uses every exit-status bit, including values 124..127. */
     int code = -1, disconnected = 0;
     if (!inspection_start(request)) {
-        double deadline = inspection_clock() + 12.;
+        double seconds = 12.;
+#ifdef _WIN32
+        /* Cold PowerShell/CIM startup, especially on ARM, can exceed 12 s.
+         * SMART and all other operations keep their existing short limit. */
+        if (!strcmp(request, "cpu") || !strcmp(request, "memory") ||
+            !strcmp(request, "gpu") || !strcmp(request, "disks")) seconds = 30.;
+#endif
+        double deadline = inspection_clock() + seconds;
         code = -2;
         while (inspection_clock() < deadline && inspection_parent(parent)) {
             fd_set ready; FD_ZERO(&ready); FD_SET(connection, &ready);

@@ -268,12 +268,12 @@ unbounded stress load is part of this acceptance run.
 ### Live monitoring, status pulse and hardware inspector tools (2026-10-15)
 
 Current startup-permission policy (supersedes the manual authorization UI below):
-**114 passed, 0 skipped** in the changed/relevant local suites.
+**116 passed, 0 skipped** in the changed/relevant local suites.
 
 | Suite | Passed | Time | Evidence |
 |---|---:|---:|---|
-| Startup tokens / inventory / bounded native bridge | 26 | 0.465 s | `build/hardware-startup-access.log` |
-| Hardware pages / automatic mode / no permission controls | 23 | 38.422 s | `build/hardware-startup-tools.log` |
+| Startup tokens / inventory / bounded native bridge | 28 | 0.460 s | `build/hardware-startup-access-ci-fix.log` |
+| Hardware pages / automatic mode / no permission controls | 23 | 45.151 s | `build/hardware-startup-tools-ci-fix.log` |
 | Existing telemetry / direct startup-token helper | 18 | 1.766 s | `build/hardware-startup-monitoring.log` |
 | Live monitoring continuity | 12 | 8.428 s | `build/hardware-startup-continuity.log` |
 | Desktop lifecycle / status transitions | 16 | 24.674 s | `build/hardware-startup-desktop.log` |
@@ -297,6 +297,16 @@ Current startup-permission policy (supersedes the manual authorization UI below)
   and protected device fields remain outside this Linux host's verification.
 - Prior handoff/builds using the manual authorization design are not final package
   evidence. Record the current commit's native CI and artifact checks separately.
+- CI follow-up: Windows ARM's fixed CIM operation exceeded the old 12-second
+  deadline in two runs. It now allows 30 seconds natively / 32 seconds for the
+  reply, still capped by the snapshot budget; SMART and other operations retain
+  their limits. Added headroom/whole-budget tests; cancellation behavior is unchanged.
+- The Mac report/API acceptance used full production 150-ms samples and exceeded
+  its 45-second wall limit twice. Its temporary build now uses 1-ms targets and
+  0.5-ms warmup, retaining all 20 samples, real kernels and report assertions.
+  Production timing is unchanged. Independent memory references: **4/4, 1.836 s**
+  (`build/hardware-startup-memory-ci-fix.log`); platform contracts on Linux:
+  **2 passed / 4 native-Mac skips, 0.002 s** (`build/hardware-startup-platform-ci-fix.log`).
 
 Historical handoff checks (before the startup-only permission requirement):
 

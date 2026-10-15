@@ -174,8 +174,10 @@ class Reader:
 
     def powershell(self, script):
         prefix = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $ErrorActionPreference='Stop'; "
+        # Cold PowerShell/CIM startup on Windows ARM can exceed 12 seconds.
+        # The Reader's whole-snapshot budget still bounds this command.
         return self.json(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                          prefix + script + " | ConvertTo-Json -Depth 7 -Compress"], 12)[0]
+                          prefix + script + " | ConvertTo-Json -Depth 7 -Compress"], 32)[0]
 
     def profiler(self, kind):
         data, _ = self.json(["/usr/sbin/system_profiler", kind, "-json", "-detailLevel", "full"], 12)

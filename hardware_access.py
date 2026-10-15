@@ -153,7 +153,10 @@ class InspectorAccess:
         peer = self.peer
         if peer is None:
             raise InspectionFailure("error")
-        deadline = time.monotonic() + min(14, timeout)
+        # Native Windows CIM reads have a 30-second cap, plus two seconds
+        # for response framing. Other fixed operations retain their old cap.
+        limit = 32 if Path(args[0]).name.lower() == "powershell.exe" else 14
+        deadline = time.monotonic() + min(limit, timeout)
 
         def remaining():
             if self.stop.is_set():
