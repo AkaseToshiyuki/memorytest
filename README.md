@@ -533,6 +533,36 @@ P1 修核间绑定与完成协议；P2 再统一缓存实验协议、平台覆�
 
 ## 0.1.1 测试版本
 
+### 参数采集与管理员读取修复（2026-10-15）
+
+四个参数页提供“管理员读取”，分别通过 macOS 系统授权、Windows UAC 和 Linux
+polkit 启动一次性的原生只读辅助程序；界面及 Python 工作进程仍以当前用户运行。
+实时监控的授权不会自动授权参数页。拒绝、取消、超时或缺少辅助程序时有独立状态，
+不会继续显示上一次成功的健康数据。辅助程序只接受固定的硬件读取操作，不能执行
+任意命令、启动磁盘自检、修改 SPD 或安装驱动；断开连接即结束读取。
+
+macOS 现在读取完整的系统硬件报告，使用 ARM 特性和分性能层级缓存字段，并通过
+Metal 原生 API 读取设备身份、统一内存属性及建议工作集上限。GPU 建议工作集不是
+独立显存容量；缓存按系统报告的性能层级列出，通用 `hw.l*cachesize` 字段标明属于
+最低性能层级，L2/L3 不跨共享组累加。授权后可补充一次 powermetrics 活动
+频率／功耗快照，它不代表标称频率。Apple 统一内存未公开的时序、模块序列号等仍
+显示“系统未提供此项”；管理员权限不能凭空补齐不存在的接口。
+
+Linux 授权可读取受保护的 SMBIOS 和已有 EEPROM 接口；Windows 授权重读固定 CIM
+清单。各平台均可通过已安装的 smartmontools 读取设备 SMART。缺少组件与权限不足
+分别提示：macOS 可安装 Homebrew 的 `smartmontools`，Linux 使用发行版同名软件包，
+Windows 使用 smartmontools 官方安装包。应用不会自动下载或安装依赖。OS 的
+`Verified` 与完整 SMART 明细分别显示，不将系统摘要当作设备自检通过。
+
+接口依据：[Apple 系统能力与性能层级](https://developer.apple.com/documentation/kernel/1387446-sysctlbyname/determining_system_capabilities)、
+[Metal 统一内存](https://developer.apple.com/documentation/metal/mtldevice/hasunifiedmemory)、
+[Metal 建议工作集](https://developer.apple.com/documentation/metal/mtldevice/recommendedmaxworkingsetsize)。
+平台操作与缺失原因采用一致语义，实际可用字段由 OS、驱动、设备及权限共同决定。
+
+授权等待和参数读取超时单独显示；授权连接中断、回复不完整或取消后不发布成功快照。
+安装包验收会直接启动包内的参数辅助程序，检查协议、无效操作拒绝和断连退出，并在
+macOS 检查包内 Metal 读取器。该检查不请求系统提权，不能替代目标机器上的授权实测。
+
 ### 实时监控修复与四个参数工具（2026-10-15）
 
 - 压力页打开即启动只读监控，不再被已恢复的历史报告阻止。负载结束后页面仍可见时，

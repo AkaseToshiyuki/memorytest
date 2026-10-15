@@ -81,7 +81,7 @@ def engines(directory, modules=None):
                         "-lm", "-o", str(directory / ("stress_cpu" + suffix))] + (["-static-libgcc"] if windows else []))
         run([directory / ("stress_cpu" + suffix), "--self-test"])
         if darwin:
-            for name, framework in [("stress_metal", "Metal"), ("telemetry_macos", "IOKit")]:
+            for name, framework in [("stress_metal", "Metal"), ("telemetry_macos", "IOKit"), ("hardware_macos", "Metal")]:
                 run(compiler + ["-O2", "-fobjc-arc", str(ROOT / "src" / (name + ".m")),
                                 "-framework", "Foundation", "-framework", framework, "-o", str(directory / name)])
 

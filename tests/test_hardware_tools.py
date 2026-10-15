@@ -113,7 +113,7 @@ Memory Device
         self.assertEqual(cpu["name"], "Apple M4 Pro")
         self.assertEqual(fields(cpu)["l2"], "16 MiB")
         self.assertIsNone(fields(cpu)["nominal_frequency"])
-        self.assertEqual(cpu["tables"][0]["rows"], [["Performance", "10"]])
+        self.assertEqual(cpu["tables"][0]["rows"], [["Performance", "10", None, None, None, None, None, None, None]])
 
     def test_windows_memory_type_and_no_wrapped_vram(self):
         reader = Mock()
@@ -271,6 +271,56 @@ class HardwarePageTests(unittest.TestCase):
         self.assertFalse(page.export_button.isEnabled())
         self.assertFalse(page.deadline.isActive())
 
+    def test_admin_refresh_authorization_result_denial_and_cancel(self):
+        page = self.window.hardware_tools["disk"]
+        self.seed(page)
+        access = Mock(status="authorizing", snapshot=None)
+        with patch("desktop_hardware.InspectorAccess", return_value=access):
+            page.refresh_admin()
+        access.start.assert_called_once_with("disk")
+        self.assertIsNone(page.snapshot)
+        self.assertFalse(page.admin_button.isEnabled())
+        self.assertFalse(page.refresh_button.isEnabled())
+        self.assertTrue(page.cancel_button.isEnabled())
+        access.status = "reading"
+        page.poll_access()
+        self.assertEqual(page.status_key, "hardware_admin_reading")
+        access.status = "ready"
+        access.snapshot = dict(fixture(), access="administrator")
+        page.poll_access()
+        self.assertEqual(page.snapshot["access"], "administrator")
+        self.assertEqual(page.status_key, "hardware_admin_snapshot")
+        self.assertTrue(page.admin_button.isEnabled())
+        self.assertFalse(page.access_poll.isActive())
+        denied = Mock(status="denied", snapshot=None)
+        with patch("desktop_hardware.InspectorAccess", return_value=denied):
+            page.refresh_admin()
+        page.poll_access()
+        self.assertEqual(page.status_key, "hardware_authorization_denied")
+        self.assertIsNone(page.snapshot)
+        self.assertFalse(page.export_button.isEnabled())
+        timed_out = Mock(status="timeout", snapshot=None)
+        with patch("desktop_hardware.InspectorAccess", return_value=timed_out):
+            page.refresh_admin()
+        page.poll_access()
+        self.assertEqual(page.status_key, "timeout")
+        self.assertIsNone(page.snapshot)
+        self.assertFalse(page.export_button.isEnabled())
+        waiting = Mock(status="authorizing", snapshot=None)
+        with patch("desktop_hardware.InspectorAccess", return_value=waiting):
+            page.refresh_admin()
+        page.cancel()
+        waiting.close.assert_called_once()
+        self.assertIsNone(page.access)
+        self.assertTrue(page.admin_button.isEnabled())
+
+    def test_missing_reason_is_visible_and_unified_memory_is_not_a_number(self):
+        page = self.window.hardware_tools["gpu"]
+        for language in ("zh", "en"):
+            self.window.language = language
+            self.assertEqual(page.value({"value": None, "status": "not_applicable"}), "不适用" if language == "zh" else "Not applicable")
+            self.assertEqual(page.value({"value": None, "status": "not_exposed"}), "系统未提供此项" if language == "zh" else "Not exposed by OS")
+
     def test_output_cap_cancellation_and_bad_json(self):
         page = self.window.hardware_tools["cpu"]
         with patch.object(page.process, "readAllStandardOutput", return_value=QByteArray(b"x" * 2_000_001)):
@@ -301,11 +351,57 @@ class HardwarePageTests(unittest.TestCase):
                         self.window.tools_tabs.setCurrentIndex(index)
                         self.app.processEvents()
                         self.assertEqual(page.selector.currentData(), page.snapshot["devices"][0]["id"])
-                        for widget in (page.refresh_button, page.export_button, page.serials, page.selector):
+                        for widget in (page.refresh_button, page.export_button, page.admin_button, page.serials, page.selector):
                             self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
                             self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, widget.rect().bottomRight())))
                         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
                         self.window.grab().save(str(evidence / f"tool-{kind}-{width}-{language}-{theme}.png"))
+
+    def test_apple_style_full_fields_and_missing_smart_remain_compact(self):
+        from benchmark_registry import ROOT
+        evidence = ROOT / "build/hardware-repair-reviewed"
+        evidence.mkdir(parents=True, exist_ok=True)
+        reader = Mock(privileged=False)
+        reader.run.return_value = (b"machdep.cpu.brand_string: Apple Fixture\nhw.nperflevels: 2\n"
+            b"hw.optional.arm.FEAT_AES: 1\nhw.optional.arm.FEAT_SHA256: 1\nhw.optional.arm.FEAT_SME: 1\n"
+            b"hw.perflevel0.name: Performance\nhw.perflevel0.physicalcpu: 10\nhw.perflevel0.logicalcpu: 10\n"
+            b"hw.perflevel0.l1icachesize: 196608\nhw.perflevel0.l1dcachesize: 131072\n"
+            b"hw.perflevel0.l2cachesize: 16777216\nhw.perflevel0.cpusperl2: 5\n"
+            b"hw.perflevel1.name: Efficiency\nhw.perflevel1.physicalcpu: 4\n", 0)
+        with patch("sys.platform", "darwin"), patch("hardware_inspector.find_tool", return_value=None), \
+                patch("hardware_inspector.platform.machine", return_value="arm64"), \
+                patch("hardware_inspector.platform.system", return_value="Darwin"), \
+                patch("hardware_inspector.platform.release", return_value="fixture"), \
+                patch("hardware_inspector.psutil.cpu_count", return_value=14):
+            snapshots = {"cpu": cpu_info(reader)}
+            reader.profiler.return_value = [{"sppci_model": "Apple Fixture", "sppci_cores": "20",
+                "spdisplays_vendor": "sppci_vendor_Apple", "spdisplays_metalfamily": "spdisplays_metal3"}]
+            with patch("hardware_inspector.mac_metal", return_value=[{"name": "Apple Fixture", "registry_id": "123",
+                    "unified": True, "recommended_working_set": 32 * 2**30, "max_buffer_length": 16 * 2**30,
+                    "families": ["Metal 3", "Mac 2"]}]):
+                snapshots["gpu"] = gpu_info(reader)
+            reader.profiler.return_value = [{"SPMemoryDataType": "48 GB", "dimm_type": "LPDDR5", "dimm_manufacturer": "Fixture"}]
+            snapshots["dram"] = dram_info(reader)[1:]
+            reader.plist.side_effect = [{"WholeDisks": ["disk0"]}, {"MediaName": "Fixture SSD", "SMARTStatus": "Verified",
+                "TotalSize": 1_000_000_000_000, "BusProtocol": "PCI-Express", "SolidState": True}]
+            snapshots["disk"] = disk_info(reader)
+        for kind, page in self.window.hardware_tools.items():
+            page.buffer = bytearray(json.dumps(dict(fixture(kind), devices=snapshots[kind])).encode())
+            page.finished(0)
+        with patch.object(self.window.stress_page, "start_preview"), patch.object(self.window.stress_page.probe, "start"):
+            self.window.show()
+            self.window.tools_button.click()
+        self.window.resize(880, 720)
+        for language in ("zh", "en"):
+            self.window.language_combo.setCurrentIndex(self.window.language_combo.findData(language))
+            for index, (kind, page) in enumerate(self.window.hardware_tools.items(), 1):
+                self.window.tools_tabs.setCurrentIndex(index)
+                self.app.processEvents()
+                self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
+                self.assertTrue(self.window.rect().contains(page.admin_button.mapTo(self.window, page.admin_button.rect().bottomRight())))
+                self.window.grab().save(str(evidence / f"{kind}-{language}.png"))
+            text = " ".join(item.text() for item in self.window.hardware_tools["disk"].findChildren(QLabel))
+            self.assertNotIn("SMART 检查通过" if language == "zh" else "SMART passed", text)
 
     def test_real_worker_contract_uses_cpu_inventory_only(self):
         page = self.window.hardware_tools["cpu"]

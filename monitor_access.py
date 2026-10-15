@@ -71,9 +71,11 @@ def normalize_windows(sensors):
     return result
 
 
-def authorization_command(helper, port, token, parent_pid, platform=None):
+def authorization_command(helper, port, token, parent_pid, platform=None, inspection=False):
     platform = platform or sys.platform
     arguments = [str(Path(helper).resolve()), str(port), token, str(parent_pid)]
+    if inspection:
+        arguments.append("--inspect")
     if platform == "darwin":
         return ["/usr/bin/osascript", "-e", "on run argv", "-e",
                 "do shell script (item 1 of argv) with administrator privileges", "-e", "end run", shlex.join(arguments)]

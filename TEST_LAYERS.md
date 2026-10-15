@@ -267,7 +267,42 @@ unbounded stress load is part of this acceptance run.
 
 ### Live monitoring, status pulse and hardware inspector tools (2026-10-15)
 
-Latest local acceptance: **99 passed, 0 skipped** across the relevant suites:
+Administrator inspection and Apple Silicon follow-up (2026-10-15): local
+inspector/UI suite **20/20**, native bridge/platform fixtures **11/11**, existing
+monitoring contracts **17/17**, desktop suite **16/16**. Evidence is retained in
+`build/hardware-{tools-repair,access-repair,monitor-regression,desktop-regression}.log`.
+The native IPC tests run as the ordinary test user, reject arbitrary commands,
+paths and write options, and verify disconnect cleanup. They do not establish
+successful OS elevation. Linux standard DRAM inspection reproduced a
+`dmidecode` permission failure and now reports it explicitly. This host lacks
+passwordless sudo; actual privileged device access and the supplied M4 Pro
+remain unverified. New macOS fixtures cover alternate profiler keys, native
+Metal identity, shared-memory semantics, ARM instruction features and separate
+performance-level cache domains. The six-platform installer matrix includes the
+new bridge suite and builds the Metal inventory helper on both Mac targets.
+
+Handoff follow-up: the inspector/UI suite **21/21**, bridge/platform/payload
+suite **22/22**, and existing monitoring contracts **17/17** passed locally.
+Evidence: `build/hardware-tools-takeover.log` (29.637 s),
+`build/hardware-access-takeover.log` (0.467 s), and
+`build/hardware-monitor-takeover.log` (1.753 s). Additional cases cover whole-reply
+deadlines, malformed/partial RPC responses, authorization timeout versus denial,
+cancel during launch, no post-cancel fallback reads, and launcher reaping.
+Negative bridge errors are separate from all 256 child exit codes, so valid
+SMART health bitmasks 124/125/127 remain device data rather than transport errors.
+Native payload checks reject missing helpers and exercise the packaged protocol
+without elevation; the same checks now run against every installer payload.
+Apple cache domains are checked against Apple's documented performance-level
+semantics, including three-level fixtures and separate cache-sharing counts.
+All four parameter-page previews were regenerated in both languages under
+`build/hardware-repair-reviewed/`; they are explicitly fixture data, not M4 Pro
+measurements. Strict Linux C11 warnings-as-errors syntax, Python compilation and
+Git whitespace checks passed. Fresh six-platform CI and artifact verification
+must correspond to the follow-up commit, not the older `69b0e05` package.
+The final fixture-only preview refinement passed **1/1** (1.384 s), recorded in
+`build/hardware-preview-reviewed.log`; this is a subset rerun, not an extra unique test.
+
+Previous UI/status acceptance: **99 passed, 0 skipped** across the relevant suites:
 
 | Suite | Passed | Time | Evidence |
 |---|---:|---:|---|

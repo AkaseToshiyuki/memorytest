@@ -12,13 +12,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
 from desktop_theme import card, label, set_tone
 from i18n import MESSAGES, tr
 from process_control import app_command
+from hardware_access import InspectorAccess
 
 MAX_OUTPUT = 2_000_000
 
 
 def public_snapshot(snapshot, show_serials=False):
     result = copy.deepcopy(snapshot)
-    operational = {"smartctl_missing", "smart_read_error", "hardware_read_failed", "hardware_no_devices"}
+    operational = {"smartctl_missing", "smart_read_error", "hardware_read_failed", "hardware_no_devices", "hardware_permission_denied"}
     result["notices"] = [key for key in result.get("notices", []) if key in operational]
     for dev in result.get("devices", []):
         dev["notices"] = [key for key in dev.get("notices", []) if key in operational]
@@ -39,6 +40,10 @@ class HardwarePage(QWidget):
         self.buffer = bytearray()
         self.status_key = "hardware_not_read"
         self.stop_reason = None
+        self.access = None
+        self.access_poll = QTimer(self)
+        self.access_poll.setInterval(100)
+        self.access_poll.timeout.connect(self.poll_access)
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self.read_output)
@@ -72,6 +77,9 @@ class HardwarePage(QWidget):
         self.status = label("", "status")
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
+        self.admin_button = QPushButton()
+        self.admin_button.clicked.connect(self.refresh_admin)
+        row.addWidget(self.admin_button)
         self.serials = QCheckBox()
         self.serials.toggled.connect(self.render)
         row.addWidget(self.serials)
@@ -87,7 +95,7 @@ class HardwarePage(QWidget):
             self.refresh()
 
     def refresh(self):
-        if self.process.state() != QProcess.NotRunning or self.window.closing:
+        if self.access is not None or self.process.state() != QProcess.NotRunning or self.window.closing:
             return
         self.buffer.clear()
         self.stop_reason = None
@@ -100,8 +108,46 @@ class HardwarePage(QWidget):
         self.render()
         command = app_command("hardware-tool") + ["--kind", self.kind]
         self.process.start(command[0], command[1:])
-        self.deadline.start()
+        self.deadline.start(35000)
         self.refresh_controls()
+
+    def refresh_admin(self):
+        if self.access is not None or self.process.state() != QProcess.NotRunning or self.window.closing:
+            return
+        self.previous_device = self.selector.currentData()
+        self.snapshot = None
+        self.selector.clear()
+        self.buffer.clear()
+        self.stop_reason = None
+        self.status_key = "hardware_authorizing"
+        self.access = InspectorAccess()
+        self.access.start(self.kind)
+        self.access_poll.start()
+        self.deadline.start(170000)
+        self.refresh_controls()
+        self.render()
+
+    def poll_access(self):
+        access = self.access
+        if access is None:
+            self.access_poll.stop()
+            return
+        if access.status in {"authorizing", "reading"}:
+            self.status_key = "hardware_authorizing" if access.status == "authorizing" else "hardware_admin_reading"
+            self.refresh_controls()
+            return
+        self.access = None
+        self.access_poll.stop()
+        self.deadline.stop()
+        if access.status == "ready" and access.snapshot is not None:
+            self.buffer = bytearray(json.dumps(access.snapshot).encode())
+            self.finished(0)
+        else:
+            self.status_key = {"denied": "hardware_authorization_denied", "unavailable": "hardware_helper_missing",
+                               "timeout": "timeout", "cancelled": "interrupted"}.get(access.status, "hardware_read_failed")
+        access.close()
+        self.refresh_controls()
+        self.render()
 
     def read_output(self):
         chunk = bytes(self.process.readAllStandardOutput())
@@ -131,7 +177,7 @@ class HardwarePage(QWidget):
                     if not isinstance(dev, dict) or not all(key in dev for key in ("id", "name", "groups", "tables", "notices")):
                         raise ValueError("invalid device")
                 self.snapshot = data
-                self.status_key = "hardware_snapshot"
+                self.status_key = "hardware_admin_snapshot" if data.get("access") == "administrator" else "hardware_snapshot"
                 self.selector.blockSignals(True)
                 self.selector.clear()
                 for dev in data["devices"]:
@@ -148,6 +194,10 @@ class HardwarePage(QWidget):
     def cancel(self, reason="interrupted"):
         self.stop_reason = reason
         self.deadline.stop()
+        self.access_poll.stop()
+        if self.access is not None:
+            self.access.close()
+            self.access = None
         if self.process.state() != QProcess.NotRunning:
             self.window.stress_page.kill_tree(self.process)
         self.status_key = reason
@@ -166,11 +216,15 @@ class HardwarePage(QWidget):
         if field.get("private") and not self.serials.isChecked() and field.get("value") is not None:
             return tr("serial_hidden", self.window.language)
         value = field.get("value")
-        return self.local(value) if value is not None else tr("hardware_unavailable", self.window.language)
+        if value is not None:
+            return self.local(value)
+        key = "hardware_" + field.get("status", "unavailable")
+        return tr(key if key in MESSAGES else "hardware_unavailable", self.window.language)
 
     def refresh_controls(self):
-        busy = self.process.state() != QProcess.NotRunning
+        busy = self.access is not None or self.process.state() != QProcess.NotRunning
         self.refresh_button.setEnabled(not busy)
+        self.admin_button.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
         self.copy_button.setEnabled(self.snapshot is not None and not busy)
         self.export_button.setEnabled(self.snapshot is not None and not busy)
@@ -189,6 +243,7 @@ class HardwarePage(QWidget):
                             (self.copy_button, "copy"), (self.export_button, "export")):
             button.setText(tr(key, self.window.language))
         self.serials.setText(tr("show_serials", self.window.language))
+        self.admin_button.setText(tr("hardware_admin_refresh", self.window.language))
         self.selector.setAccessibleName(tr("select_device", self.window.language))
         if self.snapshot:
             for index, dev in enumerate(self.snapshot["devices"]):
@@ -209,7 +264,7 @@ class HardwarePage(QWidget):
         index = self.selector.currentIndex()
         dev = devs[index] if 0 <= index < len(devs) else None
         notices = set((self.snapshot or {}).get("notices", []) + (dev.get("notices", []) if dev else []))
-        for key in ("smartctl_missing", "smart_read_error", "hardware_read_failed"):
+        for key in ("smartctl_missing", "smart_read_error", "hardware_permission_denied", "hardware_read_failed"):
             if key not in notices:
                 continue
             notice = label(tr(key, self.window.language), "status")
@@ -224,6 +279,8 @@ class HardwarePage(QWidget):
                     panel, body = card()
                     body.addWidget(label(self.local(name), "muted"))
                     value = label(self.local(health) if name == "health" else self.value(metrics.get(name, {})), "metric")
+                    if name == "health" and health == "smart_unknown" and metrics.get("smart_os_status", {}).get("value") == "Verified":
+                        value.setText(tr("hardware_os_verified_only", self.window.language))
                     value.setWordWrap(True)
                     value.setMinimumWidth(0)
                     if name == "health":

@@ -9,6 +9,8 @@ import tempfile
 import zipfile
 import plistlib
 import shutil
+import secrets
+import socket
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +20,47 @@ def smoke(binary):
     subprocess.run([str(binary), "--smoke-gui"], check=True, timeout=30,
                    env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
     subprocess.run([str(binary), "--cli", "--list"], check=True, timeout=15)
+    check_native_readers(binary)
+
+
+def check_native_readers(binary):
+    """Exercise packaged helpers without requesting OS authorization or load."""
+    locations = [binary.parent / "_internal/bin", binary.parent.parent / "Frameworks/bin",
+                 binary.parent.parent / "Resources/bin"]
+    name = "telemetry_privileged.exe" if os.name == "nt" else "telemetry_privileged"
+    helper = next((directory / name for directory in locations if (directory / name).is_file()), None)
+    if helper is None:
+        raise RuntimeError("Packaged administrator reader is missing")
+    token = secrets.token_hex(32)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(5)
+        process = subprocess.Popen([str(helper), str(listener.getsockname()[1]), token, str(os.getpid()), "--inspect"],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            peer, _ = listener.accept()
+            peer.settimeout(5)
+            with peer, peer.makefile("rb") as stream:
+                if stream.readline(100) != ("MTINSPECT/1 " + token + "\n").encode():
+                    raise RuntimeError("Packaged administrator reader handshake failed")
+                peer.sendall(b"invalid-operation\n")
+                if stream.readline(64) != b"-1 0\n":
+                    raise RuntimeError("Packaged administrator reader accepted an invalid operation")
+            if process.wait(timeout=5) != 0:
+                raise RuntimeError("Packaged administrator reader did not cleanly disconnect")
+        finally:
+            if process.poll() is None:
+                process.kill(); process.wait(timeout=5)
+    result = {"inspection_protocol": "passed", "os_elevation_requested": False}
+    if sys.platform == "darwin":
+        metal = helper.parent / "hardware_macos"
+        output = subprocess.run([str(metal)], capture_output=True, text=True, check=True, timeout=10)
+        rows = json.loads(output.stdout)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) or
+                not {"name", "registry_id", "unified", "recommended_working_set"}.issubset(row) for row in rows):
+            raise RuntimeError("Packaged Metal reader returned invalid inventory")
+        result["metal_inventory"] = "passed"
+        result["metal_device_count"] = len(rows)
+    return result
 
 
 def check_install_payloads(info, data):
@@ -103,6 +146,8 @@ def main():
     if any(asset["bytes"] > 100 * 1024 * 1024 for asset in data["assets"]) or data["bundle_bytes"] > 250 * 1024 * 1024:
         raise RuntimeError("Desktop package exceeded 100 MiB compressed / 250 MiB bundle budget")
     check_install_payloads(info, data)
+    (info.parent / "native-readers-check.json").write_text(
+        json.dumps(check_native_readers(binary), indent=2), encoding="utf-8")
     # Bounded, read-only native inventory. No elevation or disk self-tests.
     # Persist capabilities, not disk/module serial numbers, in CI artifacts.
     inspections = []

@@ -29,6 +29,8 @@ LIMIT = 2_000_000
 def text(value):
     if value is None:
         return None
+    if isinstance(value, bool):
+        return "yes" if value else "no"
     if isinstance(value, float) and not math.isfinite(value):
         return None
     result = str(value).strip().replace("\x00", "")[:8192]
@@ -55,7 +57,28 @@ def with_unit(value, unit):
 def group(title, source, **values):
     return {"title": title, "fields": [
         {"name": key, "value": text(value), "source": source,
-         "private": key in {"serial", "uuid"}} for key, value in values.items()]}
+         "private": key in {"serial", "uuid"},
+         "status": "available" if text(value) is not None else "not_reported"}
+        for key, value in values.items()]}
+
+
+def missing(section, names, reason):
+    for field in section["fields"]:
+        if field["name"] in names and field["value"] is None:
+            field["status"] = reason
+    return section
+
+
+def profiler_value(value):
+    """Normalize provider enum values, without guessing model specifications."""
+    value = text(value)
+    known = {"sppci_vendor_Apple": "Apple", "spdisplays_builtin": "integrated",
+             "sppci_bus_builtin": "integrated", "spdisplays_bus_builtin": "integrated",
+             "spdisplays_supported": "supported", "spdisplays_metal_supported": "supported"}
+    if value in known:
+        return known[value]
+    match = re.fullmatch(r"spdisplays_metal(?:family)?_?(\d+)", value or "")
+    return "Metal " + match[1] if match else value
 
 
 def device(identity, name, groups, tables=None, notices=None):
@@ -93,9 +116,11 @@ def find_tool(name):
 
 
 class Reader:
-    def __init__(self, budget=30):
+    def __init__(self, budget=30, access=None):
         self.deadline = time.monotonic() + budget
         self.sources = []
+        self.access = access
+        self.privileged = access is not None
 
     def run(self, args, timeout=7):
         remaining = self.deadline - time.monotonic()
@@ -103,15 +128,29 @@ class Reader:
             self.sources.append({"source": Path(args[0]).name, "status": "timeout"})
             return b"", None
         try:
+            if self.access is not None:
+                answer = self.access(args, min(timeout, remaining))
+                if answer is not None:
+                    raw, code = answer
+                    denied = code != 0 and any(word in raw.lower() for word in
+                             (b"permission denied", b"operation not permitted", b"access is denied", b"requires root"))
+                    status = "permission_denied" if denied else "unavailable" if code == -1 else "ok" if code == 0 else "partial"
+                    self.sources.append({"source": Path(args[0]).name, "status": status,
+                                         "exit_code": code, "access": "administrator"})
+                    return raw, code
             result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=min(timeout, remaining), env={**os.environ, "LC_ALL": "C", "LANG": "C"},
                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+            denied = any(word in result.stderr.lower() for word in
+                         (b"permission denied", b"operation not permitted", b"access is denied", b"requires root"))
             self.sources.append({"source": Path(args[0]).name,
-                                 "status": "ok" if result.returncode == 0 else "partial",
+                                 "status": "permission_denied" if denied else "ok" if result.returncode == 0 else "partial",
                                  "exit_code": result.returncode})
             return result.stdout[:LIMIT], result.returncode
         except subprocess.TimeoutExpired:
             self.sources.append({"source": Path(args[0]).name, "status": "timeout"})
+        except PermissionError:
+            self.sources.append({"source": Path(args[0]).name, "status": "permission_denied"})
         except OSError:
             self.sources.append({"source": Path(args[0]).name, "status": "unavailable"})
         return b"", None
@@ -138,7 +177,7 @@ class Reader:
                           prefix + script + " | ConvertTo-Json -Depth 7 -Compress"], 12)[0]
 
     def profiler(self, kind):
-        data, _ = self.json(["/usr/sbin/system_profiler", kind, "-json", "-detailLevel", "mini"], 12)
+        data, _ = self.json(["/usr/sbin/system_profiler", kind, "-json", "-detailLevel", "full"], 12)
         return data.get(kind, []) if isinstance(data, dict) else []
 
 
@@ -158,23 +197,50 @@ def cpu_info(reader):
                 "machdep.cpu.leaf7_features", "hw.model", "hw.cpufrequency", "hw.cpufrequency_max",
                 "hw.l1icachesize", "hw.l1dcachesize", "hw.l2cachesize", "hw.l3cachesize",
                 "hw.cachelinesize", "hw.perflevel0.name", "hw.perflevel0.physicalcpu",
-                "hw.perflevel1.name", "hw.perflevel1.physicalcpu"]
+                "hw.perflevel1.name", "hw.perflevel1.physicalcpu", "hw.cpufamily", "hw.cpusubtype",
+                "hw.optional", "hw.nperflevels"]
         raw, _ = reader.run(["/usr/sbin/sysctl", *keys])
         values = dict(line.split(": ", 1) for line in raw.decode(errors="replace").splitlines() if ": " in line)
+        try:
+            levels = max(0, min(64, int(values.get("hw.nperflevels", "0"))))
+        except ValueError:
+            levels = 0
+        if not levels:
+            levels = max((i + 1 for i in range(2) if values.get(f"hw.perflevel{i}.name")), default=0)
+        if levels:
+            tier_keys = [f"hw.perflevel{i}." + field for i in range(levels) for field in
+                         ("name", "physicalcpu", "logicalcpu", "cpusperl2", "cpusperl3", "l1icachesize",
+                          "l1dcachesize", "l2cachesize", "l3cachesize")]
+            tier_raw, _ = reader.run(["/usr/sbin/sysctl", *tier_keys])
+            values.update(line.split(": ", 1) for line in tier_raw.decode(errors="replace").splitlines() if ": " in line)
         name = values.get(keys[0]) or name
-        groups += [group("processor", "sysctl", model=name, vendor=values.get(keys[1]),
-                         family=values.get(keys[2]), model_id=values.get(keys[3]), stepping=values.get(keys[4]),
-                         instructions=" ".join(filter(None, [values.get(keys[5]), values.get(keys[6])]))),
+        arm = platform.machine().lower() in {"arm64", "aarch64"} or values.get("hw.optional.arm64") == "1" or name.startswith("Apple ")
+        features = [key.removeprefix("hw.optional.") for key, value in values.items()
+                    if value == "1" and (key.startswith("hw.optional.arm.FEAT_") or key in {"hw.optional.neon", "hw.optional.AdvSIMD"})]
+        groups += [group("processor", "sysctl", model=name, vendor=values.get(keys[1]) or ("Apple" if name.startswith("Apple ") else None),
+                         family=values.get("hw.cpufamily") if arm else values.get(keys[2]),
+                         model_id=values.get("hw.cpusubtype") if arm else values.get(keys[3]), stepping=values.get(keys[4]),
+                         instructions=", ".join(features) if features else " ".join(filter(None, [values.get(keys[5]), values.get(keys[6])]))),
                    group("platform_info", "sysctl", board_model=values.get("hw.model"),
                          nominal_frequency=with_unit(values.get("hw.cpufrequency"), "Hz"),
                          maximum_frequency=with_unit(values.get("hw.cpufrequency_max"), "Hz")),
-                   group("cache", "sysctl", l1i=size(values.get("hw.l1icachesize")),
+                   group("cache_lowest_performance" if arm else "cache", "sysctl hw.*", l1i=size(values.get("hw.l1icachesize")),
                          l1d=size(values.get("hw.l1dcachesize")), l2=size(values.get("hw.l2cachesize")),
                          l3=size(values.get("hw.l3cachesize")), cache_line=with_unit(values.get("hw.cachelinesize"), "B"))]
-        rows = [[values.get(f"hw.perflevel{i}.name"), values.get(f"hw.perflevel{i}.physicalcpu")]
-                for i in range(2) if values.get(f"hw.perflevel{i}.name")]
+        if arm:
+            missing(groups[1], {"stepping"}, "not_exposed")
+            missing(groups[2], {"nominal_frequency", "maximum_frequency"}, "not_exposed")
+            missing(groups[3], {"l3"}, "not_reported")
+        rows = [[values.get(f"hw.perflevel{i}.name"), values.get(f"hw.perflevel{i}.physicalcpu"),
+                 values.get(f"hw.perflevel{i}.logicalcpu"), size(values.get(f"hw.perflevel{i}.l1icachesize")),
+                 size(values.get(f"hw.perflevel{i}.l1dcachesize")), size(values.get(f"hw.perflevel{i}.l2cachesize")),
+                 values.get(f"hw.perflevel{i}.cpusperl2"), size(values.get(f"hw.perflevel{i}.l3cachesize")),
+                 values.get(f"hw.perflevel{i}.cpusperl3")]
+                for i in range(levels) if values.get(f"hw.perflevel{i}.name")]
         if rows:
-            tables.append(table("core_clusters", ["cluster", "physical"], rows, "sysctl hw.perflevel"))
+            tables.append(table("performance_levels", ["performance_level", "physical", "logical", "l1i", "l1d", "l2", "cpus_per_l2", "l3", "cpus_per_l3"], rows, "sysctl hw.perflevel; cache size is per sharing group"))
+        if arm and getattr(reader, "privileged", False) is True:
+            tables.extend(power_snapshot(reader, "cpu"))
     elif sys.platform == "win32":
         data = reader.powershell("@{cpu=@(Get-CimInstance Win32_Processor | Select-Object Name,Manufacturer,SocketDesignation,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed,L2CacheSize,L3CacheSize); board=@(Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer,Product); bios=@(Get-CimInstance Win32_BIOS | Select-Object Manufacturer,SMBIOSBIOSVersion)}")
         result = []
@@ -211,17 +277,66 @@ def cpu_info(reader):
     return [device("cpu", name, groups, tables, ["os_clock_note"])]
 
 
+def power_snapshot(reader, kind):
+    from monitor_access import parse_powermetrics
+    raw, code = reader.run(["/usr/bin/powermetrics", "--samplers", "cpu_power,gpu_power",
+                            "-n", "1", "-i", "1000"], 5)
+    if code != 0:
+        return []
+    sensors = parse_powermetrics(raw.decode(errors="replace"))
+    rows = [[s["id"].removeprefix("powermetrics:"), with_unit(s["value"], s["unit"])] for s in sensors
+            if ("gpu" in s["id"].lower()) == (kind == "gpu")]
+    return [table("active_snapshot", ["parameter", "value"], rows, "powermetrics; one-second active interval, not nominal clock")] if rows else []
+
+
+def mac_metal(reader):
+    helper = Path(__file__).resolve().parent / "bin/hardware_macos"
+    if not helper.is_file():
+        return []
+    data, _ = reader.json([str(helper)])
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def metal_group(row):
+    return group("metal_device", "Metal MTLDevice", registry_id=row.get("registry_id"),
+                 unified_memory="yes" if row.get("unified") else "no",
+                 recommended_working_set=size(row.get("recommended_working_set")),
+                 max_buffer_length=size(row.get("max_buffer_length")),
+                 metal="supported", metal_families=", ".join(row.get("families", [])))
+
+
 def gpu_info(reader):
     result = []
     if sys.platform == "darwin":
-        for index, gpu in enumerate(reader.profiler("SPDisplaysDataType")):
-            result.append(device(f"gpu{index}", gpu.get("sppci_model") or gpu.get("_name"), [
-                group("graphics_adapter", "system_profiler SPDisplaysDataType", model=gpu.get("sppci_model"),
-                      vendor=gpu.get("spdisplays_vendor"), device_id=gpu.get("spdisplays_device-id"),
-                      gpu_cores=gpu.get("sppci_cores"), bus=gpu.get("spdisplays_bus"),
+        metal_devices = mac_metal(reader)
+        profiler_devices = reader.profiler("SPDisplaysDataType")
+        for index, gpu in enumerate(profiler_devices):
+            name = gpu.get("sppci_model") or gpu.get("_name")
+            candidates = [m for m in metal_devices if m.get("name") == name]
+            # Only merge an unambiguous model match. Identical-name GPUs remain
+            # separate Metal identities instead of acquiring each other's RAM.
+            native = candidates[0] if len(candidates) == 1 and sum(g.get("sppci_model") == name for g in profiler_devices) == 1 else {}
+            unified = native.get("unified") is True
+            section = group("graphics_adapter", "system_profiler SPDisplaysDataType", model=name,
+                      vendor=profiler_value(gpu.get("spdisplays_vendor")), device_id=gpu.get("spdisplays_device-id"),
+                      gpu_cores=gpu.get("sppci_cores"), bus=profiler_value(gpu.get("spdisplays_bus") or gpu.get("sppci_bus")),
                       vram=gpu.get("spdisplays_vram"), shared_memory=gpu.get("spdisplays_vram_shared"),
-                      metal=gpu.get("spdisplays_metal"), revision=gpu.get("spdisplays_revision-id"))],
-                notices=["gpu_shared_note"]))
+                      metal=profiler_value(gpu.get("spdisplays_metal") or gpu.get("spdisplays_metalfamily") or gpu.get("spdisplays_metal_family")),
+                      revision=gpu.get("spdisplays_revision-id"))
+            if unified:
+                missing(section, {"vram", "device_id", "revision"}, "not_applicable")
+                missing(section, {"shared_memory"}, "dynamic_shared")
+            groups = [section]
+            if native:
+                groups.append(metal_group(native))
+            result.append(device("metal:" + native["registry_id"] if native else f"gpu{index}", name, groups,
+                                 notices=["gpu_shared_note"]))
+        matched = {d["id"] for d in result}
+        for native in metal_devices:
+            if "metal:" + native["registry_id"] not in matched:
+                result.append(device("metal:" + native["registry_id"], native["name"], [metal_group(native)]))
+        if len(result) == 1 and getattr(reader, "privileged", False) is True:
+            result[0]["tables"].extend(power_snapshot(reader, "gpu"))
     elif sys.platform == "win32":
         data = reader.powershell("@(Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,PNPDeviceID,DriverVersion,VideoProcessor,CurrentHorizontalResolution,CurrentVerticalResolution,CurrentRefreshRate)")
         for index, gpu in enumerate(items(data)):
@@ -301,11 +416,13 @@ def dram_info(reader):
                 if not isinstance(row, dict):
                     continue
                 if any(k in row for k in ("dimm_size", "dimm_type", "dimm_manufacturer", "SPMemoryDataType")):
-                    result.append(device(f"memory{len(result)}", row.get("_name", "DRAM"), [
-                        group("memory_module", "system_profiler SPMemoryDataType", capacity=row.get("dimm_size") or row.get("SPMemoryDataType"),
+                    section = group("memory_module", "system_profiler SPMemoryDataType", capacity=row.get("dimm_size") or row.get("SPMemoryDataType"),
                               memory_type=row.get("dimm_type"), vendor=row.get("dimm_manufacturer"),
                               configured_speed=row.get("dimm_speed"), part_number=row.get("dimm_part_number"),
-                              serial=row.get("dimm_serial_number"), status=row.get("dimm_status"))], notices=["firmware_not_spd"]))
+                              serial=row.get("dimm_serial_number"), status=row.get("dimm_status"))
+                    if "SPMemoryDataType" in row:
+                        missing(section, {"configured_speed", "part_number", "serial", "status"}, "not_exposed")
+                    result.append(device(f"memory{len(result)}", row.get("_name", "DRAM"), [section], notices=["firmware_not_spd"]))
                 visit(row.get("_items", []))
         visit(reader.profiler("SPMemoryDataType"))
     elif sys.platform == "win32":
@@ -451,17 +568,19 @@ def disk_info(reader):
                 measured["groups"].extend(dev["groups"])
                 result[index] = measured
             else:
-                dev["notices"].append("smart_read_error")
+                messages = " ".join(str(m.get("string", "")) for m in data.get("smartctl", {}).get("messages", []) if isinstance(m, dict)) if isinstance(data, dict) else ""
+                denied = any(s in messages.lower() for s in ("permission denied", "operation not permitted", "access is denied", "requires root", "administrator"))
+                dev["notices"].append("hardware_permission_denied" if denied else "smart_read_error")
     else:
         for dev in result:
             dev["notices"].append("smartctl_missing")
     return result
 
 
-def collect(kind):
+def collect(kind, reader=None):
     if kind not in KINDS:
         raise ValueError("unknown hardware tool")
-    reader = Reader()
+    reader = reader or Reader()
     result = {"schema": 1, "kind": kind, "collected_at": datetime.now(timezone.utc).isoformat(),
               "devices": [], "sources": reader.sources, "notices": ["hardware_readonly"]}
     try:
@@ -470,6 +589,9 @@ def collect(kind):
         result["notices"].append("hardware_read_failed")
     if not result["devices"]:
         result["notices"].append("hardware_no_devices")
+    if any(s.get("status") == "permission_denied" for s in reader.sources):
+        result["notices"].append("hardware_permission_denied")
+    result["access"] = "administrator" if reader.privileged else "standard"
     return result
 
 

@@ -1,6 +1,7 @@
 /* Session-only, read-only sensor bridge. No file writes, driver installation,
- * settings changes or general command execution. The only IPC commands are
- * '1' (sample), '0' (pause), and 'q' (quit). Closing the authenticated local
+ * settings changes or general command execution. Monitor IPC commands are
+ * '1' (sample), '0' (pause), and 'q' (quit). The separate --inspect mode uses
+ * fixed bounded inventory reads defined in hardware_privileged.h. Closing the authenticated local
  * connection or the requesting GUI always ends the helper and its child.
  * OS authorization is performed by the caller, never by this binary. */
 #ifndef _WIN32
@@ -190,8 +191,12 @@ static int linux_sample(void) {
 }
 #endif
 
+#include "hardware_privileged.h"
+
 int main(int argc, char **argv) {
-    if (argc != 4 || strlen(argv[2]) != 64) return 2;
+    if ((argc != 4 && argc != 5) || strlen(argv[2]) != 64) return 2;
+    int inspection = argc == 5 && !strcmp(argv[4], "--inspect");
+    if (argc == 5 && !inspection) return 2;
     for (unsigned i = 0; i < 64; ++i) if (!isxdigit((unsigned char)argv[2][i])) return 2;
     char *end;
     long port = strtol(argv[1], &end, 10); if (*end || port < 1 || port > 65535) return 2;
@@ -213,9 +218,26 @@ int main(int argc, char **argv) {
     /* 127.0.0.1; INADDR_LOOPBACK is hidden by strict POSIX mode on macOS. */
     address.sin_addr.s_addr = htonl(0x7f000001u);
     if (connect(connection, (struct sockaddr *)&address, sizeof(address))) { close_socket(connection); return 3; }
+    if (inspection) {
+#ifdef _WIN32
+        DWORD timeout = 3000;
+        setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+#else
+        struct timeval timeout = {3, 0};
+        setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+    }
     char greeting[96];
-    int length = snprintf(greeting, sizeof(greeting), "MTMON/1 %s\nready\n", argv[2]);
+    int length = snprintf(greeting, sizeof(greeting), inspection ? "MTINSPECT/1 %s\n" : "MTMON/1 %s\nready\n", argv[2]);
     if (send_all(greeting, (size_t)length)) { close_socket(connection); return 3; }
+    if (inspection) {
+        inspection_loop(parent);
+        stop_child(); close_socket(connection);
+#ifdef _WIN32
+        CloseHandle(parent_process); WSACleanup();
+#endif
+        return 0;
+    }
     int active = 0, done = 0;
     time_t last_sample = 0;
     while (!done) {
