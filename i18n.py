@@ -33,6 +33,7 @@ MESSAGES = {
     "sized_measurement": ("{size} · {measurement}", "{size} · {measurement}"),
     "threaded_measurement": ("{measurement} · {threads} 线程", "{measurement} · {threads} threads"),
     "unstable_score": ("原始样本波动较大，建议复测；分数仅供参考。", "Raw samples vary substantially; rerun before comparing this score."),
+    "combined_run": ("合并轮次，未记录子项独立用时", "Combined run; individual task duration was not recorded"),
     "operations": ("操作次数", "Operations"), "branches": ("数据分支次数", "Data branches"),
     "payload": ("有效字节数", "Useful bytes"),
     "inter_core": ("核间通信", "Inter-core communication"),

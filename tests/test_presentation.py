@@ -86,6 +86,7 @@ class ResultsTests(unittest.TestCase):
         path = self.root / "memory_bandwidth_report.md"
         path.write_text(content)
         model = build_module("memory_bandwidth", self.root)
+        model.duration = 123
         self.assertEqual(model.tables[0].columns[1]["unit"], "GB/s")
         self.assertEqual([row[1] for row in model.tables[0].rows], [10, 0.5])
         self.assertEqual(model.charts[0].series[0]["values"], [10, 0.5])
@@ -93,6 +94,11 @@ class ResultsTests(unittest.TestCase):
         parts = split_legacy_result(model)
         self.assertEqual([p.name for p in parts], ["memory_bandwidth_test", "memory_latency_test"])
         self.assertEqual([len(p.charts) for p in parts], [1, 1])
+        self.assertEqual([p.duration for p in parts], [None, None])
+        self.assertEqual(model.duration, 123)
+        cache = build_module("cache_hierarchy", self.root)
+        cache.duration = 456
+        self.assertTrue(all(p.duration is None for p in split_legacy_result(cache)))
         self.assertEqual(path.read_text(), content)
         for language in ("zh", "en"):
             html = module_html(model, language)

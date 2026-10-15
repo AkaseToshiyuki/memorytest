@@ -405,12 +405,17 @@ def cache_parts(result):
 def split_legacy_result(result):
     """Restore old combined archives into new pages without inventing fresh runs."""
     if result.name == "cache_hierarchy":
-        return cache_parts(result)
+        parts = cache_parts(result)
+        for part in parts:
+            part.duration = None  # The old manifest timed the aggregate, not each child.
+            part.conditions = [*part.conditions, (ref("source"), ref("combined_run"))]
+        return parts
     if result.name == "memory_bandwidth":
         parts = []
         for key in ("memory_bandwidth_test", "memory_latency_test"):
             latency = key == "memory_latency_test"
-            part = replace(result, name=key,
+            part = replace(result, name=key, duration=None,
+                conditions=[*result.conditions, (ref("source"), ref("combined_run"))],
                 tables=[t for t in result.tables if (t.title == "memory_latency") == latency
                         and t.title != "sampling_statistics"],
                 charts=[c for c in result.charts if (c.title == "memory_latency") == latency],

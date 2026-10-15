@@ -245,6 +245,9 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
 Local full regression: **169 discovered, 163 passed, 6 platform-dependent skips,
 255.225 s**; `/tmp/memorytest-repeat-split-full-final.log`. Final report/selection
 checks: **25/25, 5.105 s**, `/tmp/memorytest-repeat-split-final-views.log`.
+Final legacy-duration presentation/restore checks: **24/24, 6.176 s**,
+`/tmp/memorytest-repeat-split-legacy-duration.log`; combined-run duration is not
+invented for individual restored tasks, and the combined origin is visible.
 The extra two-CPU raw-to-matrix reference check passed **1/1, 3.928 s** in
 `/tmp/memorytest-repeat-intercore-reference.log`; standalone dependency-free CLI
 checks passed **18/18, 5.040 s**, `/tmp/memorytest-repeat-split-stdlib.log`.
