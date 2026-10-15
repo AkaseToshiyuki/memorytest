@@ -215,7 +215,7 @@ $(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BU
 
 .PHONY: force-compute-build
 # Rebuild to capture the actual compiler/profile; never reuse a native/old v1 binary.
-$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(SRC_DIR)/compute_kernel.c $(SRC_DIR)/compute_kernel.h Makefile force-compute-build | $(BUILD_DIR)
+$(BUILD_DIR)/test_cpu_multi: $(SRC_DIR)/test_cpu_multi.c $(SRC_DIR)/compute_kernel.c $(SRC_DIR)/compute_kernel.h $(SRC_DIR)/thread_schedule.h Makefile force-compute-build | $(BUILD_DIR)
 	$(CC) $(CM_CFLAGS) -DCM_BUILD_PROFILE='"portable-scalar-v2"' -DCM_BUILD_FLAGS='"$(CM_CFLAGS)"' -DCM_SOURCE_HASH='"$(CM_SOURCE_HASH)"' -o $@ src/test_cpu_multi.c src/compute_kernel.c -lm $(PLATFORM_LIBS)
 
 $(addprefix $(BUILD_DIR)/, $(ALL_TESTS)): $(COMMON_HEADERS)

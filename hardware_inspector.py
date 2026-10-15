@@ -21,7 +21,9 @@ import sys
 import time
 
 import psutil
+from benchmark_registry import ROOT
 from runtime_permissions import is_administrator
+from smart_inventory import exact_value, smart_tables
 
 KINDS = ("cpu", "gpu", "dram", "disk")
 LIMIT = 2_000_000
@@ -100,6 +102,10 @@ def read(path, limit=131072):
 
 
 def find_tool(name):
+    if name == "smartctl":
+        bundled = ROOT / "bin" / ("smartctl.exe" if os.name == "nt" else "smartctl")
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            return str(bundled)
     found = shutil.which(name)
     if found:
         return found
@@ -495,21 +501,12 @@ def smart_device(data, identity, exit_code=0):
                     protocol=data.get("device", {}).get("protocol"), device_path=identity,
                     rotation_rate=with_unit(data.get("rotation_rate"), "RPM")),
               group("smart_summary", "smartctl / device", health=health, temperature=with_unit(temp, "°C"),
-                    power_on_hours=data.get("power_on_time", {}).get("hours", nvme.get("power_on_hours")),
-                    power_cycles=data.get("power_cycle_count", nvme.get("power_cycles")),
+                    power_on_hours=exact_value(data.get("power_on_time", {}), "hours", exact_value(nvme, "power_on_hours")),
+                    power_cycles=exact_value(data, "power_cycle_count", exact_value(nvme, "power_cycles")),
                     percentage_used=with_unit(nvme.get("percentage_used"), "%"),
                     available_spare=with_unit(nvme.get("available_spare"), "%"),
-                    media_errors=nvme.get("media_errors"), unsafe_shutdowns=nvme.get("unsafe_shutdowns"))]
-    tables = []
-    if raw_attributes:
-        rows = [[f'{row["id"]:02X}' if isinstance(row.get("id"), int) else row.get("id"), row.get("name"),
-                 row.get("value"), row.get("worst"), row.get("thresh"),
-                 row.get("raw", {}).get("string", row.get("raw", {}).get("value")), row.get("when_failed")]
-                for row in raw_attributes]
-        tables.append(table("ata_attributes", ["id_hex", "attribute", "current", "worst", "threshold", "raw_value", "when_failed"], rows, "smartctl ATA; raw value uses provider formatting"))
-    if nvme:
-        rows = [[key, value] for key, value in nvme.items() if isinstance(value, (str, int, float)) and not key.endswith("_s")]
-        tables.append(table("nvme_health", ["parameter", "value"], rows, "smartctl NVMe SMART/Health log"))
+                    media_errors=exact_value(nvme, "media_errors"), unsafe_shutdowns=exact_value(nvme, "unsafe_shutdowns"))]
+    tables = smart_tables(data)
     notes = ["smart_not_guarantee"]
     if bits & 7:
         notes.append("smart_read_error")
@@ -565,15 +562,25 @@ def disk_info(reader):
                 result.append(device(path, path, []))
                 known.add(path)
         for index, dev in enumerate(result[:32]):
-            data, code = reader.json([smartctl, "-a", "-j", "-n", "standby", dev["id"]])
-            if isinstance(data, dict) and any(key in data for key in ("smart_status", "ata_smart_attributes", "nvme_smart_health_information_log")):
+            data, code = reader.json([smartctl, "-x", "--json=v", "-n", "standby", dev["id"]])
+            if isinstance(data, dict) and any(key.startswith(("smart_status", "ata_smart_", "nvme_smart_", "scsi_")) for key in data):
                 measured = smart_device(data, dev["id"], code)
+                # Fill missing basic fields from OS inventory, retaining their
+                # source, but never replace health with the OS Verified flag.
+                basic = measured["groups"][0]["fields"]
+                os_fields = {f["name"]: f for g in dev["groups"] for f in g["fields"]}
+                for n, field in enumerate(basic):
+                    if field["value"] is None and field["name"] in os_fields:
+                        basic[n] = os_fields[field["name"]]
+                for section in dev["groups"]:
+                    section["title"] = "drive_os_inventory"
                 measured["groups"].extend(dev["groups"])
                 result[index] = measured
             else:
                 messages = " ".join(str(m.get("string", "")) for m in data.get("smartctl", {}).get("messages", []) if isinstance(m, dict)) if isinstance(data, dict) else ""
                 denied = any(s in messages.lower() for s in ("permission denied", "operation not permitted", "access is denied", "requires root", "administrator"))
-                dev["notices"].append("hardware_permission_denied" if denied else "smart_read_error")
+                standby = isinstance(data, dict) and data.get("power_mode", {}).get("string", "").upper() in {"STANDBY", "SLEEP"}
+                dev["notices"].append("hardware_permission_denied" if denied else "smart_standby" if standby else "smart_read_error")
     else:
         for dev in result:
             dev["notices"].append("smartctl_missing")

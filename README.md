@@ -208,7 +208,7 @@ legacy ALU, floating-point and branch modules. v1 extrapolated values are no lon
 accepted or silently converted. Old and new points are **not comparable**.
 
 ```bash
-make test MODULE=cpu_multi                             # 1 thread and all allowed logical CPUs
+make test MODULE=cpu_multi                             # powers of two, then all allowed logical CPUs
 make test MODULE=cpu_multi ARGS="--cpu-threads 2"       # explicitly limited capacity
 make score                                            # read this run's v2 points
 make check-compute                                    # independent references + <=2 CPU native checks
@@ -234,6 +234,10 @@ against a reference machine. The two components are measured, never extrapolated
   samples per workload/thread count, each at least 100 ms, retained median throughput.
   `repeat20-outer-iqr3-v1` identifies the new sampling policy; legacy five-sample
   archives remain readable but must not be silently mixed with this protocol.
+- New runs use `powers-of-two-plus-max-v1`: 14 allowed threads measure 1, 2, 4,
+  8 and 14; an exact power-of-two maximum appears only once. Every stage has
+  independent calibration and raw samples, never interpolated endpoint rates.
+  Endpoint scores use the same formula; legacy archives retain their real points.
 - `portable-scalar-v2` has pinned flags, no vectorization, fast-math, contraction
   or LTO. `make opt`/`ofast`/`opt-native` do not change this scored profile.
 - Independent reference-vector self-tests, source hash, exact operation accounting,
@@ -552,7 +556,7 @@ Metal 原生 API 读取设备身份、统一内存属性及建议工作集上限
 显示“系统未提供此项”；管理员权限不能凭空补齐不存在的接口。
 
 Linux 管理员启动可读取受保护的 SMBIOS 和已有 EEPROM 接口；Windows 使用固定 CIM
-清单。各平台均可通过已安装的 smartmontools 读取设备 SMART。缺少组件与权限不足
+清单。各平台安装包自带 smartctl；源码运行也可使用已安装的 smartmontools。缺少组件与权限不足
 分别提示：macOS 可安装 Homebrew 的 `smartmontools`，Linux 使用发行版同名软件包，
 Windows 使用 smartmontools 官方安装包。应用不会自动下载或安装依赖。OS 的
 `Verified` 与完整 SMART 明细分别显示，不将系统摘要当作设备自检通过。
@@ -586,12 +590,22 @@ macOS 检查包内 Metal 读取器。该检查不请求系统提权，不能替�
 | CPU 参数 | Linux `/proc`、sysfs、lscpu；Mac sysctl；Windows CIM。型号、拓扑、缓存、系统公开的频率／指令和主板／固件字段 | 不推算制程、TDP、实时核心电压；不同平台公开字段不同 |
 | GPU 参数 | Linux DRM／PCI、Mac system_profiler、Windows CIM；可用时补充 NVIDIA 驱动快照，支持多设备选择 | 不把共享内存当独立显存，不用可能截断的 32 位 WMI 显存容量；不保存／刷写显卡 BIOS |
 | DRAM 参数 | 系统内存概览与 SMBIOS／system_profiler 模块信息；Linux 安装 decode-dimms 且已有可读 EEPROM 接口时展示 SPD 明细 | 系统／固件声明不是 SPD，也不是当前时序；不猜 XMP／EXPO，不写 SPD、不加载驱动。Apple 统一内存通常无 DIMM SPD 接口；本版未实现 Windows/Mac 专用 SPD 驱动 |
-| 磁盘 SMART | OS 磁盘清单；本机可用的 smartctl 提供 ATA 属性和 NVMe 健康日志，显示温度、通电时间、磨损及警告 | 不把 OS “OK”当完整 SMART 通过；完整属性需 smartmontools、硬件支持和读取权限。本版不随包内置 smartctl，不自动提权／开启 SMART／启动自检或修复 |
+| 磁盘 SMART | OS 磁盘清单；安装包内置原生 smartctl 7.5，提供 ATA 属性、NVMe 健康日志和设备公开的 SCSI／扩展信息 | 不把 OS “OK”当完整 SMART 通过；完整属性仍需硬件支持和读取权限。不自动提权／开启 SMART／启动自检或修复 |
 
 SMART 读取保留 smartctl 非零退出码中的健康告警，区分命令失败、故障与历史告警。
 NVMe 已用耐久度可超过 100%，不转换成武断的剩余寿命。ATA 原始值保留提供方格式和名称，
 不套用统一寿命算法。使用 `-n standby` 请求避免唤醒休眠盘，但设备／桥接不支持时不能保证。
 工具不会联网查询型号数据库或上传设备信息。参数查看本身不启动基准或压力负载。
+SMART 页面上方是磁盘信息／健康摘要／系统信息标签页，下方是独立滚动的属性明细表；
+没有读取权限、设备不支持或待机时，保留空表和实际原因，不以系统 Verified 填充明细。
+ATA 表展示 ID、当前值、最差值、阈值、设备格式原始值及十六进制值；NVMe 不伪造 ATA 阈值。
+`smartctl -x --json=v -n standby` 返回的全部结构化字段均可查阅，包括传感器数组、SCSI 计数及扩展日志；
+保留 128 位整数的精确十进制值，不再截为 512 行。序列号／WWN 等标识在表格与导出中默认隐藏。
+读取器优先使用包内版本，不在运行时下载或安装。它是独立进程，非链接库；安装包同时携带
+GPL-2.0-or-later 许可证、未修改的完整源码归档、构建配方与哈希记录。
+源码固定为 [smartmontools 7.5](https://github.com/smartmontools/smartmontools/releases/tag/RELEASE_7_5)，
+SHA-256 `690b83ca331378da9ea0d9d61008c4b22dde391387b9bbad7f29387f2595f76e`。
+源码运行仍可使用系统已安装的 smartctl；系统未公开、桥接未转发或读取器未结构化输出的字段不会被编造。
 Windows 内存只使用单位明确的 `ConfiguredClockSpeed`；0 频率／电压显示为不可用。
 不把文档单位与 SMBIOS 来源含义不一致的旧 `Speed` 属性强行标成额定 MHz／MT/s。
 
@@ -680,6 +694,12 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   极差始终按全部样本计算；四分位区间不是置信区间。
 - ComputeMark 的新 JSON 显式保存采样协议和样本数；Python 从原始时间重新计算排除集合和分数，
   不信任已写入的汇总。偶数情况下“吞吐量的中位数”不等于“时间中位数的倒数”，两者分开计算。
+- 多核梯度协议 `powers-of-two-plus-max-v1` 按 1、2、4、8……递增，最后加入最大线程数并去重。
+  例如 14 线程测 `1, 2, 4, 8, 14`，16 线程测 `1, 2, 4, 8, 16`，1 线程只测一次档位。
+  最大值沿用现有进程可用逻辑线程／`--threads` 限制，不冒充物理核绑定或 P 核选择。
+  每档整数与 FP64 分别校准、各采样 20 次；图表和加速比表来自全部实测档位，缺样则拒绝评分。
+  单核／最大线程评分公式不变；旧报告仍只展示原有实测点，不插值补齐。
+  14 线程因此有 `5 × 2 × 20 = 200` 个正式样本，加上预热和校准；本次未减少重复次数。
 - 整数依赖链移除每轮不必要的 `volatile` 内存访问，采用寄存器读写约束和最终结果 sink；
   乘除数阻止常量折叠，仍包含循环与辅助计算。`Load+ALU` 刻意保留真实内存加载。
   新整数时间不能直接与旧 volatile 循环比较，改善的是测量对象，不是 CPU 本身变快。

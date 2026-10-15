@@ -2,8 +2,47 @@
  * operations, no caller-provided executable, script, output path or options. */
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <limits.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 #define INSPECT_LIMIT 2000000
+
+/* Resolve only a sibling of this executable, never a client-provided path.
+ * Installed applications carry their own version-matched SMART reader. */
+#ifdef _WIN32
+static int inspection_bundled_smartctl(wchar_t *path, size_t capacity) {
+    DWORD length = GetModuleFileNameW(NULL, path, (DWORD)capacity);
+    if (!length || length >= capacity) return 0;
+    wchar_t *slash = wcsrchr(path, L'\\');
+    if (!slash || (size_t)(slash - path) + 14 >= capacity) return 0;
+    wcscpy(slash + 1, L"smartctl.exe");
+    DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+#else
+static int inspection_bundled_smartctl(char *path, size_t capacity) {
+#ifdef __APPLE__
+    uint32_t length = (uint32_t)capacity;
+    if (_NSGetExecutablePath(path, &length)) return 0;
+    char resolved[PATH_MAX];
+    if (!realpath(path, resolved) || strlen(resolved) >= capacity) return 0;
+    strcpy(path, resolved);
+#elif defined(__linux__)
+    ssize_t length = readlink("/proc/self/exe", path, capacity - 1);
+    if (length < 0 || (size_t)length >= capacity - 1) return 0;
+    path[length] = 0;
+#else
+    (void)path; (void)capacity;
+    return 0;
+#endif
+    char *slash = strrchr(path, '/');
+    if (!slash || (size_t)(slash - path) + 10 >= capacity) return 0;
+    strcpy(slash + 1, "smartctl");
+    return access(path, X_OK) == 0;
+}
+#endif
 
 static int inspection_device(const char *value) {
     if (strncmp(value, "/dev/", 5)) return 0;
@@ -47,16 +86,20 @@ static double inspection_clock(void) {
 
 static int inspection_start(const char *request) {
     int scan = !strcmp(request, "scan");
+    int version = !strcmp(request, "smart-version");
     const char *drive = !strncmp(request, "smart ", 6) ? request + 6 : NULL;
     if (drive && !inspection_device(drive)) return -1;
 #ifdef _WIN32
     wchar_t executable[MAX_PATH], command[8192];
-    if (scan || drive) {
-        DWORD count = GetEnvironmentVariableW(L"ProgramFiles", executable, MAX_PATH - 40);
-        if (!count || count >= MAX_PATH - 40) return -1;
-        wcscat(executable, L"\\smartmontools\\bin\\smartctl.exe");
+    if (scan || drive || version) {
+        if (!inspection_bundled_smartctl(executable, MAX_PATH)) {
+            DWORD count = GetEnvironmentVariableW(L"ProgramFiles", executable, MAX_PATH - 40);
+            if (!count || count >= MAX_PATH - 40) return -1;
+            wcscat(executable, L"\\smartmontools\\bin\\smartctl.exe");
+        }
         if (scan) _snwprintf(command, 8192, L"\"%ls\" --scan -j", executable);
-        else _snwprintf(command, 8192, L"\"%ls\" -a -j -n standby %hs", executable, drive);
+        else if (version) _snwprintf(command, 8192, L"\"%ls\" --version", executable);
+        else _snwprintf(command, 8192, L"\"%ls\" -x --json=v -n standby %hs", executable, drive);
     } else {
         const wchar_t *script = NULL;
         if (!strcmp(request, "cpu")) script = L"@{cpu=@(Get-CimInstance Win32_Processor | Select-Object Name,Manufacturer,SocketDesignation,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed,L2CacheSize,L3CacheSize); board=@(Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer,Product); bios=@(Get-CimInstance Win32_BIOS | Select-Object Manufacturer,SMBIOSBIOSVersion)}";
@@ -89,7 +132,7 @@ static int inspection_start(const char *request) {
     ResumeThread(process.hThread); CloseHandle(process.hThread);
     return 0;
 #else
-    const char *name = scan || drive ? "smartctl" : !strcmp(request, "memory") ? "dmidecode" :
+    const char *name = scan || drive || version ? "smartctl" : !strcmp(request, "memory") ? "dmidecode" :
         !strcmp(request, "spd") ? "decode-dimms" : !strcmp(request, "power") ? "powermetrics" : NULL;
     if (!name) return -1;
 #ifndef __APPLE__
@@ -102,8 +145,9 @@ static int inspection_start(const char *request) {
         "/opt/homebrew/sbin", "/opt/homebrew/bin", "/usr/local/sbin", "/usr/local/bin",
 #endif
         NULL};
-    char executable[512] = {0};
-    for (unsigned i = 0; prefixes[i]; ++i) {
+    char executable[4096] = {0};
+    int bundled = (scan || drive || version) && inspection_bundled_smartctl(executable, sizeof(executable));
+    for (unsigned i = 0; !bundled && prefixes[i]; ++i) {
         snprintf(executable, sizeof(executable), "%s/%s", prefixes[i], name);
         if (!access(executable, X_OK)) break;
         executable[0] = 0;
@@ -111,7 +155,8 @@ static int inspection_start(const char *request) {
     if (!executable[0]) return -1;
     char *args[12] = {executable, NULL};
     if (scan) { args[1] = "--scan"; args[2] = "-j"; }
-    else if (drive) { args[1] = "-a"; args[2] = "-j"; args[3] = "-n"; args[4] = "standby"; args[5] = (char *)drive; }
+    else if (version) args[1] = "--version";
+    else if (drive) { args[1] = "-x"; args[2] = "--json=v"; args[3] = "-n"; args[4] = "standby"; args[5] = (char *)drive; }
     else if (!strcmp(request, "memory")) { args[1] = "--type"; args[2] = "17"; }
     else if (!strcmp(request, "power")) { args[1] = "--samplers"; args[2] = "cpu_power,gpu_power"; args[3] = "-n"; args[4] = "1"; args[5] = "-i"; args[6] = "1000"; }
     int descriptors[2];

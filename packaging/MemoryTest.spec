@@ -10,11 +10,13 @@ from app_version import VERSION
 engine = Path(os.environ["MEMORYTEST_ENGINE_DIR"])
 licenses = Path(os.environ["MEMORYTEST_LICENSE_DIR"])
 icons = Path(os.environ["MEMORYTEST_ICON_DIR"])
+sources = Path(os.environ["MEMORYTEST_SOURCES_DIR"])
 from PySide6.QtCore import QLibraryInfo
 translation = Path(QLibraryInfo.path(QLibraryInfo.TranslationsPath)) / "qtbase_zh_CN.qm"
 a = Analysis([str(root / "desktop_app.py")], pathex=[str(root)],
     binaries=[(str(path), "bin") for path in engine.iterdir() if path.is_file()],
     datas=[(str(root / "tests.json"), "."), (str(licenses), "licenses"),
+           (str(sources), "third_party_sources"),
            (str(icons / "memorytest.svg"), "icons"), (str(icons / "memorytest-32.png"), "icons"),
            (str(translation), "PySide6/Qt/translations")],
     hiddenimports=[], hookspath=[], runtime_hooks=[],

@@ -253,8 +253,11 @@ def main():
     build_icons(staging / "icons")
     engines(staging / "engines")
     collect_licenses(staging / "licenses")
+    from build_smartctl import build_smartctl
+    smartctl = build_smartctl(staging / "smartctl", staging / "engines",
+                             staging / "licenses/smartmontools", staging / "third_party_sources")
     env = dict(os.environ, MEMORYTEST_ENGINE_DIR=str(staging / "engines"), MEMORYTEST_LICENSE_DIR=str(staging / "licenses"),
-               MEMORYTEST_ICON_DIR=str(staging / "icons"))
+               MEMORYTEST_ICON_DIR=str(staging / "icons"), MEMORYTEST_SOURCES_DIR=str(staging / "third_party_sources"))
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--distpath", staging / "dist",
          "--workpath", staging / "pyinstaller", ROOT / "packaging/MemoryTest.spec"], cwd=ROOT, env=env)
     bundle = staging / "dist" / ("MemoryTest.app" if sys.platform == "darwin" else "MemoryTest")
@@ -271,6 +274,7 @@ def main():
                 "bundle_bytes": sum(p.stat().st_size for p in bundle.rglob("*") if p.is_file() and not p.is_symlink()),
                 "sha256": hashlib.sha256(package.read_bytes()).hexdigest(), "bundle": str(bundle),
                 "signed": bool(os.environ.get("MEMORYTEST_SIGN_IDENTITY")), "notarized": False,
+                "smartctl": smartctl,
                 "libc": platform.libc_ver() if sys.platform.startswith("linux") else None,
                 "assets": [{"file": p.name, "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in packages]}
     (artifacts / "build-info.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

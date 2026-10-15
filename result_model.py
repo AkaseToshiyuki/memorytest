@@ -276,16 +276,16 @@ def build_module(name, reports, record=None):
                                {"label": ref("fp64"), "value": score.fp64_gflops, "unit": "GFLOP/s"}]
                 policy = {"macos-qos-user-initiated": "qos", "linux-pinned": "pinned",
                           "windows-pinned-process-group": "process_group"}[score.placement_policy]
-                result.conditions = [(ref("protocol"), "ComputeMark v2 / " + score.sampling_protocol),
+                result.conditions = [(ref("protocol"), "ComputeMark v2 / " + score.sampling_protocol + " / " + score.scaling_protocol),
                                      (ref("samples"), score.sample_count), (ref("threads"), score.threads),
                                      (ref("spread"), f"{score.max_spread_pct:.3f}%"),
                                      (ref("placement"), ref(policy)), (ref("compiler"), score.compiler)]
                 if not score.stable:
                     result.notice = "unstable_score"
-                ns = sorted({1, score.threads})
-                for kind, single, multi, unit in [("integer", score.single_integer_gops, score.integer_gops, "Gop/s"),
-                                                ("fp64", score.single_fp64_gflops, score.fp64_gflops, "GFLOP/s")]:
-                    rates = [single] if score.threads == 1 else [single, multi]
+                ns = score.thread_counts
+                for kind, rates, unit in [("integer", score.integer_scaling, "Gop/s"),
+                                          ("fp64", score.fp64_scaling, "GFLOP/s")]:
+                    single = rates[0]
                     result.charts.append(Chart("scaling", "line", unit, ns,
                         [{"label": ref(kind), "values": rates}], ns, "threads"))
                     result.tables.append(Table("scaling", [column("threads"), column(kind, unit), column("speedup", "×")],

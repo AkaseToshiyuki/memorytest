@@ -120,9 +120,10 @@ class PlatformInventoryTests(unittest.TestCase):
             self.assertNotIn("SECRET", json.dumps(reader.sources))
 
     def test_fixed_operation_mapping_does_not_forward_commands_or_write_options(self):
-        self.assertEqual(operation(["/usr/sbin/smartctl", "-a", "-j", "-n", "standby", "/dev/disk0"]), "smart /dev/disk0")
+        self.assertEqual(operation(["/usr/sbin/smartctl", "-x", "--json=v", "-n", "standby", "/dev/disk0"]), "smart /dev/disk0")
+        self.assertEqual(operation(["/bundled/smartctl", "--version"]), "smart-version")
         for args in (["smartctl", "-t", "long", "/dev/sda"], ["sh", "-c", "echo bad"],
-                     ["smartctl", "-a", "-j", "-n", "standby", "/dev/sda;echo bad"], ["dmidecode", "--dump-bin", "/tmp/data"]):
+                     ["smartctl", "-x", "--json=v", "-n", "standby", "/dev/sda;echo bad"], ["dmidecode", "--dump-bin", "/tmp/data"]):
             self.assertIsNone(operation(args))
 
     def test_reader_inherits_token_without_os_authorization_command(self):
@@ -251,7 +252,7 @@ class InspectionSessionTests(unittest.TestCase):
             access.peer = Mock()
             access.peer.recv.side_effect = [bytes([c]) for c in f"{code} 2\n".encode()] + [b"{}"]
             reader = Reader(access=access.request)
-            self.assertEqual(reader.run(["smartctl", "-a", "-j", "-n", "standby", "/dev/disk0"]), (b"{}", code))
+            self.assertEqual(reader.run(["smartctl", "-x", "--json=v", "-n", "standby", "/dev/disk0"]), (b"{}", code))
             self.assertEqual(reader.sources[0]["status"], "partial")
             access.peer.shutdown.assert_not_called()
 
@@ -385,11 +386,32 @@ class NativeInspectionTests(unittest.TestCase):
             engine.mkdir(parents=True)
             import shutil
             shutil.copy2(self.binary, engine / ("telemetry_privileged.exe" if os.name == "nt" else "telemetry_privileged"))
+            with self.assertRaisesRegex(RuntimeError, "SMART reader is missing"):
+                check.check_native_readers(binary)
+            compiler = shlex.split(os.environ.get("CC", "cc"))
+            subprocess.run(compiler + [str(ROOT / "tests/smartctl_probe.c"), "-o",
+                str(engine / ("smartctl.exe" if os.name == "nt" else "smartctl"))], check=True)
             # Metal is checked by actual Mac installer acceptance. This fixture
             # only constructs the cross-platform inspection bridge payload.
             with patch.object(check.sys, "platform", "win32" if os.name == "nt" else "linux"):
                 result = check.check_native_readers(binary)
-            self.assertEqual(result, {"inspection_protocol": "passed", "os_elevation_requested": False})
+            self.assertEqual(result, {"inspection_protocol": "passed", "os_elevation_requested": False,
+                "bundled_smartctl": "7.5", "inherited_smartctl_launch": "passed", "smartctl_read_arguments": "passed"})
+            # Only the test sibling is queried: it rejects every invocation
+            # except the exact read-only flags and never opens any device.
+            access = InspectorAccess(engine / ("telemetry_privileged.exe" if os.name == "nt" else "telemetry_privileged"))
+            def command(helper, port, token, parent, **_):
+                return [str(helper), str(port), token, str(parent), "--inspect"]
+            def collect_probe(kind, reader):
+                return reader.json(["smartctl", "-x", "--json=v", "-n", "standby", "/dev/disk0"])[0]
+            try:
+                with patch("hardware_access.reader_command", side_effect=command), patch("hardware_access.collect", side_effect=collect_probe):
+                    access.start("disk", launcher=lambda args: subprocess.Popen(args))
+                    access.thread.join(timeout=5)
+                self.assertEqual(access.status, "ready")
+                self.assertEqual(access.snapshot, {"smartctl": {"exit_status": 0}})
+            finally:
+                access.close()
 
 
 if __name__ == "__main__":

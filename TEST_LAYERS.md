@@ -267,6 +267,38 @@ unbounded stress load is part of this acceptance run.
 
 ### Live monitoring, status pulse and hardware inspector tools (2026-10-15)
 
+SMART detail and thread-gradient follow-up (2026-10-15):
+
+- Native thread scheduling has independent literal vectors for maxima 1, 2, 3,
+  14, 16, 17 and 262144, without starting workers. A non-linear 14-thread fixture
+  independently checks all five rates/ratios, report points and strict rejection
+  of missing, duplicate, malformed and unexpected intermediate samples. Real
+  ComputeMark verification remains bounded to at most two CPUs. **23 passed,
+  2 platform skips**, 15.272 s (`build/smart-gradient-compute-final.log`).
+- Hardware bridge/startup contracts: **28/28**, 0.589 s
+  (`build/smart-gradient-access-final.log`). The added packaged-sibling probe
+  validates the native helper's exact SMART read arguments without opening a
+  device: **1/1**, 0.407 s (`build/smart-gradient-native-args.log`).
+- Hardware UI/parser suite: **26/26**, 56.786 s (`build/smart-gradient-ui.log`).
+  After compacting the disk tabs, the targeted 880-pixel bilingual layout plus
+  packaging contracts passed **4/4**, 1.207 s (`build/smart-gradient-layout-final.log`).
+  Full SMART fixture previews are `build/ui-revision/smart-complete-{zh,en}.png`.
+- Final parser/report/package-policy checks: **23/23**, 0.058 s
+  (`build/smart-gradient-parser-final.log`); report and scoring references:
+  **22/22**, 0.199 s (`build/smart-gradient-report.log`). These overlap prior
+  suites; do not add them into a unique-test total.
+- Structured fixtures cover all NVMe sensors, exact 128-bit counters, SCSI-only
+  logs, ATA normalized/raw values, more than 512 rows, standby, denied access,
+  privacy in tables/exports, empty tables and preserved tab selection. They are
+  not measurements of the user's M4 Pro or its attached SSD.
+- All six native packages now build the checksum-pinned standalone smartctl 7.5
+  and include its unmodified source archive, GPL license and build recipe.
+  Installer acceptance checks the actual bundled executable and native-helper
+  launch, source hash/license payload and read-only argument parsing (`--help`,
+  no device access). This catches the invalid `-jv` spelling; production uses
+  `-x --json=v -n standby`. Runtime inventory may still report permission or
+  device-support limitations; it must not report a missing bundled reader.
+
 Current startup-permission policy (supersedes the manual authorization UI below):
 **116 passed, 0 skipped** in the changed/relevant local suites.
 

@@ -30,9 +30,11 @@ class InspectionFailure(RuntimeError):
 def operation(args):
     name = Path(args[0]).name.lower()
     if name in {"smartctl", "smartctl.exe"}:
+        if args[1:] == ["--version"]:
+            return "smart-version"
         if args[1:] == ["--scan", "-j"]:
             return "scan"
-        if len(args) == 6 and args[1:5] == ["-a", "-j", "-n", "standby"]:
+        if len(args) == 6 and args[1:5] == ["-x", "--json=v", "-n", "standby"]:
             import re
             if re.fullmatch(r"/dev/(?:sd[a-z]+|nvme\d+(?:n\d+)?|disk\d+|pd\d+)", args[5]):
                 return "smart " + args[5]

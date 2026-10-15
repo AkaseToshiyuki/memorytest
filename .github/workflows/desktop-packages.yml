@@ -74,7 +74,7 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           path-type: inherit
-          install: ${{ matrix.msys_packages }}
+          install: make ${{ matrix.msys_packages }}
       - name: NSIS host tool path (payload keeps its native architecture)
         if: runner.os == 'Windows'
         run: echo "MAKENSIS=$(cygpath -m /ucrt64/bin/makensis.exe)" >> "$GITHUB_ENV"
@@ -97,6 +97,7 @@ jobs:
           python -m unittest discover -s tests -p test_monitor_continuity.py -v
           python -m unittest discover -s tests -p test_hardware_tools.py -v
           python -m unittest discover -s tests -p test_hardware_access.py -v
+          python -m unittest discover -s tests -p test_smart_packaging.py -v
       - name: Cache regression, presentation and bounded stress supervision
         run: |
           python -m unittest discover -s tests -p test_diagnostic_kernels.py -v

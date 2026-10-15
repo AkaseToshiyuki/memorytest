@@ -42,6 +42,7 @@ COMPARABILITY = {
     "cpu_multi": "ComputeMark v2: fixed scalar uint64/binary64 kernels, direct common wall-time and counted work. Linux verifies CPU pinning; Windows verifies pinning within the current process group (not necessarily the whole machine); macOS verifies USER_INITIATED QoS, NOT pinning or P-core selection. Compare matching version/profile/compiler and placement policy; never mix placement policies in rankings. Scalar workload rating, not peak SIMD or universal application speed. Native Windows/Apple Silicon validation remains required.",
 }
 COMPARABILITY["cpu_multi"] += " Sampling repeat20-outer-iqr3-v1 is distinct from legacy5-median; kernel/operations/formula are unchanged."
+COMPARABILITY["cpu_multi"] += " New runs measure powers-of-two-plus-max-v1 thread stages; legacy endpoint-only archives retain their measured endpoints."
 COMPARABILITY["inter_core"] += " Intercore-v3 retains 20 ordered samples per direction/metric with outer-IQR/drift policy."
 for _child, (_parent, _mode) in SUBTESTS.items():
     COMPARABILITY[_child] = COMPARABILITY[_parent]

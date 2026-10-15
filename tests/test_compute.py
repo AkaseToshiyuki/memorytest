@@ -37,6 +37,48 @@ def fixture(threads=2):
 
 
 class ScoreContractTests(unittest.TestCase):
+    def test_all_gradient_samples_and_non_linear_measured_curve(self):
+        from result_model import build_module
+        data = fixture(14)
+        data.update(scaling_protocol="powers-of-two-plus-max-v1", thread_counts=[1, 2, 4, 8, 14])
+        records = []
+        for original in data["records"]:
+            if original["threads"] != 1:
+                continue
+            for n, elapsed in [(1, 100), (2, 120), (4, 150), (8, 200), (14, 280)]:
+                record = copy.deepcopy(original)
+                record["threads"] = n
+                for sample in record["samples"]:
+                    sample["operations"] *= n
+                    sample["elapsed_ns"] = elapsed * 1_000_000
+                records.append(record)
+        data["records"] = records
+        score = compute_mark_score(data)
+        self.assertEqual(score.thread_counts, [1, 2, 4, 8, 14])
+        self.assertEqual(score.integer_scaling, [24, 40, 64, 96, 120])
+        self.assertEqual(score.fp64_scaling, [12, 20, 32, 48, 60])
+        with tempfile.TemporaryDirectory(prefix="memorytest-gradient-") as directory:
+            root = Path(directory)
+            (root / "compute_mark_v2.json").write_text(json.dumps(data))
+            (root / "cpu_multi_core_report.md").write_text("# CPU fixture\n")
+            result = build_module("cpu_multi", root)
+            self.assertEqual(result.charts[0].x, [1, 2, 4, 8, 14])
+            self.assertEqual(result.charts[0].series[0]["values"], [24, 40, 64, 96, 120])
+            self.assertEqual(result.tables[0].rows[-1], [14, 120, 5])
+        for counts in ([1, 2, 4, 8], [1, 2, 4, 8, 16], [1, 2, 3, 8, 14], [True, 2, 4, 8, 14], [1, 2, 4, 8, 8, 14]):
+            bad = copy.deepcopy(data); bad["thread_counts"] = counts
+            with self.subTest(counts=counts), self.assertRaises(ValueError):
+                compute_mark_score(bad)
+        for mode in ("missing", "duplicate", "bad-sample", "unknown-protocol", "missing-protocol"):
+            bad = copy.deepcopy(data)
+            if mode == "missing": bad["records"].pop(2)
+            if mode == "duplicate": bad["records"].append(copy.deepcopy(bad["records"][2]))
+            if mode == "bad-sample": bad["records"][2]["samples"][0]["operations"] = 1
+            if mode == "unknown-protocol": bad["scaling_protocol"] = "interpolated"
+            if mode == "missing-protocol": del bad["scaling_protocol"]
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                compute_mark_score(bad)
+
     def test_repeat20_protocol_recomputes_and_preserves_legacy(self):
         data = fixture()
         data.update(sampling_protocol="repeat20-outer-iqr3-v1", sample_count=20)
@@ -238,6 +280,20 @@ class NativeKernelTests(unittest.TestCase):
             _ctypes.FreeLibrary(cls.lib._handle)
         cls.temp.cleanup()
 
+    def test_native_thread_schedule_without_starting_workers(self):
+        probe = self.path / ("schedule.exe" if os.name == "nt" else "schedule")
+        subprocess.run([*self.cc, "-O2", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                        str(ROOT / "tests/thread_schedule_probe.c"), "-o", str(probe)], check=True, capture_output=True)
+        vectors = {1: [1], 2: [1, 2], 3: [1, 2, 3], 14: [1, 2, 4, 8, 14],
+                   16: [1, 2, 4, 8, 16], 17: [1, 2, 4, 8, 16, 17],
+                   262144: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
+                            8192, 16384, 32768, 65536, 131072, 262144]}
+        for maximum, expected in vectors.items():
+            run = subprocess.run([str(probe), str(maximum)], check=True, capture_output=True, text=True, timeout=5)
+            self.assertEqual([int(n) for n in run.stdout.split()], expected)
+        for maximum in (0, -1, 262145):
+            self.assertEqual(subprocess.run([str(probe), str(maximum)], capture_output=True, timeout=5).returncode, 1)
+
     def test_integer_kernel_against_python_masked_arithmetic(self):
         mask = (1 << 64) - 1
         for iterations in [0, 1, 2, 64, 4096]:
@@ -282,6 +338,8 @@ class NativeKernelTests(unittest.TestCase):
         data = json.loads((work / "reports/compute_mark_v2.json").read_text())
         score = compute_mark_score(data)
         self.assertEqual(data["available_cpus"], chosen)
+        self.assertEqual(data["scaling_protocol"], "powers-of-two-plus-max-v1")
+        self.assertEqual(data["thread_counts"], list(range(1, len(chosen) + 1)))
         self.assertEqual(score.threads, len(chosen))
         self.assertEqual(score.scope, "all-allowed")
         # Independent calculation from the raw samples, not score_to_dict output.

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QProcess, QTimer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
     QGridLayout, QHeaderView, QHBoxLayout, QPushButton, QScrollArea, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from desktop_theme import card, label, set_tone
 from i18n import MESSAGES, tr
@@ -19,7 +19,7 @@ MAX_OUTPUT = 2_000_000
 
 def public_snapshot(snapshot, show_serials=False):
     result = copy.deepcopy(snapshot)
-    operational = {"smartctl_missing", "smart_read_error", "hardware_read_failed", "hardware_no_devices", "hardware_permission_denied"}
+    operational = {"smartctl_missing", "smart_read_error", "smart_standby", "hardware_read_failed", "hardware_no_devices", "hardware_permission_denied"}
     result["notices"] = [key for key in result.get("notices", []) if key in operational]
     for dev in result.get("devices", []):
         dev["notices"] = [key for key in dev.get("notices", []) if key in operational]
@@ -29,6 +29,9 @@ def public_snapshot(snapshot, show_serials=False):
                 for field in group.get("fields", []):
                     if field.get("private"):
                         field["value"] = None
+            for spec in dev.get("tables", []):
+                for row, column in spec.get("private_cells", []):
+                    spec["rows"][row][column] = None
     return result
 
 
@@ -208,6 +211,10 @@ class HardwarePage(QWidget):
             self.process.waitForFinished(1500)
 
     def local(self, key):
+        if str(key).startswith("temperature_sensors[") and str(key).endswith("]"):
+            index = str(key)[20:-1]
+            if index.isdigit():
+                return self.local("temperature_sensor") + " " + str(int(index) + 1)
         lookup = "hw_" + str(key)
         return tr(lookup, self.window.language) if lookup in MESSAGES else str(key)
 
@@ -252,16 +259,18 @@ class HardwarePage(QWidget):
         position = self.scroll.verticalScrollBar().value()
         old = self.scroll.takeWidget()
         if old:
+            for tabs in old.findChildren(QTabWidget):
+                setattr(self, tabs.objectName() + "_index", tabs.currentIndex())
             old.deleteLater()
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 8, 8, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(8 if self.kind == "disk" else 14)
         devs = self.snapshot.get("devices", []) if self.snapshot else []
         index = self.selector.currentIndex()
         dev = devs[index] if 0 <= index < len(devs) else None
         notices = set((self.snapshot or {}).get("notices", []) + (dev.get("notices", []) if dev else []))
-        for key in ("smartctl_missing", "smart_read_error", "hardware_permission_denied", "hardware_read_failed"):
+        for key in ("smartctl_missing", "smart_read_error", "smart_standby", "hardware_permission_denied", "hardware_read_failed"):
             if key not in notices:
                 continue
             notice = label(tr(key, self.window.language), "status")
@@ -269,24 +278,8 @@ class HardwarePage(QWidget):
             layout.addWidget(notice)
         if dev:
             if self.kind == "disk":
-                health = dev.get("health", "smart_unknown")
-                metrics = {f["name"]: f for section in dev.get("groups", []) for f in section["fields"]}
-                summary = QHBoxLayout()
-                for name in ("health", "temperature", "power_on_hours"):
-                    panel, body = card()
-                    body.addWidget(label(self.local(name), "muted"))
-                    value = label(self.local(health) if name == "health" else self.value(metrics.get(name, {})), "metric")
-                    if name == "health" and health == "smart_unknown" and metrics.get("smart_os_status", {}).get("value") == "Verified":
-                        value.setText(tr("hardware_os_verified_only", self.window.language))
-                    value.setWordWrap(True)
-                    value.setMinimumWidth(0)
-                    if name == "health":
-                        value.setObjectName("disk-health")
-                        set_tone(value, {"smart_passed": "passed", "smart_failed": "failed"}.get(health, "unsupported"))
-                    body.addWidget(value)
-                    summary.addWidget(panel, 1)
-                layout.addLayout(summary)
-            for section in dev.get("groups", []):
+                self.render_disk(dev, layout)
+            for section in ([] if self.kind == "disk" else dev.get("groups", [])):
                 panel, body = card()
                 body.addWidget(label(self.local(section["title"]), "section"))
                 grid = QGridLayout()
@@ -308,7 +301,7 @@ class HardwarePage(QWidget):
                 grid.setColumnStretch(3, 1)
                 body.addLayout(grid)
                 layout.addWidget(panel)
-            for spec in dev.get("tables", []):
+            for spec in ([] if self.kind == "disk" else dev.get("tables", [])):
                 panel, body = card()
                 body.addWidget(label(self.local(spec["title"]), "section"))
                 view = QTableWidget(len(spec["rows"]), len(spec["columns"]))
@@ -330,9 +323,91 @@ class HardwarePage(QWidget):
             empty.setWordWrap(True)
             empty.setAlignment(Qt.AlignCenter)
             layout.addWidget(empty, 1)
-        layout.addStretch()
+        if self.kind != "disk" or not dev:
+            layout.addStretch()
         self.scroll.setWidget(root)
         self.scroll.verticalScrollBar().setValue(position)
+
+    def render_disk(self, dev, layout):
+        basic = QTabWidget()
+        basic.setObjectName("disk_basic_tabs")
+        basic.setMinimumWidth(0)
+        basic.setFixedHeight(148)
+        basic.setStyleSheet("QTabBar::tab { padding: 6px 10px; }")
+        health = dev.get("health", "smart_unknown")
+        sections = copy.deepcopy(dev.get("groups", []))
+        if not any(s["title"] == "smart_summary" for s in sections):
+            sections.append({"title": "smart_summary", "fields": [
+                {"name": "health", "value": health}, {"name": "temperature", "value": None},
+                {"name": "power_on_hours", "value": None}]})
+        metrics = {f["name"]: f for section in sections for f in section["fields"]}
+        for section in sections:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            content = QWidget()
+            grid = QGridLayout(content)
+            grid.setContentsMargins(8, 6, 8, 6)
+            grid.setHorizontalSpacing(16)
+            grid.setVerticalSpacing(4)
+            for n, field in enumerate(section["fields"]):
+                row, column = n // 2, n % 2 * 2
+                key = label(self.local(field["name"]), "muted")
+                key.setWordWrap(True)
+                val = label(self.value(field), "value")
+                val.setMinimumWidth(0)
+                val.setWordWrap(True)
+                val.setTextFormat(Qt.PlainText)
+                val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                val.setToolTip(field.get("source", ""))
+                if field["name"] == "health":
+                    val.setObjectName("disk-health")
+                    set_tone(val, {"smart_passed": "passed", "smart_failed": "failed"}.get(health, "unsupported"))
+                    if health == "smart_unknown" and metrics.get("smart_os_status", {}).get("value") == "Verified":
+                        val.setText(tr("hardware_os_verified_only", self.window.language))
+                grid.addWidget(key, row, column, Qt.AlignTop)
+                grid.addWidget(val, row, column + 1, Qt.AlignTop)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(3, 1)
+            grid.setRowStretch(grid.rowCount(), 1)
+            area.setWidget(content)
+            basic.addTab(area, self.local(section["title"]))
+        basic.setCurrentIndex(min(getattr(self, "disk_basic_tabs_index", 0), basic.count() - 1))
+        layout.addWidget(basic)
+        detail = QTabWidget()
+        detail.setObjectName("disk_detail_tabs")
+        detail.setStyleSheet("QTabBar::tab { padding: 6px 10px; } QHeaderView::section { padding: 4px; }")
+        detail.setMinimumWidth(0)
+        detail.setMinimumHeight(180)
+        specs = dev.get("tables", []) or [{"title": "smart_details", "columns": ["parameter", "value", "unit"],
+                                         "rows": [], "source": ""}]
+        for spec in specs:
+            view = QTableWidget(len(spec["rows"]), len(spec["columns"]))
+            view.setObjectName("disk_smart_table")
+            view.setHorizontalHeaderLabels([self.local(key) for key in spec["columns"]])
+            view.setEditTriggers(QTableWidget.NoEditTriggers)
+            view.setAlternatingRowColors(True)
+            view.verticalHeader().hide()
+            view.verticalHeader().setDefaultSectionSize(26)
+            view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+            view.horizontalHeader().setStretchLastSection(True)
+            private = {tuple(cell) for cell in spec.get("private_cells", [])}
+            for row, cells in enumerate(spec["rows"]):
+                for column, value in enumerate(cells):
+                    display = (tr("serial_hidden", self.window.language) if (row, column) in private and not self.serials.isChecked()
+                               else self.local(value) if value is not None else "—")
+                    item = QTableWidgetItem(display)
+                    item.setToolTip(str(cells[0]) if column == 0 else display)
+                    view.setItem(row, column, item)
+            if len(spec["columns"]) == 3:
+                view.setColumnWidth(0, 360)
+                view.setColumnWidth(1, 200)
+            else:
+                for column in range(len(spec["columns"])):
+                    view.setColumnWidth(column, 230 if column == 1 else 140 if column == 5 else 75)
+            view.setToolTip(spec.get("source", ""))
+            detail.addTab(view, self.local(spec["title"]))
+        detail.setCurrentIndex(min(getattr(self, "disk_detail_tabs_index", 0), detail.count() - 1))
+        layout.addWidget(detail, 1)
 
     def serialized(self):
         return json.dumps(public_snapshot(self.snapshot, self.serials.isChecked()), ensure_ascii=False, indent=2, allow_nan=False)

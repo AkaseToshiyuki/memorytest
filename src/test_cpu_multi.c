@@ -8,6 +8,7 @@
 #endif
 #include "compute_kernel.h"
 #include "sample_statistics.h"
+#include "thread_schedule.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
@@ -344,6 +345,11 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
             available, threads, __VERSION__, CM_BUILD_PROFILE);
     fprintf(md, "| Placement policy | %s |\n| Exact CPU affinity verified | %s |\n\n",
             CM_PLACEMENT, CM_AFFINITY);
+    int thread_levels[CM_MAX_THREAD_LEVELS];
+    int level_count_scaling = cm_thread_schedule(threads, thread_levels);
+    fprintf(md, "Thread gradient (" CM_SCALING "): ");
+    for (int i = 0; i < level_count_scaling; ++i) fprintf(md, "%s%d", i ? ", " : "", thread_levels[i]);
+    fprintf(md, ". Each stage is independently calibrated and measured.\n\n");
 #ifdef __APPLE__
     DarwinPerfLevel levels[DARWIN_MAX_PERF_LEVELS];
     size_t level_count = darwin_perflevels(levels, DARWIN_MAX_PERF_LEVELS);
@@ -431,7 +437,9 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
     for (int i = 0; i < available; ++i) fprintf(json, "%s%d", i ? "," : "", cpus[i]);
     fprintf(json, "]");
 #endif
-    fprintf(json, ",\"sampling_protocol\":\"" CM_SAMPLING "\",\"sample_count\":%u,\"records\":[", CM_REPEATS);
+    fprintf(json, ",\"scaling_protocol\":\"" CM_SCALING "\",\"thread_counts\":[");
+    for (int i = 0; i < level_count_scaling; ++i) fprintf(json, "%s%d", i ? "," : "", thread_levels[i]);
+    fprintf(json, "],\"sampling_protocol\":\"" CM_SAMPLING "\",\"sample_count\":%u,\"records\":[", CM_REPEATS);
     for (int i = 0; i < count; ++i) {
         Result *r = &results[i];
         fprintf(json, "%s{\"workload\":\"%s\",\"threads\":%d,\"iterations_per_thread\":%" PRIu64
@@ -495,13 +503,18 @@ int main(int argc, char **argv) {
         free(cpus); return 1;
     }
     int threads = requested ? requested : available;
-    printf("ComputeMark v2: %d available logical CPUs, testing 1 and %d threads; %s\n", available, threads, CM_PLACEMENT);
-    Result results[4] = {{0}};
+    int levels[CM_MAX_THREAD_LEVELS];
+    int level_count = cm_thread_schedule(threads, levels);
+    if (!level_count) { free(cpus); return 1; }
+    printf("ComputeMark v2: %d available logical CPUs, thread gradient:", available);
+    for (int i = 0; i < level_count; ++i) printf(" %d", levels[i]);
+    printf("; %s\n", CM_PLACEMENT);
+    Result results[2 * CM_MAX_THREAD_LEVELS] = {{0}};
     int count = 0;
     for (int kind = 0; kind < 2; ++kind) {
-        for (int pass = 0; pass < (threads == 1 ? 1 : 2); ++pass) {
+        for (int pass = 0; pass < level_count; ++pass) {
             Result *r = &results[count++];
-            r->kind = kind; r->threads = pass ? threads : 1;
+            r->kind = kind; r->threads = levels[pass];
             if (benchmark(r, cpus, slots)) { free(cpus); return 1; }
             printf("%s / %d threads: %.6f %s\n", kind ? "FP64" : "Integer", r->threads,
                    r->rate, kind ? "GFLOP/s" : "Gop/s");

@@ -12,6 +12,7 @@ CLANG_FLAGS = "-O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=
 KERNEL_HASH = "a05a8fc6700545d9a6dd5dfa6221caf7550ff89b65ad3749b586af5dde51e5d5"
 REPEATS = 5
 SAMPLING_PROTOCOL = "repeat20-outer-iqr3-v1"
+SCALING_PROTOCOL = "powers-of-two-plus-max-v1"
 MIN_NS = 100_000_000
 
 
@@ -40,6 +41,10 @@ class ComputeMarkScore:
     os: str
     sampling_protocol: str
     sample_count: int
+    scaling_protocol: str
+    thread_counts: list[int]
+    integer_scaling: list[float]
+    fp64_scaling: list[float]
 
 
 def _positive_int(value, name):
@@ -116,6 +121,18 @@ def compute_mark_score(data):
         scope = "all-online" if threads == available else f"limited-{threads}"
     else:
         raise ValueError("unsupported placement policy")
+    scaling = data.get("scaling_protocol", "single-and-max-v1")
+    if scaling == SCALING_PROTOCOL:
+        # Validate against a separate arithmetic specification, not the native
+        # schedule function. Every intermediate level must have raw samples.
+        counts = [2**exponent for exponent in range(19) if 2**exponent < threads] + [threads]
+        supplied = data.get("thread_counts")
+        if not isinstance(supplied, list) or any(type(n) is not int for n in supplied) or supplied != counts:
+            raise ValueError("invalid thread gradient")
+    elif scaling == "single-and-max-v1" and "scaling_protocol" not in data and "thread_counts" not in data:
+        counts = sorted({1, threads})
+    else:
+        raise ValueError("unsupported thread scaling protocol")
     for key in ["compiler", "architecture"]:
         if not isinstance(data.get(key), str) or not data[key].strip():
             raise ValueError(f"missing {key}")
@@ -133,7 +150,7 @@ def compute_mark_score(data):
             raise ValueError("unknown measured workload")
         count = _positive_int(record.get("threads"), "record threads")
         key = kind, count
-        if key in rates or count not in {1, threads}:
+        if key in rates or count not in counts:
             raise ValueError("duplicate/unexpected thread record")
         per_iteration = 24 if kind == "integer" else 12
         if record.get("operations_per_iteration") != per_iteration:
@@ -170,9 +187,9 @@ def compute_mark_score(data):
         median = statistics.median(value for i, value in enumerate(observed) if i not in excluded)
         rates[key] = median
         spreads.append((max(observed) - min(observed)) / raw_median * 100)
-    required = {(kind, n) for kind in ["integer", "fp64"] for n in {1, threads}}
+    required = {(kind, n) for kind in ["integer", "fp64"] for n in counts}
     if set(rates) != required:
-        raise ValueError("missing single/multi integer or FP64 measurements")
+        raise ValueError("missing integer or FP64 thread-gradient measurements")
     def points(n):
         return math.floor(1000 * math.sqrt(rates["integer", n] * rates["fp64", n]) + 0.5)
     return ComputeMarkScore(
@@ -180,7 +197,8 @@ def compute_mark_score(data):
         rates["integer", 1], rates["fp64", 1], threads, available, cpu_ids,
         PROFILE, WORKLOAD, data["compiler"], data["architecture"], KERNEL_HASH,
         scope, max(spreads), max(spreads) <= 15.0 and not unstable, policy, data["affinity_verified"], data.get("os", "Linux"),
-        sampling, repeats,
+        sampling, repeats, scaling, counts,
+        [rates["integer", n] for n in counts], [rates["fp64", n] for n in counts],
     )
 
 
