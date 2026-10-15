@@ -48,6 +48,15 @@ class SmartPackagingTests(unittest.TestCase):
             with patch.object(hardware_inspector, "ROOT", root), patch.object(hardware_inspector.shutil, "which", return_value="system-smartctl"):
                 self.assertEqual(hardware_inspector.find_tool("smartctl"), str(binary))
 
+    def test_msys_paths_do_not_become_c_escape_sequences(self):
+        original = r"D:\a\_temp\msys64\ucrt64\lib\pkgconfig;D:\a\_temp\msys64\ucrt64\share\pkgconfig"
+        with patch.dict(build.os.environ, {"PKG_CONFIG_PATH": original}), patch.object(build.shutil, "which", return_value=None):
+            _, environment = build.build_options(True, "AMD64", "gcc")
+            self.assertEqual(environment["PKG_CONFIG_PATH"], "D:/a/_temp/msys64/ucrt64/lib/pkgconfig;D:/a/_temp/msys64/ucrt64/share/pkgconfig")
+            self.assertEqual(build.os.environ["PKG_CONFIG_PATH"], original)
+            _, posix = build.build_options(False, "arm64", "clang")
+            self.assertNotIn("PKG_CONFIG_PATH", posix)
+
 
 if __name__ == "__main__":
     unittest.main()

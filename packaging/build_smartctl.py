@@ -45,6 +45,13 @@ def build_options(windows, machine, compiler):
     if windows:
         architecture = "aarch64" if machine.lower() in {"arm64", "aarch64"} else "x86_64"
         options += [f"--host={architecture}-w64-mingw32"]
+        # Autoconf embeds these environment values in a C string in config.h.
+        # MSYS2 exposes Windows paths with backslashes (e.g. \ucrt64), which
+        # become invalid C universal-character escapes. Forward slashes retain
+        # the paths and Windows ';' list separator without modifying upstream.
+        for name in ("PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "PKG_CONFIG_SYSROOT_DIR"):
+            if name in os.environ:
+                environment[name] = os.environ[name].replace("\\", "/")
         resource_compiler = shutil.which("windres") or shutil.which("llvm-windres")
         if resource_compiler:
             environment["WINDRES"] = resource_compiler.replace("\\", "/")

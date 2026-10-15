@@ -298,6 +298,11 @@ SMART detail and thread-gradient follow-up (2026-10-15):
   no device access). This catches the invalid `-jv` spelling; production uses
   `-x --json=v -n standby`. Runtime inventory may still report permission or
   device-support limitations; it must not report a missing bundled reader.
+- Native CI exposed MSYS2 backslashes in `PKG_CONFIG_PATH` being embedded by
+  upstream Autoconf in a C string (`\ucrt64` became an invalid universal escape).
+  The Windows-only build environment now normalizes pkg-config paths to forward
+  slashes while preserving Windows path-list separators. Source remains unmodified.
+  A dedicated regression checks the transformation and unchanged parent/POSIX environments.
 
 Current startup-permission policy (supersedes the manual authorization UI below):
 **116 passed, 0 skipped** in the changed/relevant local suites.
