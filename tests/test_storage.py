@@ -197,8 +197,10 @@ class DesktopArchiveTests(unittest.TestCase):
         window = self.window()
         page = window.stress_page
         self.assertEqual(page.run_dir, directory)
-        self.assertEqual(list(page.plot.samples), [(2, {"cpu": 20})])
-        self.assertEqual(page.stats["cpu"]["average"], 20)
+        self.assertEqual(list(page.plot.samples), [])
+        self.assertEqual(page.stats, {})
+        self.assertEqual(page.preview_stats.rows, {})
+        self.assertEqual(page.session_elapsed, 2)
         self.assertFalse(page.active)
         self.assertEqual(page.preview.state(), QProcess.NotRunning)
         self.assertEqual(page.process.state(), QProcess.NotRunning)
@@ -269,6 +271,9 @@ class DesktopArchiveTests(unittest.TestCase):
         page = window.stress_page
         page.caps = {"modes": {"cpu": True}, "threads": 1}
         page.run_dir = self.root
+        preview = patch.object(page, "start_preview")
+        preview.start()
+        self.addCleanup(preview.stop)
         window.show()
         window.tools_button.click()
         self.app.processEvents()

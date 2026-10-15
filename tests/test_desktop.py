@@ -137,6 +137,73 @@ class WindowTests(unittest.TestCase):
             self.window.pages["cpu_alu"].run.click()
         begin.assert_called_once_with(["cpu_alu"])
 
+    def test_all_module_actions_are_equal_width_and_fill_the_row(self):
+        self.window.show()
+        for language in ("zh", "en"):
+            self.window.language = language
+            self.window.retranslate()
+            for width in (880, 1400):
+                self.window.resize(width, 850)
+                for index, (group, tabs) in enumerate(self.window.group_tabs.items(), 1):
+                    self.window.tabs.setCurrentIndex(index)
+                    for child in range(tabs.count()):
+                        tabs.setCurrentIndex(child)
+                        self.app.processEvents()
+                        page = tabs.widget(child)
+                        buttons = (page.run, page.cancel, page.open, page.log_button)
+                        widths = [button.width() for button in buttons]
+                        self.assertLessEqual(max(widths) - min(widths), 1, page.name)
+                        self.assertEqual(buttons[0].x(), 0, page.name)
+                        self.assertLessEqual(abs(buttons[-1].geometry().right() + 1 - page.width()), 1, page.name)
+
+    def test_status_colors_reset_on_requeue_and_follow_actual_state(self):
+        from PySide6.QtGui import QPalette
+        from desktop_theme import apply_theme, set_tone
+        from presentation import THEMES
+        name = "cpu_float"
+        widget = self.window.labels[name]
+        for theme in ("dark", "light"):
+            self.window.theme = theme
+            apply_theme(theme)
+            self.window.module_status[name] = "passed"
+            set_tone(widget, "passed")
+            with patch.object(self.window.process, "start"):
+                self.window.begin([name])
+            self.assertEqual(widget.property("tone"), "queued")
+            widget.ensurePolished()
+            self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[theme]["muted"])
+            for status, color in (("running", "success"), ("failed", "error"),
+                                  ("unsupported", "warning"), ("queued", "muted")):
+                self.window.module_status[name] = status
+                self.window.retranslate()
+                self.app.processEvents()
+                self.assertEqual(widget.property("tone"), status)
+                self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[theme][color])
+            self.window.set_running(False)
+            self.window.control.cleanup()
+            self.window.control = None
+
+    def test_only_running_status_flashes_and_stops_on_completion(self):
+        from PySide6.QtGui import QPalette
+        from presentation import THEMES
+        name = "cpu_alu"
+        self.window.handle_event({"type": "module", "module": name, "status": "running"})
+        widget = self.window.labels[name]
+        self.assertTrue(self.window.status_timer.isActive())
+        self.assertEqual(self.window.status_timer.interval(), 600)
+        self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[self.window.theme]["success"])
+        self.window.pulse_status()
+        self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[self.window.theme]["muted"])
+        self.assertEqual(self.window.pages[name].summary.property("pulse"), "off")
+        self.window.retranslate()
+        self.assertEqual(widget.property("pulse"), "off")
+        self.window.pulse_status()
+        self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[self.window.theme]["success"])
+        self.window.handle_event({"type": "module", "module": name, "status": "failed"})
+        self.assertFalse(self.window.status_timer.isActive())
+        self.assertEqual(widget.property("pulse"), "steady")
+        self.assertEqual(widget.palette().color(QPalette.WindowText).name(), THEMES[self.window.theme]["error"])
+
     def test_cache_and_memory_selection_are_real_independent_tasks(self):
         from benchmark_registry import SUBTESTS
         self.assertNotIn("cache_hierarchy", self.window.modules)

@@ -10,6 +10,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--hardware-info":
         from system_info import main as hardware
         return hardware()
+    if len(sys.argv) > 1 and sys.argv[1] == "--hardware-tool":
+        from hardware_inspector import main as inspect_hardware
+        return inspect_hardware(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in {"--stress-worker", "--gpu-worker", "--sensor-worker"}:
         if sys.argv[1] == "--stress-worker":
             from run_stress import main as worker

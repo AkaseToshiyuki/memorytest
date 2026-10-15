@@ -533,6 +533,44 @@ P1 修核间绑定与完成协议；P2 再统一缓存实验协议、平台覆�
 
 ## 0.1.1 测试版本
 
+### 实时监控修复与四个参数工具（2026-10-15）
+
+- 压力页打开即启动只读监控，不再被已恢复的历史报告阻止。负载结束后页面仍可见时，
+  继续使用原监控进程；隐藏且无负载时暂停，快速切回会在旧进程退出后恢复。
+  历史压力报告仍可导出，但历史样本／统计不混入本次启动的实时曲线。
+- 压力页按负载设置、实时监控、传感器统计和报告操作分区；负载设置可收起。
+  小窗口允许滚动，保留图表／表格最小可读高度，监控时钟与负载用时分开。
+- 所有测试子页四个操作按钮均等宽铺满；状态文字和颜色同步更新，包括历史结果重新排队
+  与工作进程失败：运行中按 600 ms 相位在绿色与原文字色间交替，失败红色、排队中非强调色、
+  不可用黄色；离开运行状态即停止闪烁。界面不展示开发说明、实现思路或长篇声明。
+- 小工具包含压力测试、CPU 参数、GPU 参数、DRAM 参数、磁盘 SMART。
+  参数页按需启动有时限的本地工作进程；支持设备选择、手动刷新、取消、复制和 JSON 导出。
+  默认隐藏序列号，复制／导出同样隐藏；勾选显示后才包含序列号。
+  所有参数是带采集时间和来源的快照，不冒充每核心实时测量；刷新失败不保留旧的健康状态。
+
+| 工具 | 当前本地读取 | 不等同于原软件的功能边界 |
+|---|---|---|
+| CPU 参数 | Linux `/proc`、sysfs、lscpu；Mac sysctl；Windows CIM。型号、拓扑、缓存、系统公开的频率／指令和主板／固件字段 | 不推算制程、TDP、实时核心电压；不同平台公开字段不同 |
+| GPU 参数 | Linux DRM／PCI、Mac system_profiler、Windows CIM；可用时补充 NVIDIA 驱动快照，支持多设备选择 | 不把共享内存当独立显存，不用可能截断的 32 位 WMI 显存容量；不保存／刷写显卡 BIOS |
+| DRAM 参数 | 系统内存概览与 SMBIOS／system_profiler 模块信息；Linux 安装 decode-dimms 且已有可读 EEPROM 接口时展示 SPD 明细 | 系统／固件声明不是 SPD，也不是当前时序；不猜 XMP／EXPO，不写 SPD、不加载驱动。Apple 统一内存通常无 DIMM SPD 接口；本版未实现 Windows/Mac 专用 SPD 驱动 |
+| 磁盘 SMART | OS 磁盘清单；本机可用的 smartctl 提供 ATA 属性和 NVMe 健康日志，显示温度、通电时间、磨损及警告 | 不把 OS “OK”当完整 SMART 通过；完整属性需 smartmontools、硬件支持和读取权限。本版不随包内置 smartctl，不自动提权／开启 SMART／启动自检或修复 |
+
+SMART 读取保留 smartctl 非零退出码中的健康告警，区分命令失败、故障与历史告警。
+NVMe 已用耐久度可超过 100%，不转换成武断的剩余寿命。ATA 原始值保留提供方格式和名称，
+不套用统一寿命算法。使用 `-n standby` 请求避免唤醒休眠盘，但设备／桥接不支持时不能保证。
+工具不会联网查询型号数据库或上传设备信息。参数查看本身不启动基准或压力负载。
+
+设计依据：[CPU-Z 官方字段说明](https://www.cpuid.com/softwares/cpu-z.html)的分组参数、
+[GPU-Z 官方功能与界面](https://www.techpowerup.com/gpuz/)的设备选择／显卡与传感器信息、
+[Thaiphoon Burner 官方项目页](https://files.fm/ThaiphoonBurner)的模块／SPD 报告，以及
+[CrystalDiskInfo 的磁盘选择与刷新](https://crystalmark.info/en/software/crystaldiskinfo/crystaldiskinfo-main-menu/)、
+[SMART 属性表定义](https://crystalmark.info/en/software/crystaldiskinfo/crystaldiskinfo-smart-information/)。
+“TyphoonDram”按 Thaiphoon Burner 理解。本软件独立实现原生界面，未嵌入这四款软件的
+程序、商标图片或专有驱动，**不是四款软件的全功能替代**。
+接口依据另见 [smartctl 官方手册](https://github.com/smartmontools/smartmontools/blob/master/smartmontools/smartctl.8.in)、
+[微软内存类](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-physicalmemory)与
+[显卡类](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-videocontroller)。
+
 ### 报告管理、监控连续性与开源方法复核（2026-10-15）
 
 - 桌面端不再要求选择目录：优先使用可执行程序所在目录的 `Outputs`；macOS 使用

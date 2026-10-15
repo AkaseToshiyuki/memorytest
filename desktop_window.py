@@ -54,6 +54,10 @@ class MainWindow(QMainWindow):
         self.monitor_permission_resolved = False
         self.status_key = "ready"
         self.module_status = {name: "not_run" if supported(name) else "unsupported" for name in TESTS}
+        self.status_highlight = True
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(600)
+        self.status_timer.timeout.connect(self.pulse_status)
         self.bindings, self.group_buttons, self.log_events = [], [], deque(maxlen=500)
         shell = QWidget()
         shell.setObjectName("shell")
@@ -222,6 +226,10 @@ class MainWindow(QMainWindow):
         self.tools_tabs = QTabWidget()
         self.tools_tabs.setDocumentMode(True)
         self.tools_tabs.addTab(self.stress_page, "")
+        from desktop_hardware import HardwarePage
+        self.hardware_tools = {kind: HardwarePage(kind, self) for kind in ("cpu", "gpu", "dram", "disk")}
+        for page in self.hardware_tools.values():
+            self.tools_tabs.addTab(page, "")
         tools_layout.addWidget(self.tools_tabs)
         self.tabs.addTab(self.tools_page, "")
         self.tabs.tabBar().setTabVisible(4, False)
@@ -402,11 +410,15 @@ class MainWindow(QMainWindow):
                 self.group_tabs[group].setTabText(child, tr(name, self.language))
         self.tabs.setTabText(4, tr("tools", self.language))
         self.tools_tabs.setTabText(0, tr("stress", self.language))
+        for index, (kind, page) in enumerate(self.hardware_tools.items(), 1):
+            self.tools_tabs.setTabText(index, tr("tool_" + kind, self.language))
+            page.retranslate()
         for name, check in self.modules.items():
             check.setText(tr(name, self.language))
             status = self.module_status[name]
             self.labels[name].setText(tr("unavailable" if status == "unsupported" else status, self.language))
             self.labels[name].setToolTip(tr(status, self.language))
+            set_tone(self.labels[name], status)
         self.progress.setFormat(tr("progress", self.language, done="%v", total="%m"))
         self.status.setText(tr(self.status_key, self.language))
         self.log.setPlainText("\n".join(tr(name, self.language) + ": " + tr(status, self.language) for name, status in self.log_events))
@@ -414,6 +426,33 @@ class MainWindow(QMainWindow):
             page.retranslate()
         self.stress_page.retranslate()
         self.refresh_hardware()
+        self.sync_status_indicator()
+
+    def sync_status_indicator(self):
+        running = any(self.module_status[name] == "running" for name in self.labels)
+        stress = getattr(self, "stress_page", None)
+        running = running or bool(stress and stress.active and stress.status_key == "running")
+        if running and not self.closing:
+            if not self.status_timer.isActive():
+                self.status_highlight = True
+                self.status_timer.start()
+        else:
+            self.status_timer.stop()
+            self.status_highlight = True
+        targets = [(widget, self.module_status[name]) for name, widget in self.labels.items()]
+        targets += [(page.summary, page.model.status) for page in self.pages.values()]
+        if stress:
+            tone = {"backend_error": "failed", "io_error": "failed", "device_unavailable": "unsupported"}.get(stress.status_key, stress.status_key)
+            targets.append((stress.status, "not_run" if tone == "running" and not stress.active else tone))
+        for widget, status in targets:
+            phase = "on" if status == "running" and self.status_highlight else "off" if status == "running" else "steady"
+            if widget.property("pulse") != phase or widget.property("tone") != status:
+                widget.setProperty("pulse", phase)
+                set_tone(widget, status)
+
+    def pulse_status(self):
+        self.status_highlight = not self.status_highlight
+        self.sync_status_indicator()
 
     def open_path(self, path):
         if path and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
@@ -503,10 +542,12 @@ class MainWindow(QMainWindow):
     def set_running(self, active):
         self.benchmark_active = active
         self.refresh_controls()
+        self.sync_status_indicator()
 
     def set_stress_running(self, active):
         self.stress_active = active
         self.refresh_controls()
+        self.sync_status_indicator()
         if self.closing and not active:
             self.close()
 
@@ -544,6 +585,7 @@ class MainWindow(QMainWindow):
         for name in modules:
             self.module_status[name] = "queued"
             self.labels[name].setText(tr("queued", self.language))
+            set_tone(self.labels[name], "queued")
             self.pages[name].queued()
         command = app_command("worker") + ["--skip-build", "--skip-charts", "--events-jsonl",
             "--output-dir", str(output), "--bin-dir", str(ROOT / "bin"),
@@ -596,6 +638,12 @@ class MainWindow(QMainWindow):
                 self.progress.setValue(len(self.completed))
                 if self.run_dir:
                     self.pages[name].completed(self.run_dir, data)
+                else:
+                    self.pages[name].model = ModuleResult(name, status)
+                    self.pages[name].progress.setRange(0, 1)
+                    self.pages[name].progress.setValue(1 if status == "passed" else 0)
+                    self.pages[name].retranslate()
+            self.sync_status_indicator()
         elif data["type"] == "finished":
             self.report = Path(data["report"])
             self.open_report.setEnabled(self.report.is_file())
@@ -629,6 +677,7 @@ class MainWindow(QMainWindow):
                 self.pages[name].retranslate()
                 self.module_status[name] = "failed"
                 self.labels[name].setText(tr("failed", self.language))
+                set_tone(self.labels[name], "failed")
         self.set_running(False)
         self.set_status("cleanup_error" if code == 0 and self.status_key == "cleanup_error" else
                         "passed" if code == 0 else "interrupted" if code == 130 else "incomplete")
@@ -640,6 +689,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.closing = True
+        self.status_timer.stop()
+        for page in self.hardware_tools.values():
+            page.shutdown()
         if self.hardware_process.state() != QProcess.NotRunning:
             self.stress_page.kill_tree(self.hardware_process)
             self.hardware_process.waitForFinished(1000)

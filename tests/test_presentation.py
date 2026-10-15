@@ -340,7 +340,10 @@ class NativePresentationTests(unittest.TestCase):
         from benchmark_registry import ROOT
         page = self.window.stress_page
         page.caps = {"modes": {"cpu": True}, "threads": 1}
-        page.run_dir = Path("/fixture")  # No real preview or capability probe.
+        page.run_dir = Path("/fixture")
+        preview = patch.object(page, "start_preview")  # No real sensors in UI fixtures.
+        preview.start()
+        self.addCleanup(preview.stop)
         page.threads.setValue(1)
         for item in page.modes.values():
             item.setEnabled(True)

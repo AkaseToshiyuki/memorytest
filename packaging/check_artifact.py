@@ -103,6 +103,24 @@ def main():
     if any(asset["bytes"] > 100 * 1024 * 1024 for asset in data["assets"]) or data["bundle_bytes"] > 250 * 1024 * 1024:
         raise RuntimeError("Desktop package exceeded 100 MiB compressed / 250 MiB bundle budget")
     check_install_payloads(info, data)
+    # Bounded, read-only native inventory. No elevation or disk self-tests.
+    # Persist capabilities, not disk/module serial numbers, in CI artifacts.
+    inspections = []
+    for kind in ("cpu", "gpu", "dram", "disk"):
+        inspected = subprocess.run([str(binary), "--hardware-tool", "--kind", kind],
+                                   capture_output=True, text=True, timeout=35, check=True)
+        snapshot = json.loads(inspected.stdout)
+        if snapshot.get("schema") != 1 or snapshot.get("kind") != kind or not isinstance(snapshot.get("devices"), list):
+            raise RuntimeError(f"Packaged {kind} inspector returned no valid inventory")
+        if kind in {"cpu", "dram"} and not snapshot["devices"]:
+            raise RuntimeError(f"Packaged {kind} inspector returned no system summary")
+        inspections.append({"schema": snapshot["schema"], "kind": snapshot["kind"],
+            "device_count": len(snapshot["devices"]), "sources": snapshot.get("sources", []),
+            "availability": [{"fields": sorted({field["name"] for group in dev["groups"]
+                              for field in group["fields"] if field.get("value") is not None}),
+                              "tables": [table["title"] for table in dev["tables"]]} for dev in snapshot["devices"]],
+            "notices": snapshot.get("notices", [])})
+    (info.parent / "inspector-check.json").write_text(json.dumps(inspections, indent=2), encoding="utf-8")
     # Exercise the packaged supervisor/report imports without CPU/GPU load.
     with tempfile.TemporaryDirectory(prefix="memorytest-packaged-monitor-") as directory:
         check = subprocess.run([str(binary), "--stress-worker", "--no-load", "--duration", "1.2",

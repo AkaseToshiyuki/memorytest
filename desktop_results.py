@@ -182,13 +182,8 @@ class ModulePage(QWidget):
         for button in (self.cancel, self.open, self.log_button):
             button.setEnabled(False)
         for button in (self.run, self.cancel, self.open, self.log_button):
-            if name.startswith("cache_"):
-                button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-                controls.addWidget(button, 1)
-            else:
-                controls.addWidget(button)
-        if not name.startswith("cache_"):
-            controls.addStretch()
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            controls.addWidget(button, 1)
         layout.addLayout(controls)
         self.summary = label("", "status")
         self.summary.setWordWrap(True)

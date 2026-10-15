@@ -95,6 +95,7 @@ jobs:
           python -m unittest discover -s tests -p test_desktop.py -v
           python -m unittest discover -s tests -p test_storage.py -v
           python -m unittest discover -s tests -p test_monitor_continuity.py -v
+          python -m unittest discover -s tests -p test_hardware_tools.py -v
       - name: Cache regression, presentation and bounded stress supervision
         run: |
           python -m unittest discover -s tests -p test_diagnostic_kernels.py -v

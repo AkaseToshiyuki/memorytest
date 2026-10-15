@@ -6,9 +6,9 @@ from i18n import display, tr
 
 THEMES = {
     "dark": dict(background="#0c111b", surface="#131c29", base="#101824", text="#e5ecf5", muted="#a8b7ca",
-                 border="#34465c", accent="#a9c9ed", button="#203147", selection="#355579", disabled="#8291a5", success="#a0d4c6", error="#f0abb4"),
+                 border="#34465c", accent="#a9c9ed", button="#203147", selection="#355579", disabled="#8291a5", success="#a0d4c6", error="#f0abb4", warning="#e7c56e"),
     "light": dict(background="#f3f6fa", surface="#ffffff", base="#f8fafc", text="#223044", muted="#526378",
-                  border="#c0ccda", accent="#315d85", button="#e5ecf4", selection="#c5d9ee", disabled="#65758a", success="#236858", error="#a82c43"),
+                  border="#c0ccda", accent="#315d85", button="#e5ecf4", selection="#c5d9ee", disabled="#65758a", success="#236858", error="#a82c43", warning="#806000"),
 }
 
 

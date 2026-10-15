@@ -264,3 +264,43 @@ Six-target native installer / four-target portability CI evidence is recorded
 after completion; local Linux checks alone do not establish Mac/Windows runtime behavior.
 No long default working sets, whole-machine matrix, new privileged access or
 unbounded stress load is part of this acceptance run.
+
+### Live monitoring, status pulse and hardware inspector tools (2026-10-15)
+
+Latest local acceptance: **99 passed, 0 skipped** across the relevant suites:
+
+| Suite | Passed | Time | Evidence |
+|---|---:|---:|---|
+| Hardware parser / native UI tools | 18 | 15.123 s | `/tmp/memorytest-hardware-tools-clean-ui.log` |
+| Desktop / status transitions | 16 | 24.346 s | `/tmp/memorytest-ui-pulse-desktop-final.log` |
+| Archive restoration / storage | 17 | 7.724 s | `/tmp/memorytest-ui-pulse-storage.log` |
+| Monitor continuity | 12 | 8.294 s | `/tmp/memorytest-ui-pulse-monitor-final.log` |
+| Bilingual / theme / layout presentation | 19 | 53.145 s | `/tmp/memorytest-ui-pulse-presentation.log` |
+| Existing telemetry contracts | 17 | 1.690 s | `/tmp/memorytest-ui-monitoring-final.log` |
+
+- Async fixture sensor workers update the idle chart after archive restoration,
+  without starting a load. Tests cover visible post-load monitoring, rapid
+  hide/show restart, shutdown, and preserved active-load shared monitoring.
+- Running status alternates green/muted at a configured 600 ms phase; tests check
+  both rendered colors, completion/failure reset, requeue after old success,
+  unsupported yellow and both themes. No pulse timer runs when nothing is running.
+- Every benchmark page has full-width equal action buttons at compact and wide
+  sizes in both languages. Hardware pages cover four language/theme combinations,
+  device selection, no horizontal clipping, and absence of UI methodology prose.
+- Independent fixtures cover OS/firmware versus SPD, Mac unified memory, Windows
+  CIM capacity bounds, identical-name GPU identity, ATA hexadecimal attribute IDs,
+  NVMe warnings and endurance >100%, and smartctl health-bit exit codes.
+  Unknown/unreadable SMART is never a passing health result.
+- Inspector lifecycle checks cover lazy startup, a real CPU-inventory worker,
+  stale-data removal, failed startup, output cap, timeout configuration, serial
+  masking on screen/clipboard/export and explicit serial reveal.
+- `py_compile` and `git diff --check` passed. Preview PNGs in `build/ui-revision/`
+  use labelled test fixtures, not real measured hardware. Actual unprivileged Linux
+  inspection found CPU and four GPU entries; module DMI and SMART reads were
+  permission-limited. No new elevation, load, disk self-test or SPD write was run.
+
+Native installer CI now runs the inspector suite and all four packaged read-only
+inventory commands. `inspector-check.json` records available field names and
+backend status, without hardware serial numbers. Final CI/artifact verification
+is recorded separately after the build; fixture coverage does not certify every
+device's SPD/SMART access or equivalence to the four reference applications.

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import sys
 import unittest
 from unittest.mock import patch, Mock
 
@@ -137,6 +138,77 @@ class MonitorTransitionTests(unittest.TestCase):
         self.assertGreaterEqual(self.page.plot.samples[-1][0], 20)
         self.assertEqual(self.page.plot.samples[-1][1]["enhanced:power"], 47)
         self.page.active = False
+
+    def test_restored_report_does_not_block_idle_monitor_or_mix_statistics(self):
+        directory = Path(self.temp.name)
+        data = dict(catalog=SAMPLE["catalog"], elapsed=900,
+                    statistics={"enhanced:power": {"count": 100, "average": 999}})
+        self.assertTrue(self.page.restore_archive(directory, data))
+        self.assertEqual(self.page.preview_stats.rows, {})
+        with patch.object(self.page, "isVisible", return_value=True), \
+             patch.object(self.page.preview, "start") as start:
+            self.page.start_preview()
+            start.assert_called_once()
+        raw = QByteArray((json.dumps(SAMPLE) + "\n").encode())
+        with patch.object(self.page.preview, "readAllStandardOutput", return_value=raw):
+            self.page.read(self.page.preview)
+        self.assertFalse(self.page.active)
+        self.assertEqual(self.page.process.state(), QProcess.NotRunning)
+        self.assertEqual(len(self.page.plot.samples), 1)
+        self.assertEqual(self.page.stats["enhanced:power"]["count"], 1)
+        self.assertEqual(self.page.stats["enhanced:power"]["average"], 47)
+        self.assertLess(self.page.plot.samples[0][0], 900)
+
+    def test_finished_load_preserves_visible_monitor_and_access(self):
+        self.page.active = True
+        self.page.run_dir = Path(self.temp.name)
+        self.page.enhanced.blockSignals(True)
+        self.page.enhanced.setChecked(True)
+        self.page.enhanced.blockSignals(False)
+        with patch.object(self.page, "isVisible", return_value=True), \
+             patch.object(self.page.preview, "state", return_value=QProcess.Running), \
+             patch.object(self.page, "stop_preview") as stop, \
+             patch.object(self.window.monitor_access, "set_active") as access:
+            self.page.finished(0)
+            stop.assert_not_called()
+            access.assert_called_with(True)
+        self.assertFalse(self.page.active)
+
+    def test_quick_hide_show_restarts_after_old_monitor_exits(self):
+        with patch.object(self.page.preview, "state", return_value=QProcess.Running), \
+             patch.object(self.page.preview, "terminate"), \
+             patch.object(self.page, "isVisible", return_value=True):
+            self.page.stop_preview()
+            self.page.start_preview()
+            self.assertTrue(self.page.preview_restart)
+        with patch.object(self.page, "isVisible", return_value=True), \
+             patch.object(self.page.preview, "start") as start:
+            self.page.preview_finished()
+            start.assert_called_once()
+        self.page.shutting_down = True
+        self.page.preview_restart = True
+        with patch.object(self.page.preview, "start") as start:
+            self.page.preview_finished()
+            start.assert_not_called()
+
+    def test_idle_chart_receives_async_worker_samples_after_restore(self):
+        self.page.restore_archive(Path(self.temp.name), dict(catalog=SAMPLE["catalog"], statistics={}, elapsed=20))
+        script = "import json,time; sample=" + repr(SAMPLE) + "; " + \
+                 "print(json.dumps(sample),flush=True); time.sleep(.15); print(json.dumps(sample),flush=True)"
+        with patch("desktop_stress.app_command", return_value=[sys.executable, "-u", "-c", script]), \
+             patch.object(self.page.process, "start") as load:
+            self.window.show()
+            self.window.tools_button.click()
+            deadline = time.monotonic() + 5
+            while len(self.page.plot.samples) < 2 and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.01)
+            self.assertGreaterEqual(len(self.page.plot.samples), 2)
+            self.assertGreater(self.page.plot.samples[-1][0], self.page.plot.samples[0][0])
+            self.assertEqual(self.page.stats["enhanced:power"]["count"], 2)
+            self.assertEqual(self.page.stats["enhanced:power"]["average"], 47)
+            self.assertFalse(self.page.active)
+            load.assert_not_called()
 
     def test_all_checkbox_controls_existing_and_new_sensors_not_statistics(self):
         self.seed()

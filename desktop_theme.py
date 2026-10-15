@@ -37,8 +37,11 @@ QLabel[role="section"] {{ font-size: 15px; font-weight: 600; }}
 QLabel[role="muted"], QLabel[role="status"], QLabel[role="version"] {{ color: {p['muted']}; }}
 QLabel[role="version"] {{ font-size: 11px; }}
 QLabel[role="metric"] {{ font-size: 23px; font-weight: 600; }}
-QLabel[tone="passed"] {{ color: {p['success']}; }}
-QLabel[tone="failed"], QLabel[tone="invalid_report"] {{ color: {p['error']}; }}
+QLabel[tone="passed"], QLabel[tone="running"] {{ color: {p['success']}; }}
+QLabel[tone="running"][pulse="off"] {{ color: {p['muted']}; }}
+QLabel[tone="failed"], QLabel[tone="invalid_report"], QLabel[tone="build_failed"], QLabel[tone="timeout"] {{ color: {p['error']}; }}
+QLabel[tone="unsupported"], QLabel[tone="unavailable"] {{ color: {p['warning']}; }}
+QLabel[tone="queued"], QLabel[tone="not_run"], QLabel[tone="skipped"], QLabel[tone="interrupted"] {{ color: {p['muted']}; }}
 QFrame[role="card"] {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; }}
 QTabWidget::pane {{ border: none; border-top: 1px solid {p['border']}; }}
 QTabBar::tab {{ background: transparent; color: {p['muted']}; padding: 12px 13px; border-bottom: 2px solid transparent; }}
