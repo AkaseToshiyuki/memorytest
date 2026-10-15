@@ -438,7 +438,9 @@ class HardwarePageTests(unittest.TestCase):
     def test_real_worker_contract_uses_cpu_inventory_only(self):
         page = self.window.hardware_tools["cpu"]
         page.refresh()
-        deadline = time.monotonic() + 18
+        # The real worker has a 30-second inventory budget and the page a
+        # 35-second watchdog. Do not fail before either production bound.
+        deadline = time.monotonic() + 40
         while page.process.state() != QProcess.NotRunning and time.monotonic() < deadline:
             self.app.processEvents()
             time.sleep(.01)

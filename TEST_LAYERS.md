@@ -273,7 +273,7 @@ Current startup-permission policy (supersedes the manual authorization UI below)
 | Suite | Passed | Time | Evidence |
 |---|---:|---:|---|
 | Startup tokens / inventory / bounded native bridge | 28 | 0.460 s | `build/hardware-startup-access-ci-fix.log` |
-| Hardware pages / automatic mode / no permission controls | 23 | 45.151 s | `build/hardware-startup-tools-ci-fix.log` |
+| Hardware pages / automatic mode / no permission controls | 23 | 38.173 s | `build/hardware-startup-tools-final.log` |
 | Existing telemetry / direct startup-token helper | 18 | 1.766 s | `build/hardware-startup-monitoring.log` |
 | Live monitoring continuity | 12 | 8.428 s | `build/hardware-startup-continuity.log` |
 | Desktop lifecycle / status transitions | 16 | 24.674 s | `build/hardware-startup-desktop.log` |
@@ -301,6 +301,8 @@ Current startup-permission policy (supersedes the manual authorization UI below)
   deadline in two runs. It now allows 30 seconds natively / 32 seconds for the
   reply, still capped by the snapshot budget; SMART and other operations retain
   their limits. Added headroom/whole-budget tests; cancellation behavior is unchanged.
+  The real-worker UI test waits 40 seconds to cover the existing 35-second page
+  watchdog, instead of failing at 18 seconds before the 30-second reader budget.
 - The Mac report/API acceptance used full production 150-ms samples and exceeded
   its 45-second wall limit twice. Its temporary build now uses 1-ms targets and
   0.5-ms warmup, retaining all 20 samples, real kernels and report assertions.
