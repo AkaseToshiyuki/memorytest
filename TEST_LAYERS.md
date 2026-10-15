@@ -205,3 +205,12 @@ the corrected assertion passed without an implementation change. Evidence:
 `/tmp/memorytest-oct15-shared-runtime-final.log` and
 `build/validation-oct15-shared/stress-runs/20261015-095933-788qfn2x/`.
 This was unprivileged Linux monitoring, not Mac authorization or SMC verification.
+
+First native CI pass exposed two portability issues: the new archive writer
+identity had introduced an unconditional `psutil` dependency into the standalone
+CLI, and four new Mac test expectations compared `/var` with its canonical
+`/private/var` path. The CLI now uses an optional process-identity dependency and
+conservatively retains uncertain writers; test roots are canonicalized. The
+standard-library-only workflow (`python -S`, 17/17, 4.265 s) and storage with the
+new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
+`/tmp/memorytest-oct15-stdlib-workflow.log`, `/tmp/memorytest-oct15-stdlib-storage.log`.

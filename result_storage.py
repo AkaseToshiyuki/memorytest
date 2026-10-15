@@ -57,17 +57,44 @@ def writable_output(preferred=None, fallback=None):
 
 
 def archive_identity(kind):
-    import psutil
+    writer = {"pid": os.getpid()}
+    try:
+        import psutil
+        writer["created"] = psutil.Process().create_time()
+    except ImportError:
+        pass  # Standalone benchmark CLI remains standard-library-only.
     return {"application": OWNER, "kind": kind,
-            "writer": {"pid": os.getpid(), "created": psutil.Process().create_time()}}
+            "writer": writer}
 
 
 def active_writer(data):
-    import psutil
     writer = data.get("writer", {})
+    if not writer:
+        return False
     try:
-        process = psutil.Process(int(writer["pid"]))
-        return process.is_running() and abs(process.create_time() - float(writer["created"])) < .001
+        pid = int(writer["pid"])
+        if pid <= 0:
+            return True
+    except (KeyError, TypeError, ValueError):
+        return True
+    try:
+        import psutil
+    except ImportError:
+        # POSIX signal zero only tests existence. On Windows os.kill(0) is NOT
+        # an existence probe; retain uncertain archives until writer is removed.
+        if os.name == "nt":
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            pass
+        return True
+    try:
+        process = psutil.Process(pid)
+        created = writer.get("created")
+        return process.is_running() and (created is None or abs(process.create_time() - float(created)) < .001)
     except (KeyError, TypeError, ValueError, psutil.NoSuchProcess):
         return False
     except psutil.AccessDenied:

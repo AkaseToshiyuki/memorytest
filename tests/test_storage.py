@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from result_storage import (OWNER, application_directory, archive_identity, archives,
+from result_storage import (OWNER, active_writer, application_directory, archive_identity, archives,
                             local_file, prune_archives, recent_archives, retention_lock,
                             sample_tail, writable_output)
 
@@ -31,7 +31,7 @@ class StorageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="memorytest-storage-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()  # macOS /var aliases /private/var.
 
     def test_application_directory_avoids_bundle_resources_and_working_directory(self):
         self.assertEqual(application_directory(self.root / "MemoryTest.app/Contents/MacOS/MemoryTest", True), self.root.resolve())
@@ -74,6 +74,19 @@ class StorageTests(unittest.TestCase):
         data.pop("writer")
         (paths[0] / "manifest.json").write_text(json.dumps(data))
         self.assertEqual(set(prune_archives(self.root)[0]), set(paths[:2]))
+
+    def test_cli_without_psutil_preserves_active_and_uncertain_writers(self):
+        with patch.dict("sys.modules", {"psutil": None}):
+            identity = archive_identity("benchmark")
+            self.assertEqual(identity["writer"], {"pid": os.getpid()})
+            self.assertTrue(active_writer(identity))
+            self.assertFalse(active_writer({}))
+            with patch("result_storage.os.name", "nt"), patch("result_storage.os.kill") as kill:
+                self.assertTrue(active_writer(identity))
+                kill.assert_not_called()
+            with patch("result_storage.os.name", "posix"), \
+                 patch("result_storage.os.kill", side_effect=ProcessLookupError):
+                self.assertFalse(active_writer(identity))
 
     def test_corrupt_or_mismatched_manifest_is_never_deleted(self):
         paths = [make_archive(self.root, n)[0] for n in range(12)]
@@ -143,7 +156,7 @@ class DesktopArchiveTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="memorytest-restore-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def window(self, restore=True):
         window = MainWindow(autodetect=False, output_dir=self.root, restore=restore)
