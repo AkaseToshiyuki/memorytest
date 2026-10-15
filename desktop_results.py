@@ -4,7 +4,7 @@ import sys
 from PySide6.QtCore import Qt, QAbstractTableModel, QSize
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QProgressBar,
-    QPushButton, QScrollArea, QTableView, QHeaderView, QWidget, QTabWidget)
+    QPushButton, QScrollArea, QTableView, QHeaderView, QWidget, QTabWidget, QSizePolicy)
 from desktop_theme import card, label, set_tone
 from i18n import tr, display
 from presentation import plot_svg
@@ -83,8 +83,10 @@ class ResultView(QScrollArea):
         layout.setSpacing(16)
         if model.status != "passed":
             empty = label(tr(model.reason or "no_data", language), "muted")
+            empty.setObjectName("empty-result")
             empty.setWordWrap(True)
-            layout.addWidget(empty)
+            empty.setAlignment(Qt.AlignCenter)
+            layout.addWidget(empty, 1)
         else:
             if model.notice:
                 layout.addWidget(label(tr(model.notice, language), "muted"))
@@ -123,7 +125,7 @@ class ResultView(QScrollArea):
                 view.setMinimumHeight(min(360, 75 + 32 * len(table.rows)))
                 content.addWidget(view)
                 layout.addWidget(widget)
-        layout.addStretch()
+            layout.addStretch()
         self.setWidget(root)
         self.verticalScrollBar().setValue(position)
 
@@ -163,6 +165,7 @@ class ModulePage(QWidget):
         super().__init__()
         self.name, self.window = name, window
         self.html = self.log_path = None
+        self.saved_run_id = None
         self.model = ModuleResult(name, "not_run" if supported(name) else "unsupported")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 16, 0, 0)
@@ -179,8 +182,13 @@ class ModulePage(QWidget):
         for button in (self.cancel, self.open, self.log_button):
             button.setEnabled(False)
         for button in (self.run, self.cancel, self.open, self.log_button):
-            controls.addWidget(button)
-        controls.addStretch()
+            if name == "cache_hierarchy":
+                button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+                controls.addWidget(button, 1)
+            else:
+                controls.addWidget(button)
+        if name != "cache_hierarchy":
+            controls.addStretch()
         layout.addLayout(controls)
         self.summary = label("", "status")
         self.summary.setWordWrap(True)
@@ -201,12 +209,14 @@ class ModulePage(QWidget):
         for button, key in ((self.run, "run"), (self.cancel, "cancel"), (self.open, "open_report"), (self.log_button, "open_log")):
             button.setText(tr(key, lang))
         self.summary.setText(tr(self.model.status, lang) +
-            (f" · {self.model.duration:.3f} s" if self.model.duration is not None else ""))
+            (f" · {self.model.duration:.3f} s" if self.model.duration is not None else "") +
+            (" · " + self.saved_run_id if self.saved_run_id else ""))
         set_tone(self.summary, self.model.status)
         self.details.render(self.model, lang, self.window.theme)
 
     def queued(self):
         self.html = self.log_path = None
+        self.saved_run_id = None
         self.open.setEnabled(False)
         self.log_button.setEnabled(False)
         self.model = ModuleResult(self.name, "queued")

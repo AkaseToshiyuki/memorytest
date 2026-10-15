@@ -15,7 +15,7 @@ typedef struct {
     BenchMeasurement bandwidth[3], latency;
     double ns;
 } CacheTestResult;
-typedef struct { double *a, *c; size_t bytes; unsigned operation; } CacheBandwidth;
+typedef struct { double *a, *c; size_t bytes; unsigned operation; double result; } CacheBandwidth;
 
 static int cache_bandwidth_work(void *context, uint64_t passes) {
     CacheBandwidth *work = context;
@@ -23,6 +23,7 @@ static int cache_bandwidth_work(void *context, uint64_t passes) {
      * source and destination, so every curve has the same total footprint. */
     size_t words = work->bytes / (work->operation == STREAM_COPY ? 16 : 8);
     double result = stream_kernel(work->a, work->a, work->c, words, work->operation, passes);
+    work->result = result;
     return isfinite(result) && result > 0 ? 0 : -1;
 }
 
@@ -79,7 +80,9 @@ int run_cache_hierarchy_test(void) {
         printf("Warming and sampling cache working set: %zu bytes\n", bytes); fflush(stdout);
         for (unsigned operation = STREAM_READ; operation <= STREAM_COPY; ++operation) {
             CacheBandwidth work = {a, c, bytes, operation};
-            if (bench_measure(cache_bandwidth_work, &work, &results[i].bandwidth[operation])) {
+            if (bench_measure(cache_bandwidth_work, &work, &results[i].bandwidth[operation]) ||
+                stream_validate(c, bytes / (operation == STREAM_COPY ? 16 : 8), operation,
+                                results[i].bandwidth[operation].repetitions, work.result)) {
                 free(a); free(c); return 1;
             }
         }

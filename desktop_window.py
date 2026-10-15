@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from PySide6.QtCore import Qt, QProcess, QSettings, QStandardPaths, QUrl, QTranslator, QLibraryInfo, QTimer
 from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QGridLayout, QMessageBox)
 from benchmark_registry import ROOT, TESTS
@@ -15,12 +15,14 @@ from desktop_results import ModulePage, supported
 from desktop_theme import apply_theme, card, label, set_tone
 from desktop_widgets import ReadableSpinBox, ElidingLabel
 from i18n import tr, display, default_language
-from result_model import GROUPS, ModuleResult
+from result_model import GROUPS, ModuleResult, build_module
 from app_version import RELEASE_TAG
+from result_storage import (application_directory, writable_output, recent_archives,
+                            local_file, prune_archives)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, autodetect=True):
+    def __init__(self, autodetect=True, output_dir=None, restore=True):
         super().__init__()
         icon_path = ROOT / "icons/memorytest.svg"
         if not icon_path.is_file():
@@ -48,6 +50,8 @@ class MainWindow(QMainWindow):
         self.active_modules = []
         self.benchmark_active = False
         self.stress_active = False
+        self.monitor_permission_asked = False
+        self.monitor_permission_resolved = False
         self.status_key = "ready"
         self.module_status = {name: "not_run" if supported(name) else "unsupported" for name in TESTS}
         self.bindings, self.group_buttons, self.log_events = [], [], deque(maxlen=500)
@@ -76,7 +80,8 @@ class MainWindow(QMainWindow):
         self.version = label(RELEASE_TAG, "version")
         footer.addWidget(self.version)
         footer.addStretch()
-        self.licenses = self.button("licenses", lambda: self.open_path(ROOT / "licenses" if (ROOT / "licenses").exists() else ROOT / "LICENSE"))
+        self.license_dialog = None
+        self.licenses = self.button("licenses", self.show_licenses)
         self.licenses.setProperty("role", "quiet")
         footer.addWidget(self.licenses)
         outer.addLayout(footer)
@@ -139,13 +144,25 @@ class MainWindow(QMainWindow):
         self.threads.setRange(0, min(262144, os.cpu_count() or 1))
         config.addWidget(self.threads)
         config.addWidget(self.text("output", "muted"))
-        destination = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)) / "reports"
+        self.data_directory = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
+        preferred = Path(output_dir) if output_dir is not None else application_directory() / "Outputs"
+        self.output_fallback = False
+        try:
+            destination, self.output_fallback = writable_output(preferred, self.data_directory / "Outputs")
+        except OSError:
+            destination = preferred
         self.output = QLineEdit(str(destination))
+        self.output.setReadOnly(True)
         self.output.setMinimumWidth(0)
         self.output.setCursorPosition(0)
         config.addWidget(self.output)
-        self.browse = self.button("choose", self.choose_directory)
-        config.addWidget(self.browse)
+        self.storage_note = self.text("auto_output", "muted")
+        self.storage_note.setWordWrap(True)
+        config.addWidget(self.storage_note)
+        self.saved_run = label("", "muted")
+        self.saved_run.setWordWrap(True)
+        self.saved_run.setTextFormat(Qt.PlainText)
+        config.addWidget(self.saved_run)
         config.addStretch()
         self.run_all = self.button("run_all", self.begin_all)
         self.run_all.setProperty("role", "primary")
@@ -200,13 +217,20 @@ class MainWindow(QMainWindow):
                 children.addTab(self.pages[name], "")
         from desktop_stress import StressPage
         self.stress_page = StressPage(self)
-        self.tabs.addTab(self.stress_page, "")
+        self.tools_page = QWidget()
+        tools_layout = QVBoxLayout(self.tools_page)
+        self.tools_tabs = QTabWidget()
+        self.tools_tabs.setDocumentMode(True)
+        self.tools_tabs.addTab(self.stress_page, "")
+        tools_layout.addWidget(self.tools_tabs)
+        self.tabs.addTab(self.tools_page, "")
         self.tabs.tabBar().setTabVisible(4, False)
-        self.stress_button = self.button("stress", lambda: self.tabs.setCurrentWidget(self.stress_page))
-        self.stress_button.setCheckable(True)
-        self.stress_button.setProperty("role", "stress-tab")
-        self.tabs.setCornerWidget(self.stress_button, Qt.TopRightCorner)
-        self.tabs.currentChanged.connect(lambda index: self.stress_button.setChecked(index == 4))
+        self.tools_button = self.button("tools", lambda: self.tabs.setCurrentWidget(self.tools_page))
+        self.tools_button.setCheckable(True)
+        self.tools_button.setProperty("role", "stress-tab")
+        self.tabs.setCornerWidget(self.tools_button, Qt.TopRightCorner)
+        self.tabs.currentChanged.connect(lambda index: self.tools_button.setChecked(index == 4))
+        self.stress_button = self.tools_button  # Existing integrations use this widget handle.
         from monitor_access import MonitorAccess
         self.monitor_access = MonitorAccess()
         self.permission_probe = QProcess(self)
@@ -218,14 +242,22 @@ class MainWindow(QMainWindow):
         self.theme_combo.currentIndexChanged.connect(self.preferences_changed)
         self.retranslate()
         self.refresh_controls()
+        if restore:
+            previous_output = self.settings.value("archiveOutput", "") if output_dir is None else ""
+            roots = [destination]
+            if output_dir is None:
+                roots.extend([self.data_directory / "Outputs", self.data_directory / "reports"])
+                if previous_output:
+                    roots.append(Path(previous_output))
+            self.restore_results(roots)
         if autodetect:
             QTimer.singleShot(0, self.load_hardware)
 
     def probe_monitor_access(self):
-        if self.closing or self.settings.value("monitorPermissionAskedV2", False, type=bool):
+        if self.closing or self.monitor_permission_asked:
             return
-        command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--once", "--enhanced", "--bin-dir", str(ROOT / "bin")]
-        self.permission_probe.start(command[0], command[1:])
+        self.monitor_permission_asked = True
+        self.request_monitor_access(explain=True)
 
     def monitor_probe_finished(self, *_):
         if self.closing:
@@ -234,7 +266,7 @@ class MainWindow(QMainWindow):
             sample = json.loads(bytes(self.permission_probe.readAllStandardOutput())[:131072])
         except (ValueError, TypeError):
             return
-        self.settings.setValue("monitorPermissionAskedV2", True)
+        self.monitor_permission_resolved = True
         if sample.get("needs_admin"):
             self.request_monitor_access(explain=True)
 
@@ -248,8 +280,12 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(self, tr("monitor_permission_title", self.language),
                 tr("monitor_permission_body", self.language), QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
+                self.monitor_permission_resolved = True
+                self.stress_page.access_status_key = "monitor_denied"
+                self.stress_page.retranslate()
                 return
         if not self.monitor_access.available():
+            self.monitor_permission_resolved = True
             self.stress_page.access_status_key = "monitor_unavailable"
             self.stress_page.retranslate()
             return
@@ -265,6 +301,7 @@ class MainWindow(QMainWindow):
         if self.closing:
             self.authorization_timer.stop()
             return
+        self.monitor_permission_resolved = True
         key = "monitor_authorized" if status == "ready" else "monitor_failed" if status == "error" else "monitor_denied"
         if status == "ready":
             self.authorization_timer.setInterval(1000)
@@ -344,7 +381,7 @@ class MainWindow(QMainWindow):
         self.translator = QTranslator(self)
         if self.language == "zh" and self.translator.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
             app.installTranslator(self.translator)
-        self.setWindowTitle(f"MemoryTest {RELEASE_TAG} — {tr('app_title', self.language)}")
+        self.setWindowTitle(f"MemoryTest {RELEASE_TAG}")
         for widget, key in self.bindings:
             widget.setText(tr(key, self.language))
         for combo, keys, title in ((self.language_combo, ("zh", "en"), "language"),
@@ -355,12 +392,16 @@ class MainWindow(QMainWindow):
                 combo.setItemText(index, tr(key, self.language))
         self.threads.setSpecialValueText(tr("all_available", self.language))
         self.output.setAccessibleName(tr("output", self.language))
+        self.output.setToolTip(self.output.text())
+        if self.output_fallback:
+            self.storage_note.setText(tr("output_fallback", self.language) + " · " + tr("auto_output", self.language))
         self.tabs.setTabText(0, tr("home", self.language))
         for index, (group, names) in enumerate(GROUPS.items(), 1):
             self.tabs.setTabText(index, tr(group, self.language))
             for child, name in enumerate(names):
                 self.group_tabs[group].setTabText(child, tr(name, self.language))
-        self.tabs.setTabText(4, tr("stress", self.language))
+        self.tabs.setTabText(4, tr("tools", self.language))
+        self.tools_tabs.setTabText(0, tr("stress", self.language))
         for name, check in self.modules.items():
             check.setText(tr(name, self.language))
             status = self.module_status[name]
@@ -378,15 +419,60 @@ class MainWindow(QMainWindow):
         if path and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self.set_status("open_error")
 
-    def choose_directory(self):
-        dialog = QFileDialog(self, tr("output", self.language), self.output.text())
-        dialog.setOption(QFileDialog.DontUseNativeDialog)
-        dialog.setFileMode(QFileDialog.Directory)
-        dialog.setOption(QFileDialog.ShowDirsOnly)
-        dialog.setLabelText(QFileDialog.Accept, tr("choose", self.language))
-        dialog.setLabelText(QFileDialog.Reject, tr("cancel", self.language))
-        if dialog.exec():
-            self.output.setText(dialog.selectedFiles()[0])
+    def show_licenses(self):
+        if self.license_dialog is None:
+            from desktop_licenses import LicenseDialog
+            self.license_dialog = LicenseDialog(self)
+            self.license_dialog.destroyed.connect(lambda: setattr(self, "license_dialog", None))
+        self.license_dialog.show()
+        self.license_dialog.raise_()
+        self.license_dialog.activateWindow()
+
+    def restore_results(self, roots):
+        # Apply retention before selecting a result, so restored report buttons
+        # cannot immediately point at an archive this launch just removed.
+        _, cleanup_errors = prune_archives(Path(self.output.text()))
+        for _, directory, data in recent_archives(roots, "benchmark"):
+            try:
+                rows = data["modules"]
+                # Do not mix independent rounds or expose paths outside the archive.
+                for row in rows:
+                    name = row["module"]
+                    path = local_file(directory, "reports/" + TESTS[name]["report"])
+                    if row.get("status") == "passed" and path is None:
+                        raise ValueError("missing report")
+                    if name == "cpu_multi" and row.get("status") == "passed":
+                        if local_file(directory, "reports/compute_mark_v2.json") is None:
+                            raise ValueError("missing score data")
+                    if row.get("status") == "passed" and build_module(name, directory / "reports", row).status != "passed":
+                        raise ValueError("invalid result")
+                self.run_dir = directory
+                self.report = local_file(directory, data.get("html_report"))
+                self.completed.clear()
+                self.progress.setRange(0, len(rows))
+                for row in rows:
+                    row = dict(row)
+                    if row.get("status") in {"running", "queued"}:
+                        row["status"] = "interrupted"
+                    row["log"] = str(local_file(directory, row.get("log")) or "")
+                    self.handle_event({"type": "module", **row})
+                    page = self.pages[row["module"]]
+                    page.html = self.report
+                    page.open.setEnabled(self.report is not None)
+                    page.saved_run_id = directory.name
+                    page.retranslate()
+                self.open_report.setEnabled(self.report is not None)
+                self.saved_run.setText(directory.name)
+                self.set_status("restored")
+                break
+            except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+                continue
+        for _, directory, data in recent_archives(roots, "stress"):
+            if self.stress_page.restore_archive(directory, data):
+                break
+        # Only the current output gets retention; legacy directories are read-only.
+        if cleanup_errors:
+            self.set_status("cleanup_error")
 
     def set_status(self, key):
         self.status_key = key
@@ -394,7 +480,7 @@ class MainWindow(QMainWindow):
 
     def refresh_controls(self):
         busy = self.benchmark_active or self.stress_active
-        for widget in [self.start, self.run_all, self.browse, self.output, self.threads, *self.group_buttons]:
+        for widget in [self.start, self.run_all, self.threads, *self.group_buttons]:
             widget.setEnabled(not busy)
         self.cancel.setEnabled(self.benchmark_active)
         for name, check in self.modules.items():
@@ -442,6 +528,9 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, len(modules))
         self.progress.setValue(0)
         self.output.setText(str(output))
+        self.output.setToolTip(str(output))
+        self.settings.setValue("archiveOutput", str(output))
+        self.saved_run.clear()
         for name in modules:
             self.module_status[name] = "queued"
             self.labels[name].setText(tr("queued", self.language))
@@ -503,6 +592,10 @@ class MainWindow(QMainWindow):
             for name in self.active_modules:
                 self.pages[name].html = self.report
                 self.pages[name].open.setEnabled(self.report.is_file())
+            if self.run_dir:
+                self.saved_run.setText(self.run_dir.name)
+            if data.get("cleanup_errors"):
+                self.set_status("cleanup_error")
 
     def request_cancel(self):
         if self.control:
@@ -527,7 +620,8 @@ class MainWindow(QMainWindow):
                 self.module_status[name] = "failed"
                 self.labels[name].setText(tr("failed", self.language))
         self.set_running(False)
-        self.set_status("passed" if code == 0 else "interrupted" if code == 130 else "incomplete")
+        self.set_status("cleanup_error" if code == 0 and self.status_key == "cleanup_error" else
+                        "passed" if code == 0 else "interrupted" if code == 130 else "incomplete")
         if self.control:
             self.control.cleanup()
             self.control = None

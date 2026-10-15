@@ -25,6 +25,7 @@ import time
 from benchmark_registry import ROOT, TESTS, CATEGORIES, select_modules, report_filename
 from report_html import _parse_all_tables
 from process_control import Cancellation, app_command, stop_process_tree
+from result_storage import archive_identity, prune_archives
 
 
 def positive_seconds(value):
@@ -162,6 +163,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
     raw_dir.mkdir()
     manifest_path = run_dir / "manifest.json"
     manifest = {"schema_version": 1, "run_id": run_dir.name,
+                **archive_identity("benchmark"),
                 "started_at": datetime.datetime.now().astimezone().isoformat(),
                 "environment": environment_snapshot(),
                 "selected_modules": modules, "modules": []}
@@ -254,6 +256,11 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
         command.append("--skip-charts")
     # A cancellation still produces a report explaining missing/partial data.
     report_code = run_command(command, run_dir, run_dir / "report.log", 120)
+    manifest.pop("writer", None)
+    save_manifest(manifest_path, manifest)
+    removed, cleanup_errors = prune_archives(output_dir, protect=[run_dir])
+    for error in cleanup_errors:
+        print(f"Archive cleanup: {error}", file=sys.stderr)
     if report_code:
         print(f"HTML generation failed; raw results and status: {run_dir}", file=sys.stderr)
         return 1
@@ -267,7 +274,8 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
     finally:
         pending.unlink(missing_ok=True)
     print(f"HTML: {latest}\nArchive: {archive}", flush=True)
-    event(type="finished", report=str(archive), success=manifest["success"], interrupted=interrupted)
+    event(type="finished", report=str(archive), success=manifest["success"], interrupted=interrupted,
+          removed_runs=len(removed), cleanup_errors=cleanup_errors)
     if interrupted:
         return 130
     if all(r["status"] == "unsupported" for r in manifest["modules"]):

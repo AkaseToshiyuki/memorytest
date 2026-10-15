@@ -234,6 +234,7 @@ def main(argv=None):
     parser.add_argument("--enhanced", action="store_true")
     parser.add_argument("--bin-dir", type=Path)
     parser.add_argument("--privileged-samples", type=Path)
+    parser.add_argument("--snapshot-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     cancel = Cancellation(parent_pid=args.parent_pid)
@@ -250,7 +251,11 @@ def main(argv=None):
             return 0
         while not cancel():
             started = time.monotonic()
-            print(json.dumps(provider.sample(), ensure_ascii=True, allow_nan=False), flush=True)
+            sample = provider.sample()
+            if args.snapshot_file:
+                from telemetry_stream import publish_snapshot
+                publish_snapshot(args.snapshot_file, sample)
+            print(json.dumps(sample, ensure_ascii=True, allow_nan=False), flush=True)
             while time.monotonic() - started < 1 and not cancel():
                 time.sleep(0.1)
     except (BrokenPipeError, KeyboardInterrupt):

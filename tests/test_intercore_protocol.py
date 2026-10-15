@@ -19,7 +19,20 @@ class IntercoreProtocolTests(unittest.TestCase):
                 str(ROOT / "tests/intercore_protocol.c"), *[str(ROOT / "src" / s) for s in sources], "-lm", "-o", str(binary)]
             build = subprocess.run(command, capture_output=True, text=True, timeout=60)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
-            run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            allowed = sorted(os.sched_getaffinity(0))
+            if len(allowed) < 2:
+                self.skipTest("two allowed logical CPUs required for verified pinning")
+            selected = {allowed[0], allowed[-1]}
+            # The subprocess starts under a sparse affinity mask, independent
+            # of the implementation's CPU enumeration or topology guesses.
+            def pin():
+                os.sched_setaffinity(0, selected)
+            run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10, preexec_fn=pin)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("completion-counts-ok", run.stdout)
             self.assertNotIn("stale", run.stderr)
+            self.assertIn(f"cpu-ids {allowed[0]} {allowed[-1]}", run.stdout)
+            for mode in ("binding", "creation"):
+                failure = subprocess.run([str(binary), mode], capture_output=True, text=True, timeout=5, preexec_fn=pin)
+                self.assertEqual(failure.returncode, 0, failure.stdout + failure.stderr)
+                self.assertIn("failure-cleanup-ok", failure.stdout)

@@ -30,29 +30,47 @@ static int bench_once(BenchKernel kernel, void *context, uint64_t repetitions, u
     return 0;
 }
 
+static int bench_grow(uint64_t *repetitions, uint64_t elapsed, uint64_t target) {
+    uint64_t scale = elapsed ? target / elapsed + 1 : 8;
+    if (scale > 8) scale = 8;
+    if (scale < 2) scale = 2;
+    if (*repetitions > UINT64_C(1073741824) / scale) return -1;
+    *repetitions *= scale;
+    return 0;
+}
+
 static int bench_measure(BenchKernel kernel, void *context, BenchMeasurement *result) {
     uint64_t repetitions = 1, elapsed = 0, warmed = 0;
+    /* Warmup has its own discarded interval; cold page faults/scheduling must
+     * not determine the measured iteration count. Google Benchmark and
+     * nanobench provide the methodological reference, not shared source. */
+    while (warmed < BENCH_WARMUP_NS) {
+        if (bench_once(kernel, context, repetitions, &elapsed)) return -1;
+        if (UINT64_MAX - warmed < elapsed) return -1;
+        warmed += elapsed;
+        if (warmed < BENCH_WARMUP_NS && bench_grow(&repetitions, elapsed, BENCH_WARMUP_NS)) return -1;
+    }
+    repetitions = 1;
     for (;;) {
         if (bench_once(kernel, context, repetitions, &elapsed)) return -1;
-        warmed += elapsed;
-        if (elapsed >= BENCH_TARGET_NS) break;
-        uint64_t scale = elapsed ? BENCH_TARGET_NS / elapsed + 1 : 8;
-        if (scale > 8) scale = 8;
-        if (scale < 2) scale = 2;
-        /* Reject a broken clock/no-op instead of manufacturing a result. */
-        if (repetitions > UINT64_C(1073741824) / scale) return -1;
-        repetitions *= scale;
+        if (elapsed < BENCH_TARGET_NS) {
+            if (bench_grow(&repetitions, elapsed, BENCH_TARGET_NS)) return -1;
+            continue;
+        }
+        uint64_t samples[BENCH_SAMPLES];
+        for (unsigned i = 0; i < BENCH_SAMPLES; ++i)
+            if (bench_once(kernel, context, repetitions, &samples[i]) || !samples[i]) return -1;
+        qsort(samples, BENCH_SAMPLES, sizeof(*samples), compare_uint64);
+        /* A descheduled calibration pass can appear long while real work is
+         * tiny. Discard this whole sample batch and recalibrate; never mix
+         * differing work counts into one median or hide slow sample outliers. */
+        if (samples[0] < BENCH_TARGET_NS / 2) {
+            if (bench_grow(&repetitions, samples[0], BENCH_TARGET_NS)) return -1;
+            continue;
+        }
+        *result = (BenchMeasurement){repetitions, samples[BENCH_SAMPLES / 2], samples[0], samples[BENCH_SAMPLES - 1]};
+        return 0;
     }
-    while (warmed < BENCH_WARMUP_NS) {
-        if (bench_once(kernel, context, repetitions, &elapsed) || !elapsed) return -1;
-        warmed += elapsed;
-    }
-    uint64_t samples[BENCH_SAMPLES];
-    for (unsigned i = 0; i < BENCH_SAMPLES; ++i)
-        if (bench_once(kernel, context, repetitions, &samples[i]) || !samples[i]) return -1;
-    qsort(samples, BENCH_SAMPLES, sizeof(*samples), compare_uint64);
-    *result = (BenchMeasurement){repetitions, samples[BENCH_SAMPLES / 2], samples[0], samples[BENCH_SAMPLES - 1]};
-    return 0;
 }
 
 static double bench_spread(const BenchMeasurement *result) {
@@ -60,7 +78,7 @@ static double bench_spread(const BenchMeasurement *result) {
 }
 
 static void bench_report_conditions(ReportContext *report) {
-    report_write(report, "- Protocol: diagnostic-v2\n- Samples: %d\n- Statistic: median\n", BENCH_SAMPLES);
+    report_write(report, "- Protocol: diagnostic-v2.1\n- Samples: %d\n- Statistic: median\n", BENCH_SAMPLES);
     report_write(report, "- Warmup minimum: %g ms\n- Sample target: %g ms\n\n",
                  (double)BENCH_WARMUP_NS / 1e6, (double)BENCH_TARGET_NS / 1e6);
 }

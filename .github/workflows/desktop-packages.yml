@@ -91,10 +91,14 @@ jobs:
       - name: Independent kernel references and bounded native score
         run: python -m unittest discover -s tests -p test_compute.py -v
       - name: Desktop lifecycle and cancellation
-        run: python -m unittest discover -s tests -p test_desktop.py -v
+        run: |
+          python -m unittest discover -s tests -p test_desktop.py -v
+          python -m unittest discover -s tests -p test_storage.py -v
+          python -m unittest discover -s tests -p test_monitor_continuity.py -v
       - name: Cache regression, presentation and bounded stress supervision
         run: |
           python -m unittest discover -s tests -p test_diagnostic_kernels.py -v
+          python -m unittest discover -s tests -p test_sampling_protocol.py -v
           python -m unittest discover -s tests -p test_memory_kernels.py -v
           python -m unittest discover -s tests -p test_intercore_protocol.py -v
           python -m unittest discover -s tests -p test_cache_report.py -v

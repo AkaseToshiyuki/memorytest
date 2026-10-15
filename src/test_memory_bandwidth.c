@@ -100,12 +100,19 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
         pool.operation = i;
         printf("Warming and sampling: %s\n", stream_names[i]); fflush(stdout);
         if (bench_measure(memory_work, &pool, &bandwidth[i])) goto cleanup;
+        size_t words = pool.words / pool.threads;
+        for (unsigned worker = 0; worker < pool.threads; ++worker)
+            if (stream_validate(pool.c + worker * words, words, i, bandwidth[i].repetitions,
+                                pool.workers[worker].result)) {
+                fputs("Memory result validation failed\n", stderr); goto cleanup;
+            }
     }
     /* Retire the workers before using their destination allocation as a chain. */
     memory_stop(&pool, created);
     created = 0;
     chain_build(pool.c, bytes);
     ChainWork chain = {pool.c, bytes, (uintptr_t)pool.c};
+    if (chain_work(&chain, (bytes / 64 + CHAIN_STEPS - 1) / CHAIN_STEPS)) goto freed;
     printf("Warming and sampling: dependent random access\n"); fflush(stdout);
     if (bench_measure(chain_work, &chain, &latency)) goto freed;
     ReportContext *report = report_init("memory_bandwidth", REPORT_FORMAT_MARKDOWN);
@@ -135,6 +142,7 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
                  "Read/write count one array; copy/scale two; add/triad three. Strides count 8 bytes per actual load.\n"
                  "No inferred cache-line, write-allocation or DRAM-bus traffic is added.\n"
                  "Arrays use ordinary OS pages and worker first touch, without CPU or NUMA pinning.\n"
+                 "Every written element and read/stride reduction is validated outside the timed interval.\n"
                  "Latency uses one dependent load chain with 64-byte nodes across the full listed size.\n"
                  "Working sets may still be cache-resident; no forced-DRAM guarantee or inferred write latency.\n");
     report_finalize_json(report);

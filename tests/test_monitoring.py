@@ -19,6 +19,22 @@ from telemetry import Provider
 
 
 class SensorContractTests(unittest.TestCase):
+    def test_exact_m4_variant_does_not_leak_gpu_names_to_other_models(self):
+        self.assertIn("GPU", display(smc_label("Tg1U", "temperature", "Apple M4 Pro")))
+        self.assertIn("GPU", display(smc_label("Tg0G", "temperature", "Apple M4")))
+        for key, model in (("Tg1U", "Apple M4"), ("Tg0G", "Apple M4 Pro"),
+                           ("Tp01", "Apple M4 Ultra"), ("Tp01", "Apple M99")):
+            self.assertIn("unmapped", display(smc_label(key, "temperature", model)))
+        self.assertIn(" 5", display(smc_label("Tp0V", "temperature", "Apple M4 Pro")))
+        self.assertIn("unmapped", display(smc_label("Tp0V", "voltage", "Apple M4 Pro")))
+
+    def test_identified_power_voltage_fan_and_apple_ancillary_sensors(self):
+        self.assertIn("CPU package", display(smc_label("PCPC", "power", "Apple M4 Pro")))
+        self.assertIn("CPU IA", display(smc_label("VCAC", "voltage", "Intel")))
+        self.assertIn("Fan 2", display(smc_label("F1Ac", "fan", "Apple M4 Pro")))
+        self.assertIn("Battery sensor 2", display(smc_label("TB2T", "temperature", "Apple M4 Pro")))
+        self.assertIn("unmapped", display(smc_label("PXYZ", "power", "Apple M4 Pro")))
+
     def test_generation_specific_thermal_regions_not_core_numbers(self):
         self.assertIn("能效", display(smc_label("Tp09", "temperature", "Apple M1 Pro"), "zh"))
         self.assertIn("性能", display(smc_label("Tp09", "temperature", "Apple M2 Max"), "zh"))

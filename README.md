@@ -528,6 +528,57 @@ P1 修核间绑定与完成协议；P2 再统一缓存实验协议、平台覆�
 
 ## 0.1.1 测试版本
 
+### 报告管理、监控连续性与开源方法复核（2026-10-15）
+
+- 桌面端不再要求选择目录：优先使用可执行程序所在目录的 `Outputs`；macOS 使用
+  `.app` 同级目录，不写入签名包内部。安装目录不可写时使用用户数据目录的 `Outputs`，
+  界面显示实际位置。源码运行使用项目下 `Outputs`。显式 CLI `--output-dir` 保持兼容。
+- 启动恢复最近有效的基准轮次与压力轮次，显示运行编号；不拼接不同基准轮次的模块。
+  旧用户数据目录中的报告可以读取，但不会自动删除。恢复不会启动负载或申请权限。
+- 新归档带有 MemoryTest 所有权标记，基准和压力测试合计默认保留最新 10 轮。
+  正在运行的任务受保护，可能暂时超过 10 轮；完成后或下次启动继续清理。损坏清单、
+  外部文件、符号链接／junction、无所有权标记的旧文件均不自动删除。删除不能从软件恢复，
+  需要长期保留的报告应提前复制到 `Outputs` 之外。
+- 开源许可在应用内只读弹窗中按文件阅读；窗口标题仅为产品名和版本号。
+  缓存页四个操作按钮等宽伸缩，无结果时居中显示；最右侧入口为“小工具”，压力测试是其首个子页。
+- 每次正常启动先说明只读监控权限并申请本会话授权，不沿用旧版“一次询问永久跳过”的设置。
+  已授权自动开启增强监控并隐藏复选框；拒绝／不可用时保留手动入口。仅原生读取助手提权。
+- 开始压力测试继续使用同一个监控进程和授权助手，不清空曲线、传感器选择及当前监控统计；
+  压力报告单独统计本轮区间。通过有界、原子替换的本地快照共享传感器数据；隐藏工具页仍采集，
+  监控退出或持续失联会停止负载。关闭窗口仍清理所有子进程。
+- 表头 `All` 支持全选／全不选和部分选中状态；隐藏曲线不改变原始采样或统计。
+- SMC 映射固定到 [Stats 的键／机型表](https://github.com/exelban/stats/blob/c9e7ebe3390a84e3075946ffe39dda709c4747b1/Modules/Sensors/values.swift)。
+  区分 M1–M4 已收录芯片型号及 M4／Pro／Max GPU 键；温度序号指传感器区域，不是 OS 核心 ID。
+  已知功耗、电压、风扇和辅助温度有名称；未收录型号和键保留原始 ID。MIT 归属随包提供。
+  这不是全 Mac 传感器库：当前是 15 个 Apple Silicon 芯片型号的部分已知映射，
+  Intel Mac 仅有部分通用键，没有历代具体机型的完整表；命名规则测试也不等于真机读取验证。
+
+本轮逐项复核 GitHub 项目，采用测量方法而非把其他项目的分数混入本软件：
+
+| 本软件测试 | 开源方法参考 | 本轮处理与边界 |
+|---|---|---|
+| 公共采样；整数、浮点、分支 | [Google Benchmark](https://github.com/google/benchmark/tree/a6b4a9f00b36c19af9997d68a1cf6e0b5b3d032c)、[nanobench](https://github.com/martinus/nanobench/tree/7252da9d96bd0d71f508e9b2813ab1f57fdfaec1) | 独立预热后重新校准；若校准被调度停顿拖长而实际样本过短，则整批丢弃并增加工作量。最终中位数只包含等工作量样本。保留实际条件跳转和有界浮点负载；不将耗时当作预测准确率。 |
+| 缓存带宽／延迟／层级检测 | [tinymembench](https://github.com/ssvb/tinymembench/tree/a2cf6d7e382e3aea1eb39173174d9fa28cad15f3)、上述采样工具 | 保留完整置换环、全链预遍历、固定工作集和实际加载计数；增加带宽输出全元素校验。层级跃迁仍是区间，非精确缓存容量。 |
+| 内存读写／复制／缩放／相加／乘加／步长／延迟 | [STREAM](https://github.com/jeffhammond/STREAM/blob/6703f7504a38a8da96b353cadafa64d3c2d7a2d3/stream.c)、[BabelStream](https://github.com/UoB-HPC/BabelStream/tree/995ceb0d266e5e90fbeee5f3c7fb3968973019c3) | 在计时区间外逐元素验证写入结果，并按输入周期独立计算读／步长归约参考；随机延迟先遍历完整环。保留共同时间窗和有用字节计数；结果不是官方 STREAM／BabelStream 成绩。 |
+| 核间延迟／CAS 吞吐量 | [core-to-core-latency](https://github.com/nviennot/core-to-core-latency/tree/2592303a0ca5903f9bd03498ce3668cd6e2c560f) | Linux 枚举实际允许的逻辑 CPU ID，验证绑核与当前 CPU，检查 CAS lock-free，按至少 128 B／已知缓存行隔离标志。包含被允许的 SMT 线程；不再宣称按物理核数排除 SMT。过大 CPU mask 拒绝测量。Mac／Windows 继续禁用未验证矩阵。 |
+| ComputeMark v2 | Google Benchmark、nanobench 的计数／统计原则 | 已有独立参考、固定标量负载、预热、共同时间窗与重复采样；本轮不更改评分内核、公式、校准参数或基准分。不能替换成其他测试后仍宣称分数可比。 |
+| CPU／FPU／缓存／RAM 压力 | [stress-ng](https://github.com/ColinIanKing/stress-ng/tree/a2572ae3f8472390e4f0a6ba89d4d7f30857fc9f) | 复核多种负载与计算校验思路；保留当前独立参考、向量链、内存校验和可取消线程池。本轮重点修复监控连续性，不承诺固定整机瓦数。 |
+| GPU 压力 | [clpeak](https://github.com/krrishnarraj/clpeak/tree/c073dcadedd5f817cd39d1118e3cbcfe9469fc7a)、[memtest_vulkan](https://github.com/GpuZelenograd/memtest_vulkan/tree/fd9ff59cde85cf11e25263e3f32d7adae0ba5e3b)、BabelStream | 参考设备后端、计算／传输区别和结果校验；保留现有 Metal／OpenCL 有界流水线与逐批验证，不引入 CPU 回退、Vulkan 运行时或新的峰值分数。现有负载不是完整显存故障检测器。 |
+
+许可核对：Google Benchmark 为 Apache-2.0；nanobench、tinymembench、core-to-core-latency
+为 MIT；STREAM 与 BabelStream 使用附带结果发布／命名约定的自定义许可；当前检视版本
+stress-ng 为 GPL-2.0，clpeak 为 GPL-3.0，memtest_vulkan 为 zlib。本轮没有复制或链接这些
+基准／压力项目的实现；只有已标注归属的 Stats 传感器映射数据随程序分发。
+“项目支持某平台”不等于本软件已经获得该硬件的测量认证；Mac 真实传感器和增强授权仍需真机复测。
+
+The desktop now stores results automatically in `Outputs` next to the application (outside a macOS
+bundle), falling back to user data when the install location is read-only. It restores the last valid
+benchmark/stress sessions and retains ten application-owned rounds in total, without deleting unknown
+or active archives. Diagnostic v2.1 separates warmup from calibration and rejects undersized sample
+batches; streaming output validation is untimed. ComputeMark v2 is unchanged. Starting stress reuses
+the live monitoring stream; report statistics remain scoped to the stress session. The references
+above are methodological comparisons, not bundled third-party benchmark engines.
+
 ### 追加的测试方法修订（diagnostic-v2）
 
 - 缓存页和 HTML 分为缓存带宽、缓存延迟、缓存层级检测三部分；原 `cache_hierarchy`
@@ -558,7 +609,7 @@ FPU 功耗及长时间稳定性仍需新安装包真机测试；不能从编译�
 Windows ARM64 与 Apple Silicon 缓存扫描使用有界容量逐出，不执行用户态不可用的
 逐行缓存失效指令，也不声称容量逐出等同于严格清空所有缓存。
 
-压力测试入口单独位于最右侧，不进入默认基准流程；在独立进程中运行，
+小工具入口单独位于最右侧，压力测试为首个子工具，不进入默认基准流程；负载在独立进程中运行，
 不能与基准测试同时启动，也不生成性能评分。首页新增一次性读取的硬件概览，
 标称／最高频率与实时监控分开；系统未公开的内存速率等字段明确显示不可用。
 CPU、FPU、缓存、内存共用一套线程预算；GPU 使用 Metal（macOS）或设备驱动的
@@ -584,7 +635,7 @@ python desktop_app.py --stress-worker --mode cpu --threads 1 --memory-mib 1 --du
 | macOS | 系统负载、内存、可读 SMC 温度区域和系统临界热状态 | SMC 已识别功耗／电压／风扇；授权后用 powermetrics 读取原生 E/P 核簇活跃平均频率和功耗 |
 | Windows | 系统负载、内存；已有 LibreHardwareMonitor WMI 提供的传感器和核心频率 | 数据源拒绝普通用户读取时，可申请本次会话的只读授权 |
 
-首次启动先探测普通权限；有额外权限需求时先说明用途，经用户同意再打开系统授权框。
+每次正常启动先说明增强只读监控的用途，经用户同意再打开系统授权框。
 仅固定功能的原生读取助手提权，界面、Python 工作进程与负载仍保持普通用户身份。
 授权仅本次会话有效，不安装驱动或常驻服务，不写 SMC，不控制风扇／频率／电压；
 拒绝授权保留普通监控，之后可通过增强监控重试。授权不会凭空创建 Windows 数据源。

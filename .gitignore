@@ -12,6 +12,7 @@ reports/*.html
 reports/charts/
 reports/runs/
 reports/stress-runs/
+Outputs/
 logs/
 *.log
 

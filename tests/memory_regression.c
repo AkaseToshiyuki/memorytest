@@ -25,10 +25,17 @@ int main(int argc, char **argv) {
     stream_initialize(a, b, c, 65);
     for (unsigned operation = 0; operation < STREAM_OPERATIONS; ++operation) {
         double result = stream_kernel(a, b, c, 65, operation, 3);
+        if (stream_validate(c, 65, operation, 3, result)) return 11;
         printf("%u %llu %.17g", operation, (unsigned long long)stream_bytes(operation, 65), result);
         if (operation >= STREAM_WRITE && operation <= STREAM_TRIAD)
             for (unsigned i = 0; i < 65; ++i) printf(" %.17g", c[i]);
         putchar('\n');
+        if (operation >= STREAM_WRITE && operation <= STREAM_TRIAD) {
+            double saved = c[32];
+            c[32] += 1;
+            if (!stream_validate(c, 65, operation, 3, result)) return 12;
+            c[32] = saved;
+        } else if (!stream_validate(c, 65, operation, 3, result + 1)) return 13;
     }
     void *buffer = malloc(65 * 64);
     if (!buffer) return 1;

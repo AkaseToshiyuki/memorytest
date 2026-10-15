@@ -1,7 +1,35 @@
 """Small native controls with consistent, visible hit targets on all platforms."""
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPalette
-from PySide6.QtWidgets import QLabel, QSizePolicy, QProxyStyle, QStyle, QStyleOptionSpinBox, QSpinBox
+from PySide6.QtWidgets import QLabel, QSizePolicy, QProxyStyle, QStyle, QStyleOptionSpinBox, QSpinBox, QCheckBox, QHeaderView
+
+
+class AllSensorsCheckBox(QCheckBox):
+    def nextCheckState(self):
+        # Partial is a display state, not an extra click on the way to All.
+        self.setCheckState(Qt.Unchecked if self.checkState() == Qt.Checked else Qt.Checked)
+
+
+class SensorHeader(QHeaderView):
+    def __init__(self, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self.all = AllSensorsCheckBox("All", self.viewport())
+        self.all.setTristate(True)
+        self.all.setEnabled(False)
+        self.sectionResized.connect(self.place_checkbox)
+        self.geometriesChanged.connect(self.place_checkbox)
+
+    def place_checkbox(self, *_):
+        self.all.setGeometry(self.sectionViewportPosition(0) + 6, 0,
+                             max(0, self.sectionSize(0) - 12), self.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.place_checkbox()
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self.place_checkbox()
 
 
 class ElidingLabel(QLabel):

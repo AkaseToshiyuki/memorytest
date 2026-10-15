@@ -1,5 +1,7 @@
 SMC protocol and identified sensor keys reference:
 https://github.com/exelban/stats
+Sensor key/name/platform table:
+https://github.com/exelban/stats/blob/c9e7ebe3390a84e3075946ffe39dda709c4747b1/Modules/Sensors/values.swift
 MemoryTest implements its own read-only Objective-C adapter. No fan control or
 other hardware-write functionality from Stats is included.
 

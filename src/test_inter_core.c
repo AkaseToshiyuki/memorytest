@@ -32,6 +32,10 @@
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
+#include <errno.h>
+#if !defined(__APPLE__) && !defined(_WIN32)
+#include <sched.h>
+#endif
 
 #if defined(__APPLE__) || defined(_WIN32)
 /* Affinity tags are not CPU IDs. A per-core matrix without verified pinning
@@ -89,22 +93,25 @@ typedef struct {
     pthread_cond_t  cv;
     _Atomic int     ready_to_run;  /* 1 = main has filled in target/role */
     _Atomic int     done_flag;     /* 1 = worker finished this task */
+    int initialized, affinity_ok, stopping;
 } worker_t;
 
 /* Shared cas_flag[NCPU], cache-line aligned. Each core "owns" flag[i].
  * When testing pair (i, j), worker i spins on flag[j] (peer's flag). */
 static _Atomic uint8_t *cas_flags = NULL;
 static int cas_flags_cap = 0;
+static size_t cas_stride = 128;
 
 static int cas_flags_ensure(int n) {
     if (n < cas_flags_cap) return 0;
     int new_cap = cas_flags_cap ? cas_flags_cap : 64;
     while (new_cap <= n) new_cap *= 2;
     /* Allocate cache-line aligned. */
-    size_t bytes = (size_t)new_cap * 64; /* 64 bytes per flag = one cache line */
-    _Atomic uint8_t *new_buf = aligned_alloc(64, bytes);
+    size_t bytes = (size_t)new_cap * cas_stride;
+    _Atomic uint8_t *new_buf = aligned_alloc(cas_stride, bytes);
     if (!new_buf) return -1;
     memset(new_buf, 0, bytes);
+    for (int i = 0; i < new_cap; ++i) atomic_init(new_buf + (size_t)i * cas_stride, 0);
     if (cas_flags) free((void *)cas_flags);
     cas_flags = new_buf;
     cas_flags_cap = new_cap;
@@ -113,13 +120,34 @@ static int cas_flags_ensure(int n) {
 
 /* Return pointer to core `c`'s flag (64-byte aligned slot). */
 static inline _Atomic uint8_t *flag_of(int c) {
-    return cas_flags + (size_t)c * 64;
+    return cas_flags + (size_t)c * cas_stride;
 }
 
 /* ===== Worker thread ===== */
 
 static worker_t *g_workers = NULL;     /* size = num_cpus */
 static int g_num_cpus = 0;
+static int g_created_workers = 0;
+static int g_cpu_ids[CPU_SETSIZE];
+
+/* Linux's allowed logical IDs, not a guessed 0..physical_count-1 sequence.
+ * Fixed CPU_SETSIZE is an explicit limit: oversized masks fail, never truncate. */
+static int allowed_cpu_ids(void) {
+    cpu_set_t allowed;
+    if (sched_getaffinity(0, sizeof(allowed), &allowed)) return -1;
+    int count = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (CPU_ISSET(cpu, &allowed)) g_cpu_ids[count++] = cpu;
+    return count;
+}
+
+static int bind_worker(int cpu) {
+    cpu_set_t wanted, actual;
+    CPU_ZERO(&wanted); CPU_SET(cpu, &wanted);
+    if (sched_setaffinity(0, sizeof(wanted), &wanted) ||
+        sched_getaffinity(0, sizeof(actual), &actual)) return -1;
+    return CPU_COUNT(&actual) == 1 && CPU_ISSET(cpu, &actual) && sched_getcpu() == cpu ? 0 : -1;
+}
 
 /* Per-worker synchronization: each worker has its own cond+mutex so the
  * master can wake exactly two workers per pair without thundering-herd
@@ -129,16 +157,24 @@ static int g_num_cpus = 0;
 static void *worker_main(void *arg) {
     worker_t *w = (worker_t *)arg;
 
-    set_cpu_affinity(w->core_id);
+    int pinned = bind_worker(w->core_id) == 0;
+    pthread_mutex_lock(&w->mu);
+    w->affinity_ok = pinned;
+    w->initialized = 1;
+    pthread_cond_signal(&w->cv);
+    pthread_mutex_unlock(&w->mu);
+    if (!pinned) return NULL;
 
     for (;;) {
         /* Sleep until master signals us. Each worker has its own mutex
          * and condvar; the master pthread_cond_signal()s us directly. */
         pthread_mutex_lock(&w->mu);
-        while (atomic_load_explicit(&w->ready_to_run, memory_order_acquire) == 0) {
+        while (!w->stopping && atomic_load_explicit(&w->ready_to_run, memory_order_acquire) == 0) {
             pthread_cond_wait(&w->cv, &w->mu);
         }
+        int stopping = w->stopping;
         pthread_mutex_unlock(&w->mu);
+        if (stopping) return NULL;
 
         /* Reset done_flag so master can wait for it. */
         atomic_store_explicit(&w->done_flag, 0, memory_order_release);
@@ -232,15 +268,37 @@ static void *worker_main(void *arg) {
 
 /* ===== Task dispatch (master side) ===== */
 
+static void worker_pool_destroy(void) {
+    for (int i = 0; i < g_created_workers; ++i) {
+        worker_t *w = &g_workers[i];
+        pthread_mutex_lock(&w->mu);
+        w->stopping = 1;
+        pthread_cond_signal(&w->cv);
+        pthread_mutex_unlock(&w->mu);
+        pthread_join(w->thread, NULL);
+        pthread_mutex_destroy(&w->mu);
+        pthread_cond_destroy(&w->cv);
+    }
+    free(g_workers); g_workers = NULL;
+    free((void *)cas_flags); cas_flags = NULL;
+    g_created_workers = g_num_cpus = cas_flags_cap = 0;
+}
+
 static int worker_pool_init(int n) {
+    if (n < 2 || n > allowed_cpu_ids()) return -1;
     g_num_cpus = n;
+    long line = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    cas_stride = 128;
+    while (line > 0 && cas_stride < (size_t)line && cas_stride < 4096) cas_stride *= 2;
+    if (line > 4096) return -1;
     if (cas_flags_ensure(n) < 0) return -1;
+    if (!atomic_is_lock_free(flag_of(0))) { worker_pool_destroy(); return -1; }
 
     g_workers = calloc((size_t)n, sizeof(worker_t));
-    if (!g_workers) return -1;
+    if (!g_workers) { worker_pool_destroy(); return -1; }
 
     for (int i = 0; i < n; i++) {
-        g_workers[i].core_id = i;
+        g_workers[i].core_id = g_cpu_ids[i];
         g_workers[i].state = WORKER_IDLE;
         pthread_mutex_init(&g_workers[i].mu, NULL);
         pthread_cond_init(&g_workers[i].cv, NULL);
@@ -248,7 +306,19 @@ static int worker_pool_init(int n) {
         atomic_store_explicit(&g_workers[i].done_flag, 0, memory_order_relaxed);
         if (pthread_create(&g_workers[i].thread, NULL, worker_main, &g_workers[i]) != 0) {
             fprintf(stderr, "[inter_core] pthread_create failed for core %d\n", i);
+            pthread_mutex_destroy(&g_workers[i].mu);
+            pthread_cond_destroy(&g_workers[i].cv);
+            worker_pool_destroy();
             return -1;
+        }
+        ++g_created_workers;
+        pthread_mutex_lock(&g_workers[i].mu);
+        while (!g_workers[i].initialized) pthread_cond_wait(&g_workers[i].cv, &g_workers[i].mu);
+        int ok = g_workers[i].affinity_ok;
+        pthread_mutex_unlock(&g_workers[i].mu);
+        if (!ok) {
+            fputs("[inter_core] CPU binding verification failed\n", stderr);
+            worker_pool_destroy(); return -1;
         }
     }
     return 0;
@@ -451,32 +521,32 @@ static double idx(const matrix_t *m, int i, int j, double *base) {
 
 /* ===== Main test driver ===== */
 
-void run_inter_core_latency_test(void) {
+int run_inter_core_latency_test(void) {
     print_header("INTER-CORE MEMORY ACCESS LATENCY TEST");
 
-    /* Use physical cores when HT/SMT is detected. Testing HT siblings
-     * doubles the matrix (N² → 4N² for same physical topology) and
-     * adds noise since siblings share execution units and caches. */
-    int physical = global_system_config.cpu_cores_physical;
-    long num_cpus = (physical > 0) ? physical : sysconf(_SC_NPROCESSORS_ONLN);
+    /* Report the allowed logical CPU topology honestly. Physical core count
+     * alone cannot identify CPU IDs or remove SMT siblings. */
+    long num_cpus = allowed_cpu_ids();
     if (num_cpus < 2) {
         printf("Not enough cores for inter-core test (need at least 2)\n");
-        return;
+        return 1;
     }
     int n = (int)num_cpus;
 
     if (worker_pool_init(n) < 0) {
         fprintf(stderr, "[inter_core] worker pool init failed\n");
-        return;
+        return 1;
     }
     matrix_t *M = matrix_alloc(n);
     if (!M) {
         fprintf(stderr, "[inter_core] matrix alloc failed\n");
-        return;
+        worker_pool_destroy(); return 1;
     }
 
-    printf("Detected %d CPU cores (using %d physical, HT siblings excluded)\n",
-           global_system_config.cpu_cores, n);
+    printf("Using %d allowed logical CPUs, including any allowed SMT siblings\n", n);
+    printf("CPU IDs:");
+    for (int i = 0; i < n; ++i) printf(" %d", g_cpu_ids[i]);
+    putchar('\n');
     printf("CPU: %s @ %d MHz\n", global_system_config.cpu_model, get_cpu_freq_mhz());
     printf("Clock: CLOCK_MONOTONIC (PMU cycle counter requires sudo on this host)\n");
     printf("Synchronization: CAS busy-wait (atomic compare_exchange)\n\n");
@@ -486,7 +556,7 @@ void run_inter_core_latency_test(void) {
     printf("Measuring %d x %d = %d core pairs (single pass, results cached)...\n\n", n, n, n*n);
 
     for (int i = 0; i < n; i++) {
-        printf("%-4d", i);
+        printf("%-4d", g_cpu_ids[i]);
         for (int j = 0; j < n; j++) {
             if (i == j) {
                 printf("%5s", "-");
@@ -541,7 +611,7 @@ void run_inter_core_latency_test(void) {
     printf("Measuring %d x %d = %d core pairs (single pass)...\n\n", n, n, n*n);
 
     for (int i = 0; i < n; i++) {
-        printf("%-4d", i);
+        printf("%-4d", g_cpu_ids[i]);
         for (int j = 0; j < n; j++) {
             if (i == j) {
                 printf("%5s", "-");
@@ -608,6 +678,9 @@ void run_inter_core_latency_test(void) {
         fprintf(json_fp, "{\n");
         fprintf(json_fp, "  \"cpu_name\": \"%s\",\n", global_system_config.cpu_model);
         fprintf(json_fp, "  \"num_cores\": %d,\n", n);
+        fprintf(json_fp, "  \"cpu_ids\": [");
+        for (int i = 0; i < n; ++i) fprintf(json_fp, "%s%d", i ? ", " : "", g_cpu_ids[i]);
+        fprintf(json_fp, "],\n");
         fprintf(json_fp, "  \"max_freq_mhz\": %d,\n", get_cpu_freq_mhz());
         fprintf(json_fp, "  \"arch\": \"%s\",\n", arch_names[current_arch]);
         fprintf(json_fp, "  \"latency_stats\": {\n");
@@ -681,12 +754,12 @@ void run_inter_core_latency_test(void) {
         report_write_system_info(report);
         report_section(report, "CAS Latency Matrix (ns, median [p25..p75])");
         report_write(report, "| **Core** |");
-        for (int j = 0; j < n; j++) report_write(report, " %d |", j);
+        for (int j = 0; j < n; j++) report_write(report, " %d |", g_cpu_ids[j]);
         report_write(report, "\n|---|");
         for (int j = 0; j < n; j++) report_write(report, "---:|");
         report_write(report, "\n");
         for (int i = 0; i < n; i++) {
-            report_write(report, "| %d |", i);
+            report_write(report, "| %d |", g_cpu_ids[i]);
             for (int j = 0; j < n; j++) {
                 if (i == j) report_write(report, " - |");
                 else {
@@ -705,12 +778,12 @@ void run_inter_core_latency_test(void) {
 
         report_section(report, "CAS Throughput Matrix (Mops/s)");
         report_write(report, "| **Core** |");
-        for (int j = 0; j < n; j++) report_write(report, " %d |", j);
+        for (int j = 0; j < n; j++) report_write(report, " %d |", g_cpu_ids[j]);
         report_write(report, "\n|---|");
         for (int j = 0; j < n; j++) report_write(report, "---:|");
         report_write(report, "\n");
         for (int i = 0; i < n; i++) {
-            report_write(report, "| %d |", i);
+            report_write(report, "| %d |", g_cpu_ids[i]);
             for (int j = 0; j < n; j++) {
                 if (i == j) report_write(report, " - |");
                 else {
@@ -725,7 +798,9 @@ void run_inter_core_latency_test(void) {
         report_write(report, "- Clock: CLOCK_MONOTONIC\n");
         report_write(report, "- Architecture: %s\n", arch_names[current_arch]);
         report_write(report, "- Synchronization: CAS busy-wait (atomic compare_exchange)\n");
-        report_write(report, "- Worker pool: one persistent thread per core, pinned via set_cpu_affinity\n");
+        report_write(report, "- Worker pool: one thread per allowed logical CPU; affinity mask and current CPU verified\n");
+        report_write(report, "- SMT siblings are included when allowed; matrices use actual OS logical CPU IDs\n");
+        report_write(report, "- CAS is lock-free; isolated flag stride: %zu B\n", cas_stride);
         report_write(report, "- Matrix measured once; reused for console / JSON / Markdown\n");
         report_write(report, "- Latency: two discarded warmup batches, %d measured batches of %d round trips\n", NUM_SAMPLES, ROUND_TRIPS_PER_SAMPLE);
         report_write(report, "- Throughput: discarded warmup dispatch, median of %d measured dispatches\n", BW_SAMPLES);
@@ -738,10 +813,11 @@ void run_inter_core_latency_test(void) {
 
     matrix_free(M);
     free(bw_array);
-    /* Workers are infinite loops; they'll exit on process exit. */
+    worker_pool_destroy();
 
     printf("\n[DONE] Inter-core latency test complete.\n");
     printf("  Heatmap: run 'make report' to generate reports/charts/inter_core_heatmap.png\n");
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -774,7 +850,6 @@ int main(int argc, char *argv[]) {
     }
 
     print_system_info();
-    run_inter_core_latency_test();
-    return 0;
+    return run_inter_core_latency_test();
 }
 #endif /* !__APPLE__ */

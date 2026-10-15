@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QPushButton, QScr
 
 from benchmark_registry import ROOT
 from desktop_theme import label
-from desktop_widgets import ReadableSpinBox
+from desktop_widgets import ReadableSpinBox, SensorHeader
 from i18n import display, tr
 from presentation import THEMES, curve_color
 from process_control import app_command
 from stress_common import MODES, Statistics
+from result_storage import local_file, sample_tail
 
 
 class LivePlot(QWidget):
@@ -129,6 +130,11 @@ class StressPage(QWidget):
         self.preview_counter = 0
         self.preview_started = time.monotonic()
         self.preview_restart = False
+        self.preview_stopping = False
+        self.sensor_directory = tempfile.TemporaryDirectory(prefix="memorytest-sensors-")
+        self.sensor_samples = Path(self.sensor_directory.name) / "latest.json"
+        self.session_elapsed = 0
+        self.default_sensor_visible = True
         self.bindings, self.buffers = [], {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 16, 0, 0)
@@ -204,13 +210,16 @@ class StressPage(QWidget):
         scroll.setWidget(self.plot)
         splitter.addWidget(scroll)
         self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeader(SensorHeader(self.table))
+        self.all_sensors = self.table.horizontalHeader().all
+        self.all_sensors.stateChanged.connect(self.select_all_sensors)
         self.table.verticalHeader().hide()
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setMinimumSectionSize(48)
-        self.table.setColumnWidth(0, 52)
+        self.table.setColumnWidth(0, 88)
         self.columns_initialized = False
         self.columns_user_resized = False
         self.adjusting_columns = False
@@ -250,7 +259,9 @@ class StressPage(QWidget):
         self.access_status.setText(tr(self.access_status_key, lang))
         self.access_status.setVisible(bool(self.access_status.text()))
         self.refresh_warning()
-        self.table.setHorizontalHeaderLabels([tr(key, lang) for key in ("show", "sensors", "unit", "current", "minimum", "maximum", "average")])
+        self.table.setHorizontalHeaderLabels([""] + [tr(key, lang) for key in ("sensors", "unit", "current", "minimum", "maximum", "average")])
+        self.all_sensors.setToolTip(tr("all_sensors", lang))
+        self.all_sensors.setAccessibleName(tr("all_sensors", lang))
         self.refresh_table()
         self.plot.refresh()
         self.refresh_controls()
@@ -263,7 +274,7 @@ class StressPage(QWidget):
             widget.setEnabled(not self.active)
         access = getattr(self.window, "monitor_access", None)
         authorized = bool(access and access.authorized)
-        self.enhanced.setVisible(not authorized)
+        self.enhanced.setVisible(not authorized and getattr(self.window, "monitor_permission_resolved", False))
         self.retry_monitor.setVisible(authorized and access.status in {"error", "denied", "stopped", "unavailable"})
 
     def refresh_warning(self):
@@ -310,14 +321,16 @@ class StressPage(QWidget):
             QTimer.singleShot(0, self.equalize_columns)
 
     def hideEvent(self, event):
-        self.stop_preview()
+        if not self.active:
+            self.stop_preview()
         super().hideEvent(event)
         self.sync_access()
 
     def start_preview(self):
-        if self.active or self.run_dir or self.preview.state() != QProcess.NotRunning or not self.isVisible():
+        if (self.run_dir and not self.active) or self.preview.state() != QProcess.NotRunning or not (self.isVisible() or self.active):
             return
-        command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--bin-dir", str(ROOT / "bin")]
+        command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--bin-dir", str(ROOT / "bin"),
+                                                  "--snapshot-file", str(self.sensor_samples)]
         if self.enhanced.isChecked():
             command.append("--enhanced")
             command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
@@ -326,6 +339,7 @@ class StressPage(QWidget):
 
     def stop_preview(self):
         if self.preview.state() != QProcess.NotRunning:
+            self.preview_stopping = True
             self.preview.terminate()
 
     def enhanced_changed(self):
@@ -344,9 +358,15 @@ class StressPage(QWidget):
                 (self.active or (self.isVisible() and not self.run_dir)))
 
     def preview_finished(self, *_):
+        self.preview_stopping = False
         if self.preview_restart:
             self.preview_restart = False
             self.start_preview()
+        elif self.active:
+            # Supervisor also fails closed if the shared snapshot goes stale.
+            self.stop()
+            self.status_key = "backend_error"
+            self.retranslate()
 
     def probe_finished(self, *_):
         self.read(self.probe)
@@ -362,10 +382,9 @@ class StressPage(QWidget):
                 raw = line.decode("utf-8")
                 if process == self.preview:
                     data = json.loads(raw)
-                    if not self.active:
-                        self.preview_stats.sample(data["values"])
-                        self.preview_counter += 1
-                        self.sample(dict(data, statistics=self.preview_stats.rows, elapsed=time.monotonic() - self.preview_started))
+                    self.preview_stats.sample(data["values"])
+                    self.preview_counter += 1
+                    self.sample(dict(data, statistics=self.preview_stats.rows, elapsed=time.monotonic() - self.preview_started))
                 elif raw.startswith("@memorytest "):
                     self.handle(json.loads(raw[12:]))
             except (ValueError, KeyError, TypeError):
@@ -389,10 +408,14 @@ class StressPage(QWidget):
             self.run_dir = Path(data["path"])
         elif data["type"] == "stress_sample":
             self.status_key = "running" if data.get("modes") else "idle_load"
-            self.sample(data)
+            self.session_elapsed = data["elapsed"]
+            self.status.setText(tr(self.status_key, self.window.language))
+            self.elapsed.setText(f'{int(self.session_elapsed)//60}:{int(self.session_elapsed)%60:02d}')
         elif data["type"] == "stress_finished":
             self.status_key = data["reason"]
             self.report = Path(data["report"]) if data.get("report") else None
+            if data.get("cleanup_errors"):
+                self.window.set_status("cleanup_error")
             self.retranslate()
 
     def sample(self, data):
@@ -404,16 +427,52 @@ class StressPage(QWidget):
         for key, item in self.catalog.items():
             if key not in self.plot.colors:
                 self.plot.colors[key] = len(self.plot.colors)
-                self.plot.visible.add(key)
+                if self.default_sensor_visible:
+                    self.plot.visible.add(key)
         self.plot.catalog = self.catalog
         self.plot.append(data["elapsed"], data["values"])
-        self.elapsed.setText(f'{int(data["elapsed"])//60}:{int(data["elapsed"])%60:02d}')
+        elapsed = self.session_elapsed if self.active else data["elapsed"]
+        self.elapsed.setText(f'{int(elapsed)//60}:{int(elapsed)%60:02d}')
         # No widget relabelling, geometry negotiation or full retranslation at 1 Hz.
         self.status.setText(tr(self.status_key, self.window.language))
         self.refresh_warning()
         self.refresh_table()
         if old_keys != set(self.catalog):
             self.plot.refresh()
+
+    def restore_archive(self, directory, manifest):
+        try:
+            catalog, stats = manifest["catalog"], manifest["statistics"]
+            if any(not isinstance(item, dict) or "label" not in item or "unit" not in item
+                   for item in catalog.values()):
+                return False
+            if any(not isinstance(row, dict) for row in stats.values()):
+                return False
+            elapsed = float(manifest.get("elapsed", 0))
+            if not math.isfinite(elapsed) or elapsed < 0:
+                return False
+            samples = sample_tail(directory)
+            self.run_dir = directory
+            self.report = local_file(directory, manifest.get("html_report", "stress_report.html"))
+            self.catalog, self.stats = catalog, stats
+            self.plot.catalog = catalog
+            self.plot.samples.clear()
+            self.plot.colors = {key: index for index, key in enumerate(catalog)}
+            self.plot.visible = set(catalog)
+            self.preview_stats.rows = {key: dict(row) for key, row in stats.items()
+                                       if isinstance(row.get("count"), int) and row["count"] > 0}
+            self.preview_started = time.monotonic() - elapsed
+            for sample in samples:
+                self.plot.append(sample["elapsed"], sample["values"])
+            self.status_key = "restored"
+            self.elapsed.setText(f"{int(elapsed)//60}:{int(elapsed)%60:02d}")
+            self.elapsed.setToolTip(directory.name)
+            self.refresh_table()
+            self.plot.refresh()
+            self.retranslate()
+            return True
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            return False
 
     def refresh_table(self):
         self.table.blockSignals(True)
@@ -443,6 +502,21 @@ class StressPage(QWidget):
                     item.setForeground(QColor(curve_color(self.plot.colors.get(key, 0), self.window.theme)))
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
+        self.refresh_all_sensors()
+
+    def refresh_all_sensors(self):
+        count = len(set(self.catalog) & self.plot.visible)
+        state = Qt.Unchecked if not count else Qt.Checked if count == len(self.catalog) else Qt.PartiallyChecked
+        self.all_sensors.blockSignals(True)
+        self.all_sensors.setCheckState(state)
+        self.all_sensors.setEnabled(bool(self.catalog))
+        self.all_sensors.blockSignals(False)
+
+    def select_all_sensors(self, state):
+        self.default_sensor_visible = state == Qt.Checked.value
+        self.plot.visible = set(self.catalog) if self.default_sensor_visible else set()
+        self.refresh_table()
+        self.plot.refresh()
 
     def sensor_toggled(self, item):
         if item.column() != 0:
@@ -453,6 +527,7 @@ class StressPage(QWidget):
         else:
             self.plot.visible.discard(key)
         self.plot.refresh()
+        self.refresh_all_sensors()
 
     def selected_modes(self):
         return [mode for mode, check in self.modes.items() if check.isChecked() and check.isEnabled()]
@@ -475,7 +550,6 @@ class StressPage(QWidget):
     def start(self):
         if self.active or self.window.benchmark_active or self.caps is None:
             return
-        self.stop_preview()
         try:
             self.control = tempfile.TemporaryDirectory(prefix="memorytest-stress-control-")
             output = Path(self.window.output.text()).expanduser().resolve()
@@ -485,16 +559,19 @@ class StressPage(QWidget):
             self.retranslate()
             return
         self.run_dir = self.report = None
-        self.stats = {}
-        self.plot.samples.clear()
+        if self.preview_stopping:
+            self.preview_restart = True
+        self.session_elapsed = 0
         self.buffers[self.process] = b""
         self.status_key = "running"
         self.active = True
         self.generation += 1
         self.window.set_stress_running(True)
+        self.window.settings.setValue("archiveOutput", str(output))
         command = app_command("stress-worker") + ["--threads", str(self.threads.value()), "--memory-mib", str(self.memory.value()),
             "--duration", str(self.duration.value() * 60), "--control", str(Path(self.control.name) / "request.json"),
             "--parent-pid", str(os.getpid()), "--output-dir", str(output), "--bin-dir", str(ROOT / "bin"),
+            "--sensor-samples", str(self.sensor_samples),
             "--language", self.window.language, "--theme", self.window.theme]
         selected = self.selected_modes()
         for mode in selected:
@@ -505,6 +582,9 @@ class StressPage(QWidget):
             command.append("--enhanced")
             command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
         self.sync_access()
+        # Keep the existing preview and elevated reader alive. The supervisor
+        # consumes this same stream instead of creating a second sensor worker.
+        self.start_preview()
         self.process.start(command[0], command[1:])
         self.retranslate()
 
@@ -542,6 +622,7 @@ class StressPage(QWidget):
     def finished(self, code, *_):
         self.read(self.process)
         self.active = False
+        self.stop_preview()
         if self.status_key in {"running", "stopping", "idle_load"}:
             self.status_key = "backend_error" if code else "stopped"
         if self.control:
@@ -574,3 +655,4 @@ class StressPage(QWidget):
                 if process.state() != QProcess.NotRunning:
                     self.kill_tree(process)
                     process.waitForFinished(1000)
+        self.sensor_directory.cleanup()

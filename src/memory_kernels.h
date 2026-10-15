@@ -2,6 +2,7 @@
 #define MEMORY_KERNELS_H
 #include "common.h"
 #include <math.h>
+#include <float.h>
 
 enum { STREAM_READ, STREAM_WRITE, STREAM_COPY, STREAM_SCALE, STREAM_ADD,
        STREAM_TRIAD, STREAM_STRIDE64, STREAM_STRIDE256, STREAM_OPERATIONS };
@@ -56,6 +57,39 @@ static double stream_kernel(const double *restrict a, const double *restrict b,
     }
     return operation == STREAM_READ || operation >= STREAM_STRIDE64
             ? sum0 + sum1 + sum2 + sum3 : c[words - 1];
+}
+
+/* Untimed validation against the input definition, not a second invocation of
+ * the measured kernel. Check every written word (including middle corruption),
+ * and derive read/stride reductions from the eight-element input period. */
+static int stream_validate(const double *c, size_t words, unsigned operation,
+                           uint64_t passes, double result) {
+    if (!words || !passes || operation >= STREAM_OPERATIONS || !isfinite(result)) return -1;
+    if (operation == STREAM_READ || operation >= STREAM_STRIDE64) {
+        long double expected;
+        if (operation == STREAM_READ) {
+            expected = (long double)(words / 8) * 11.5L;
+            for (size_t i = 0; i < words % 8; ++i) expected += 1.0L + i * .125L;
+        } else {
+            size_t stride = operation == STREAM_STRIDE64 ? 8 : 32;
+            expected = (words + stride - 1) / stride;
+        }
+        expected *= passes;
+        return fabsl((long double)result - expected) <= expected * 64 * DBL_EPSILON ? 0 : -1;
+    }
+    for (size_t i = 0; i < words; ++i) {
+        double a = 1.0 + (i % 8) * .125, b = 2.0 + (i % 4) * .25, expected;
+        switch (operation) {
+        case STREAM_WRITE: expected = 3; break;
+        case STREAM_COPY: expected = a; break;
+        case STREAM_SCALE: expected = 3 * a; break;
+        case STREAM_ADD: expected = a + b; break;
+        default: expected = a + 3 * b; break;
+        }
+        /* Inputs and all outputs here are exactly representable in binary64. */
+        if (c[i] != expected) return -1;
+    }
+    return 0;
 }
 
 static uint64_t chain_random(uint64_t *state) {

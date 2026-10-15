@@ -163,3 +163,45 @@ including cleanup, two validated-completion heartbeats, normal duration stop.
 Evidence: `build/validation-algorithms-gpu/stress-runs/20261014-200015-nasa2bmh/`.
 This does not validate M4 Pro Metal utilization or prolonged thermal behavior.
 Native six-target installer CI must still pass for this revision before handoff.
+
+### Archive, monitoring continuity and diagnostic-v2.1 checks (2026-10-15)
+
+- `test_storage.py`: automatic output/fallback, ten combined benchmark/stress rounds,
+  active-writer protection, OS cleanup locks, legacy/unknown/link preservation,
+  bounded history restoration, corrupt-result fallback, inline licenses, short title,
+  equal-width cache controls, centered empty views and the Tools/stress hierarchy.
+- `test_monitor_continuity.py`: unchanged sensor process and authorized helper across
+  stress start, preserved plot/selection, shared fresh snapshots, thermal/stale-stream
+  stop, All tri-state behavior and per-launch authorization refusal. Uses fixtures;
+  no elevation or actual stress is launched by these tests.
+- `test_sampling_protocol.py`: an independent synthetic clock/kernel checks that
+  cold warmup and descheduled calibration do not shorten the final equal-work batch;
+  stalled/backward clocks and kernel errors fail within a bounded number of calls.
+- Memory regression checks untimed full-array validation and injected corruption;
+  intercore checks sparse allowed CPU IDs, placement failure, partial thread-creation
+  cleanup and the existing two-worker bounded protocol. No whole-machine matrix.
+- SMC fixtures check known M1–M4 distinctions, M4 base vs Pro/Max GPU keys, typed
+  power/voltage/fan labels and unknown-model fallback. These do not establish full
+  Apple Silicon or Intel Mac coverage or physical SMC availability.
+
+Local full regression before the final small warning/documentation changes:
+**152 discovered, 146 passed, 6 platform-dependent skips, 185.723 seconds**,
+using `.venv-desktop/bin/python`; log `/tmp/memorytest-oct15-full-tests.log`.
+All seven native benchmark binaries built successfully (`/tmp/memorytest-oct15-build.log`).
+Final focused checks and six-target native installer results are recorded below
+when completed. ComputeMark scoring/kernel/calibration remain unchanged.
+
+Final focused local checks: storage **16/16 (6.153 s)**, monitoring transitions
+**8/8 (1.508 s)**; logs `/tmp/memorytest-oct15-final-storage.log` and
+`/tmp/memorytest-oct15-final-continuity.log`. The extra storage case verifies
+that retention errors stay visible after a successful worker exit. Rebuild and
+`git diff --check` passed.
+
+A real Qt/QProcess shared-stream check also passed with **no load modes selected**,
+one idle worker and a 1 MiB budget: the preview PID stayed unchanged, samples grew
+from 2 to 4, and the supervisor stopped with `user_stop`. The initial harness
+expected the UI key `stopped` instead of the supervisor's documented `user_stop`;
+the corrected assertion passed without an implementation change. Evidence:
+`/tmp/memorytest-oct15-shared-runtime-final.log` and
+`build/validation-oct15-shared/stress-runs/20261015-095933-788qfn2x/`.
+This was unprivileged Linux monitoring, not Mac authorization or SMC verification.
