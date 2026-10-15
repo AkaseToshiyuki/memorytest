@@ -160,6 +160,7 @@ def main():
         if kind in {"cpu", "dram"} and not snapshot["devices"]:
             raise RuntimeError(f"Packaged {kind} inspector returned no system summary")
         inspections.append({"schema": snapshot["schema"], "kind": snapshot["kind"],
+            "startup_access": snapshot.get("access"),
             "device_count": len(snapshot["devices"]), "sources": snapshot.get("sources", []),
             "availability": [{"fields": sorted({field["name"] for group in dev["groups"]
                               for field in group["fields"] if field.get("value") is not None}),

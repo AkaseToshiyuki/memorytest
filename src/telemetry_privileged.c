@@ -3,7 +3,7 @@
  * '1' (sample), '0' (pause), and 'q' (quit). The separate --inspect mode uses
  * fixed bounded inventory reads defined in hardware_privileged.h. Closing the authenticated local
  * connection or the requesting GUI always ends the helper and its child.
- * OS authorization is performed by the caller, never by this binary. */
+ * Privileges are inherited at startup; this binary never requests elevation. */
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700

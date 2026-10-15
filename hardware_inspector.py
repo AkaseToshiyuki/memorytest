@@ -21,6 +21,7 @@ import sys
 import time
 
 import psutil
+from runtime_permissions import is_administrator
 
 KINDS = ("cpu", "gpu", "dram", "disk")
 LIMIT = 2_000_000
@@ -120,7 +121,7 @@ class Reader:
         self.deadline = time.monotonic() + budget
         self.sources = []
         self.access = access
-        self.privileged = access is not None
+        self.privileged = access is not None or is_administrator()
 
     def run(self, args, timeout=7):
         remaining = self.deadline - time.monotonic()

@@ -9,11 +9,11 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from benchmark_registry import ROOT
 from i18n import display, ref
-from monitor_access import MonitorAccess, authorization_command, normalize_windows, parse_powermetrics
+from monitor_access import MonitorAccess, reader_command, normalize_windows, parse_powermetrics
 from sensor_definitions import smc_label
 from telemetry import Provider
 
@@ -109,19 +109,27 @@ Nominal frequency: 9000 MHz
             path.write_text("[]")
             self.assertIsNone(provider.sample()["values"]["extra"])
 
-    def test_authorization_uses_only_fixed_helper_and_numeric_session_arguments(self):
+    def test_reader_uses_only_fixed_helper_and_numeric_session_arguments(self):
         helper = Path("/tmp/Memory Test's $() app/telemetry_privileged")
-        command = authorization_command(helper, 12345, "ab" * 32, 1234, "darwin")
-        self.assertEqual(command[0], "/usr/bin/osascript")
-        self.assertEqual(shlex.split(command[-1]), [str(helper.resolve()), "12345", "ab" * 32, "1234"])
-        command = authorization_command(helper, 12345, "ab" * 32, 1234, "linux")
-        self.assertEqual(command[:2], ["/usr/bin/pkexec", str(helper.resolve())])
+        command = reader_command(helper, 12345, "ab" * 32, 1234)
+        self.assertEqual(command, [str(helper.resolve()), "12345", "ab" * 32, "1234"])
         self.assertNotIn("python", " ".join(command).lower())
 
-    def test_socket_setup_failure_leaves_no_authorization_spinner(self):
+    def test_standard_process_never_starts_privileged_monitor(self):
         access = MonitorAccess()
         self.addCleanup(access.close)
-        access.status = "authorizing"
+        launch = Mock()
+        with patch("monitor_access.is_administrator", return_value=False):
+            access.start(launcher=launch)
+            self.assertFalse(access.available())
+        self.assertEqual(access.status, "denied")
+        self.assertIsNone(access.thread)
+        launch.assert_not_called()
+
+    def test_socket_setup_failure_leaves_no_startup_spinner(self):
+        access = MonitorAccess()
+        self.addCleanup(access.close)
+        access.status = "starting"
         with patch("monitor_access.socket.socket", side_effect=OSError("unavailable")):
             access._run(None)
         self.assertEqual(access.status, "error")
@@ -223,7 +231,8 @@ class NativeMonitorTests(unittest.TestCase):
         access = MonitorAccess(self.binary)
         self.addCleanup(access.close)
         access.set_active(True)
-        access.start(launcher=lambda args: subprocess.Popen(args[1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        with patch("monitor_access.is_administrator", return_value=True):
+            access.start(launcher=lambda args: subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         deadline = time.monotonic() + 4
         while not access.samples_path.exists() and time.monotonic() < deadline:
             time.sleep(.02)

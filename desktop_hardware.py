@@ -77,9 +77,6 @@ class HardwarePage(QWidget):
         self.status = label("", "status")
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
-        self.admin_button = QPushButton()
-        self.admin_button.clicked.connect(self.refresh_admin)
-        row.addWidget(self.admin_button)
         self.serials = QCheckBox()
         self.serials.toggled.connect(self.render)
         row.addWidget(self.serials)
@@ -97,6 +94,11 @@ class HardwarePage(QWidget):
     def refresh(self):
         if self.access is not None or self.process.state() != QProcess.NotRunning or self.window.closing:
             return
+        if self.window.administrator:
+            access = InspectorAccess()
+            if access.helper.is_file():
+                self._refresh_inherited(access)
+                return
         self.buffer.clear()
         self.stop_reason = None
         self.status_key = "hardware_reading"
@@ -111,19 +113,17 @@ class HardwarePage(QWidget):
         self.deadline.start(35000)
         self.refresh_controls()
 
-    def refresh_admin(self):
-        if self.access is not None or self.process.state() != QProcess.NotRunning or self.window.closing:
-            return
+    def _refresh_inherited(self, access):
         self.previous_device = self.selector.currentData()
         self.snapshot = None
         self.selector.clear()
         self.buffer.clear()
         self.stop_reason = None
-        self.status_key = "hardware_authorizing"
-        self.access = InspectorAccess()
+        self.status_key = "hardware_reading"
+        self.access = access
         self.access.start(self.kind)
         self.access_poll.start()
-        self.deadline.start(170000)
+        self.deadline.start(55000)
         self.refresh_controls()
         self.render()
 
@@ -132,8 +132,8 @@ class HardwarePage(QWidget):
         if access is None:
             self.access_poll.stop()
             return
-        if access.status in {"authorizing", "reading"}:
-            self.status_key = "hardware_authorizing" if access.status == "authorizing" else "hardware_admin_reading"
+        if access.status in {"starting", "reading"}:
+            self.status_key = "hardware_reading"
             self.refresh_controls()
             return
         self.access = None
@@ -143,8 +143,7 @@ class HardwarePage(QWidget):
             self.buffer = bytearray(json.dumps(access.snapshot).encode())
             self.finished(0)
         else:
-            self.status_key = {"denied": "hardware_authorization_denied", "unavailable": "hardware_helper_missing",
-                               "timeout": "timeout", "cancelled": "interrupted"}.get(access.status, "hardware_read_failed")
+            self.status_key = {"timeout": "timeout", "cancelled": "interrupted"}.get(access.status, "hardware_read_failed")
         access.close()
         self.refresh_controls()
         self.render()
@@ -177,7 +176,7 @@ class HardwarePage(QWidget):
                     if not isinstance(dev, dict) or not all(key in dev for key in ("id", "name", "groups", "tables", "notices")):
                         raise ValueError("invalid device")
                 self.snapshot = data
-                self.status_key = "hardware_admin_snapshot" if data.get("access") == "administrator" else "hardware_snapshot"
+                self.status_key = "hardware_snapshot"
                 self.selector.blockSignals(True)
                 self.selector.clear()
                 for dev in data["devices"]:
@@ -224,7 +223,6 @@ class HardwarePage(QWidget):
     def refresh_controls(self):
         busy = self.access is not None or self.process.state() != QProcess.NotRunning
         self.refresh_button.setEnabled(not busy)
-        self.admin_button.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
         self.copy_button.setEnabled(self.snapshot is not None and not busy)
         self.export_button.setEnabled(self.snapshot is not None and not busy)
@@ -243,7 +241,6 @@ class HardwarePage(QWidget):
                             (self.copy_button, "copy"), (self.export_button, "export")):
             button.setText(tr(key, self.window.language))
         self.serials.setText(tr("show_serials", self.window.language))
-        self.admin_button.setText(tr("hardware_admin_refresh", self.window.language))
         self.selector.setAccessibleName(tr("select_device", self.window.language))
         if self.snapshot:
             for index, dev in enumerate(self.snapshot["devices"]):

@@ -19,6 +19,7 @@ from result_model import ModuleResult, build_module, split_legacy_result
 from app_version import RELEASE_TAG
 from result_storage import (application_directory, writable_output, recent_archives,
                             local_file, prune_archives)
+from runtime_permissions import is_administrator
 
 
 class MainWindow(QMainWindow):
@@ -50,8 +51,8 @@ class MainWindow(QMainWindow):
         self.active_modules = []
         self.benchmark_active = False
         self.stress_active = False
-        self.monitor_permission_asked = False
-        self.monitor_permission_resolved = False
+        self.administrator = is_administrator()
+        self.monitor_started = False
         self.status_key = "ready"
         self.module_status = {name: "not_run" if supported(name) else "unsupported" for name in TESTS}
         self.status_highlight = True
@@ -241,10 +242,8 @@ class MainWindow(QMainWindow):
         self.stress_button = self.tools_button  # Existing integrations use this widget handle.
         from monitor_access import MonitorAccess
         self.monitor_access = MonitorAccess()
-        self.permission_probe = QProcess(self)
-        self.permission_probe.finished.connect(self.monitor_probe_finished)
-        self.authorization_timer = QTimer(self)
-        self.authorization_timer.timeout.connect(self.monitor_authorized)
+        self.monitor_state_timer = QTimer(self)
+        self.monitor_state_timer.timeout.connect(self.monitor_access_changed)
         self.open_report.setEnabled(False)
         self.language_combo.currentIndexChanged.connect(self.preferences_changed)
         self.theme_combo.currentIndexChanged.connect(self.preferences_changed)
@@ -261,67 +260,35 @@ class MainWindow(QMainWindow):
         if autodetect:
             QTimer.singleShot(0, self.load_hardware)
 
-    def probe_monitor_access(self):
-        if self.closing or self.monitor_permission_asked:
+    def start_monitor_access(self):
+        if self.closing or self.monitor_started:
             return
-        self.monitor_permission_asked = True
-        self.request_monitor_access(explain=True)
-
-    def monitor_probe_finished(self, *_):
-        if self.closing:
+        self.monitor_started = True
+        if not self.administrator:
             return
-        try:
-            sample = json.loads(bytes(self.permission_probe.readAllStandardOutput())[:131072])
-        except (ValueError, TypeError):
-            return
-        self.monitor_permission_resolved = True
-        if sample.get("needs_admin"):
-            self.request_monitor_access(explain=True)
-
-    def request_monitor_access(self, explain=False):
-        if self.monitor_access.status == "ready":
-            self.stress_page.enhanced.setChecked(True)
-            self.stress_page.sync_access()
-            self.stress_page.refresh_controls()
-            return
-        if explain:
-            answer = QMessageBox.question(self, tr("monitor_permission_title", self.language),
-                tr("monitor_permission_body", self.language), QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
-                self.monitor_permission_resolved = True
-                self.stress_page.access_status_key = "monitor_denied"
-                self.stress_page.retranslate()
-                return
         if not self.monitor_access.available():
-            self.monitor_permission_resolved = True
             self.stress_page.access_status_key = "monitor_unavailable"
             self.stress_page.retranslate()
             return
         self.monitor_access.start()
-        self.stress_page.access_status_key = "monitor_authorizing"
-        self.stress_page.retranslate()
-        self.authorization_timer.start(200)
+        self.stress_page.sync_access()
+        self.monitor_state_timer.start(200)
 
-    def monitor_authorized(self):
+    def monitor_access_changed(self):
         status = self.monitor_access.status
-        if status == "authorizing":
+        if status == "starting":
             return
         if self.closing:
-            self.authorization_timer.stop()
+            self.monitor_state_timer.stop()
             return
-        self.monitor_permission_resolved = True
-        key = "monitor_authorized" if status == "ready" else "monitor_failed" if status == "error" else "monitor_denied"
+        key = "monitor_standard" if status == "ready" else "monitor_failed"
         if status == "ready":
-            self.authorization_timer.setInterval(1000)
+            self.monitor_state_timer.setInterval(1000)
         else:
-            self.authorization_timer.stop()
+            self.monitor_state_timer.stop()
         if self.stress_page.access_status_key == key:
             return
         self.stress_page.access_status_key = key
-        if status == "ready":
-            self.stress_page.enhanced.setChecked(True)
-        elif not self.monitor_access.authorized:
-            self.stress_page.enhanced.setChecked(False)
         self.stress_page.sync_access()
         self.stress_page.retranslate()
 
@@ -703,10 +670,7 @@ class MainWindow(QMainWindow):
                 self.stress_page.stop()
             event.ignore()
         else:
-            self.authorization_timer.stop()
-            if self.permission_probe.state() != QProcess.NotRunning:
-                self.stress_page.kill_tree(self.permission_probe)
-                self.permission_probe.waitForFinished(1000)
+            self.monitor_state_timer.stop()
             self.monitor_access.close()
             self.stress_page.shutdown()
             event.accept()

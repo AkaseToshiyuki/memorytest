@@ -1,21 +1,17 @@
-"""OS-authorized, session-only access to a fixed native read-only sensor helper.
+"""Session-only sensor helper inheriting the application's startup privileges.
 
-The GUI, Python workers and benchmarks always retain the user's identity. No
-password is read by this program. IPC carries sensor output and three fixed
-start/pause/quit messages, never commands, paths or code to the elevated side.
+No OS authorization requests or privilege changes. IPC carries sensor output
+and three fixed start/pause/quit messages, never commands, paths or code.
 """
 from collections import deque
-import ctypes
 import hmac
 import json
 import os
 from pathlib import Path
 import re
 import secrets
-import shlex
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -23,6 +19,7 @@ import time
 from benchmark_registry import ROOT
 from i18n import ref
 from sensor_definitions import named_sensor
+from runtime_permissions import is_administrator
 
 
 def parse_powermetrics(text):
@@ -71,55 +68,11 @@ def normalize_windows(sensors):
     return result
 
 
-def authorization_command(helper, port, token, parent_pid, platform=None, inspection=False):
-    platform = platform or sys.platform
+def reader_command(helper, port, token, parent_pid, inspection=False):
     arguments = [str(Path(helper).resolve()), str(port), token, str(parent_pid)]
     if inspection:
         arguments.append("--inspect")
-    if platform == "darwin":
-        return ["/usr/bin/osascript", "-e", "on run argv", "-e",
-                "do shell script (item 1 of argv) with administrator privileges", "-e", "end run", shlex.join(arguments)]
-    if platform.startswith("linux"):
-        return ["/usr/bin/pkexec", *arguments]
     return arguments
-
-
-class WindowsLaunch:
-    def __init__(self, arguments):
-        from ctypes import wintypes
-        class SHELLEXECUTEINFOW(ctypes.Structure):
-            _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
-                ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
-                ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
-                ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
-                ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        shell = ctypes.WinDLL("shell32", use_last_error=True)
-        shell.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
-        shell.ShellExecuteExW.restype = wintypes.BOOL
-        request = SHELLEXECUTEINFOW()
-        request.cbSize = ctypes.sizeof(request)
-        request.fMask = 0x40 | 0x100  # NOCLOSEPROCESS | NOASYNC
-        request.lpVerb = "runas"
-        request.lpFile = arguments[0]
-        request.lpParameters = subprocess.list2cmdline(arguments[1:])
-        request.nShow = 0
-        if not shell.ShellExecuteExW(ctypes.byref(request)):
-            raise PermissionError("OS authorization was cancelled or unavailable")
-        self.handle = request.hProcess
-
-    def poll(self):
-        value = ctypes.c_ulong()
-        if not self.kernel.GetExitCodeProcess(self.handle, ctypes.byref(value)):
-            return 1
-        return None if value.value == 259 else value.value
-
-    def release(self):
-        if self.handle:
-            self.kernel.CloseHandle(self.handle)
-            self.handle = None
 
 
 class MonitorAccess:
@@ -137,16 +90,19 @@ class MonitorAccess:
         self.generation = 0
 
     def available(self):
-        return self.helper.is_file() and (not sys.platform.startswith("linux") or Path("/usr/bin/pkexec").is_file())
+        return self.helper.is_file() and is_administrator()
 
     def start(self, launcher=None):
-        if self.status in ("authorizing", "ready"):
+        if self.status in ("starting", "ready"):
+            return
+        if not is_administrator():
+            self.status = "denied"
             return
         if not self.helper.is_file():
             self.status = "unavailable"
             return
         self.stop_event.clear()
-        self.status = "authorizing"
+        self.status = "starting"
         self.thread = threading.Thread(target=self._run, args=(launcher,), daemon=True)
         self.thread.start()
 
@@ -185,17 +141,16 @@ class MonitorAccess:
             listener.listen(2)
             listener.settimeout(.25)
             port = listener.getsockname()[1]
-            args = authorization_command(self.helper, port, token, os.getpid())
+            args = reader_command(self.helper, port, token, os.getpid())
             if launcher:
                 self.process = launcher(args)
-            elif os.name == "nt":
-                self.process = WindowsLaunch(args)
             else:
-                self.process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            deadline = time.monotonic() + 120
+                self.process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+            deadline = time.monotonic() + 5
             while not self.stop_event.is_set() and time.monotonic() < deadline:
                 if self.process.poll() is not None:
-                    self.status = "denied"
+                    self.status = "error"
                     return
                 try:
                     peer, _ = listener.accept()
@@ -235,8 +190,18 @@ class MonitorAccess:
             if listener is not None:
                 listener.close()
             self.server = None
-            if isinstance(self.process, WindowsLaunch):
-                self.process.release()
+            if self.process:
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=1)
+                except OSError:
+                    pass
             if self.status == "ready":
                 self.status = "stopped" if self.stop_event.is_set() else "error"
 
@@ -307,8 +272,8 @@ class MonitorAccess:
                 pass
         if self.thread:
             self.thread.join(timeout=1)
-        if self.process and not isinstance(self.process, WindowsLaunch) and self.process.poll() is None:
-            # This is the non-elevated authorization client, not an arbitrary PID.
+        if self.process and (not self.thread or not self.thread.is_alive()) and self.process.poll() is None:
+            # Direct child, with the same startup token as this process.
             self.process.terminate()
             try:
                 self.process.wait(timeout=1)

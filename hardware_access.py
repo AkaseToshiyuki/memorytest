@@ -1,7 +1,6 @@
-"""One inspection through an OS-authorized, fixed-operation native reader.
+"""Fixed-operation native reads inheriting an already-elevated startup token.
 
-No elevated Python/GUI, passwords, arbitrary commands, output files or resident
-service. The helper owns command validation and ends on disconnect or timeout.
+Never requests authorization. The helper ends on disconnect or timeout.
 """
 import hmac
 import os
@@ -14,9 +13,10 @@ import time
 
 from benchmark_registry import ROOT
 from hardware_inspector import KINDS, LIMIT, Reader, collect
-from monitor_access import WindowsLaunch, authorization_command
+from monitor_access import reader_command
+from runtime_permissions import is_administrator
 
-AUTHORIZATION_TIMEOUT = 120
+CONNECT_TIMEOUT = 5
 
 
 class InspectionFailure(RuntimeError):
@@ -63,9 +63,13 @@ class InspectorAccess:
             raise ValueError("unknown hardware tool")
         if self.thread and self.thread.is_alive():
             return
+        if not is_administrator():
+            self.snapshot = None
+            self.status = "denied"
+            return
         self.stop.clear()
         self.snapshot = None
-        self.status = "authorizing"
+        self.status = "starting"
         self.thread = threading.Thread(target=self._run, args=(kind, launcher), daemon=True)
         self.thread.start()
 
@@ -77,15 +81,16 @@ class InspectorAccess:
                 return
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                 server.bind(("127.0.0.1", 0)); server.listen(2); server.settimeout(.2)
-                args = authorization_command(self.helper, server.getsockname()[1], token, os.getpid(), inspection=True)
+                args = reader_command(self.helper, server.getsockname()[1], token, os.getpid(), inspection=True)
                 if self.stop.is_set():
                     return
-                self.process = launcher(args) if launcher else WindowsLaunch(args) if os.name == "nt" else subprocess.Popen(
-                    args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                deadline = time.monotonic() + AUTHORIZATION_TIMEOUT
+                self.process = launcher(args) if launcher else subprocess.Popen(
+                    args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+                deadline = time.monotonic() + CONNECT_TIMEOUT
                 while not self.stop.is_set() and time.monotonic() < deadline:
                     if self.process.poll() is not None:
-                        self.status = "denied"
+                        self.status = "error"
                         return
                     try:
                         peer, _ = server.accept()
@@ -124,18 +129,18 @@ class InspectorAccess:
         finally:
             if self.peer:
                 self.peer.close(); self.peer = None
-            if isinstance(self.process, WindowsLaunch):
-                self.process.release()
-            elif self.process:
+            if self.process:
                 try:
-                    # Reap the authorization client on success too. On timeout
-                    # this also dismisses the still-pending OS authorization.
-                    if self.process.poll() is None:
-                        self.process.terminate()
+                    # Reap the direct reader child on every terminal path.
+                    # Let its disconnect handler stop its child group first.
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=2)
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=1)
                 except OSError:
                     pass
 
@@ -201,11 +206,6 @@ class InspectorAccess:
                 peer.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-        # Only stop our unelevated authorization client. Closing the socket
-        # makes the native helper terminate its own process group/job object.
-        if self.process and not isinstance(self.process, WindowsLaunch) and self.process.poll() is None:
-            try:
-                self.process.terminate()
-            except OSError:
-                pass
+        # The worker closes the listener/socket and reaps the direct child.
+        # Do not kill it before its disconnect handler reaps query descendants.
         self.status = "cancelled"

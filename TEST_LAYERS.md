@@ -267,6 +267,39 @@ unbounded stress load is part of this acceptance run.
 
 ### Live monitoring, status pulse and hardware inspector tools (2026-10-15)
 
+Current startup-permission policy (supersedes the manual authorization UI below):
+**114 passed, 0 skipped** in the changed/relevant local suites.
+
+| Suite | Passed | Time | Evidence |
+|---|---:|---:|---|
+| Startup tokens / inventory / bounded native bridge | 26 | 0.465 s | `build/hardware-startup-access.log` |
+| Hardware pages / automatic mode / no permission controls | 23 | 38.422 s | `build/hardware-startup-tools.log` |
+| Existing telemetry / direct startup-token helper | 18 | 1.766 s | `build/hardware-startup-monitoring.log` |
+| Live monitoring continuity | 12 | 8.428 s | `build/hardware-startup-continuity.log` |
+| Desktop lifecycle / status transitions | 16 | 24.674 s | `build/hardware-startup-desktop.log` |
+| Bilingual themes / layout / no permission prompts | 19 | 48.980 s | `build/hardware-startup-presentation.log` |
+
+- No in-app elevation launcher remains: no UAC `runas`, AppleScript administrator
+  request, polkit command, permission dialog, admin-read button, enhanced-mode
+  checkbox or authorization retry. Standard launch never starts a privileged
+  reader; elevated launch automatically uses its inherited token. Refresh,
+  page changes, stored preferences and failure states do not expose a mode switch.
+- Windows elevation uses `GetTokenInformation(TokenElevation)` rather than
+  membership in an administrator group; POSIX uses the effective UID. Detection
+  failures fall back to standard access. Unit fixtures cover both token states,
+  token-query failure/handle cleanup and administrator-only reader admission.
+- Both parameter-page modes keep stale data cleared, bounded timeout/cancel and
+  original SMART bitmasks. Direct helpers receive a grace period to clean up query
+  children on disconnect before forced termination.
+- All four bilingual parameter previews and stress-page themes were regenerated
+  and inspected; previews contain fixture data. Python compilation, strict Linux
+  C11 syntax and Git whitespace checks passed. Actual M4 Pro administrator startup
+  and protected device fields remain outside this Linux host's verification.
+- Prior handoff/builds using the manual authorization design are not final package
+  evidence. Record the current commit's native CI and artifact checks separately.
+
+Historical handoff checks (before the startup-only permission requirement):
+
 Administrator inspection and Apple Silicon follow-up (2026-10-15): local
 inspector/UI suite **20/20**, native bridge/platform fixtures **11/11**, existing
 monitoring contracts **17/17**, desktop suite **16/16**. Evidence is retained in

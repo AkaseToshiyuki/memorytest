@@ -203,6 +203,9 @@ class HardwarePageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="memorytest-inspector-")
         self.addCleanup(self.temp.cleanup)
+        privilege = patch("desktop_window.is_administrator", return_value=False)
+        privilege.start()
+        self.addCleanup(privilege.stop)
         self.window = MainWindow(autodetect=False, output_dir=self.temp.name, restore=False)
         self.addCleanup(self.window.close)
 
@@ -271,48 +274,77 @@ class HardwarePageTests(unittest.TestCase):
         self.assertFalse(page.export_button.isEnabled())
         self.assertFalse(page.deadline.isActive())
 
-    def test_admin_refresh_authorization_result_denial_and_cancel(self):
+    def test_admin_startup_automatically_reads_with_inherited_privileges(self):
         page = self.window.hardware_tools["disk"]
+        self.window.administrator = True
         self.seed(page)
-        access = Mock(status="authorizing", snapshot=None)
+        access = Mock(status="starting", snapshot=None)
         with patch("desktop_hardware.InspectorAccess", return_value=access):
-            page.refresh_admin()
+            page.refresh()
         access.start.assert_called_once_with("disk")
         self.assertIsNone(page.snapshot)
-        self.assertFalse(page.admin_button.isEnabled())
+        self.assertFalse(hasattr(page, "admin_button"))
         self.assertFalse(page.refresh_button.isEnabled())
         self.assertTrue(page.cancel_button.isEnabled())
         access.status = "reading"
         page.poll_access()
-        self.assertEqual(page.status_key, "hardware_admin_reading")
+        self.assertEqual(page.status_key, "hardware_reading")
         access.status = "ready"
         access.snapshot = dict(fixture(), access="administrator")
         page.poll_access()
         self.assertEqual(page.snapshot["access"], "administrator")
-        self.assertEqual(page.status_key, "hardware_admin_snapshot")
-        self.assertTrue(page.admin_button.isEnabled())
+        self.assertEqual(page.status_key, "hardware_snapshot")
+        self.assertTrue(page.refresh_button.isEnabled())
         self.assertFalse(page.access_poll.isActive())
         denied = Mock(status="denied", snapshot=None)
         with patch("desktop_hardware.InspectorAccess", return_value=denied):
-            page.refresh_admin()
+            page.refresh()
         page.poll_access()
-        self.assertEqual(page.status_key, "hardware_authorization_denied")
+        self.assertEqual(page.status_key, "hardware_read_failed")
         self.assertIsNone(page.snapshot)
         self.assertFalse(page.export_button.isEnabled())
         timed_out = Mock(status="timeout", snapshot=None)
         with patch("desktop_hardware.InspectorAccess", return_value=timed_out):
-            page.refresh_admin()
+            page.refresh()
         page.poll_access()
         self.assertEqual(page.status_key, "timeout")
         self.assertIsNone(page.snapshot)
         self.assertFalse(page.export_button.isEnabled())
-        waiting = Mock(status="authorizing", snapshot=None)
+        waiting = Mock(status="starting", snapshot=None)
         with patch("desktop_hardware.InspectorAccess", return_value=waiting):
-            page.refresh_admin()
+            page.refresh()
         page.cancel()
         waiting.close.assert_called_once()
         self.assertIsNone(page.access)
-        self.assertTrue(page.admin_button.isEnabled())
+        self.assertTrue(page.refresh_button.isEnabled())
+
+    def test_standard_startup_never_starts_privileged_reader_or_exposes_mode_controls(self):
+        from PySide6.QtWidgets import QAbstractButton
+        for page in self.window.hardware_tools.values():
+            with patch("desktop_hardware.InspectorAccess") as access, patch.object(page.process, "start") as start:
+                page.refresh()
+                access.assert_not_called()
+                start.assert_called_once()
+            page.cancel()
+            self.assertFalse(hasattr(page, "admin_button"))
+        for language in ("zh", "en"):
+            self.window.language = language
+            self.window.retranslate()
+            for button in self.window.findChildren(QAbstractButton):
+                self.assertNotRegex(button.text() + button.toolTip(),
+                    r"管理员|增强监控|详细模式|重新授权|(?i:administrator|enhanced monitoring|detailed mode|authorize)")
+
+    def test_admin_source_mode_without_native_helper_uses_current_token_worker(self):
+        page = self.window.hardware_tools["cpu"]
+        self.window.administrator = True
+        access = Mock()
+        access.helper.is_file.return_value = False
+        with patch("desktop_hardware.InspectorAccess", return_value=access), patch.object(page.process, "start") as start:
+            page.refresh()
+        access.start.assert_not_called()
+        start.assert_called_once()
+        self.assertIn("--hardware-tool", start.call_args.args[1])
+        page.cancel()
 
     def test_missing_reason_is_visible_and_unified_memory_is_not_a_number(self):
         page = self.window.hardware_tools["gpu"]
@@ -351,7 +383,7 @@ class HardwarePageTests(unittest.TestCase):
                         self.window.tools_tabs.setCurrentIndex(index)
                         self.app.processEvents()
                         self.assertEqual(page.selector.currentData(), page.snapshot["devices"][0]["id"])
-                        for widget in (page.refresh_button, page.export_button, page.admin_button, page.serials, page.selector):
+                        for widget in (page.refresh_button, page.export_button, page.serials, page.selector):
                             self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
                             self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, widget.rect().bottomRight())))
                         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
@@ -398,7 +430,7 @@ class HardwarePageTests(unittest.TestCase):
                 self.window.tools_tabs.setCurrentIndex(index)
                 self.app.processEvents()
                 self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
-                self.assertTrue(self.window.rect().contains(page.admin_button.mapTo(self.window, page.admin_button.rect().bottomRight())))
+                self.assertFalse(hasattr(page, "admin_button"))
                 self.window.grab().save(str(evidence / f"{kind}-{language}.png"))
             text = " ".join(item.text() for item in self.window.hardware_tools["disk"].findChildren(QLabel))
             self.assertNotIn("SMART 检查通过" if language == "zh" else "SMART passed", text)

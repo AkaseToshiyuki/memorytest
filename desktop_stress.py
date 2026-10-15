@@ -125,6 +125,7 @@ class StressPage(QWidget):
         self.has_temperature = False
         self.permission_denied = False
         self.access_status_key = "monitor_standard"
+        self.enhanced_enabled = window.administrator
         self.catalog, self.stats = {}, {}
         self.preview_stats = Statistics()
         self.preview_counter = 0
@@ -201,11 +202,6 @@ class StressPage(QWidget):
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
         self.export_button.clicked.connect(self.export)
-        self.enhanced = QCheckBox()
-        self.enhanced.toggled.connect(self.enhanced_changed)
-        self.retry_monitor = QPushButton()
-        self.retry_monitor.clicked.connect(lambda: self.window.request_monitor_access())
-        self.retry_monitor.hide()
         for widget in (self.start_button, self.stop_button):
             widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             control.addWidget(widget, 1)
@@ -232,11 +228,9 @@ class StressPage(QWidget):
         monitor.addWidget(self.window_minutes)
         monitor_body.addLayout(monitor)
         access = QHBoxLayout()
-        access.addWidget(self.enhanced)
         self.access_status = label("", "muted")
         self.access_status.setWordWrap(True)
         access.addWidget(self.access_status, 1)
-        access.addWidget(self.retry_monitor)
         monitor_body.addLayout(access)
         self.splitter = splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
@@ -304,10 +298,8 @@ class StressPage(QWidget):
         for mode, check in self.modes.items():
             check.setText(tr(mode, lang))
             check.setToolTip("" if check.isEnabled() else tr("unsupported", lang))
-        for button, key in ((self.start_button, "start"), (self.stop_button, "stop"), (self.export_button, "export"), (self.enhanced, "enhanced")):
+        for button, key in ((self.start_button, "start"), (self.stop_button, "stop"), (self.export_button, "export")):
             button.setText(tr(key, lang))
-        self.enhanced.setToolTip(tr("enhanced_hint", lang))
-        self.retry_monitor.setText(tr("retry_monitor", lang))
         self.duration.setSpecialValueText(tr("manual_stop", lang))
         self.duration.setSuffix(" " + tr("minutes", lang) if self.duration.value() else "")
         self.window_minutes.setSuffix(" " + tr("minutes", lang))
@@ -334,12 +326,8 @@ class StressPage(QWidget):
         self.start_button.setEnabled(not self.active and not self.window.benchmark_active and self.caps is not None and any(self.caps["modes"].values()))
         self.stop_button.setEnabled(self.active)
         self.export_button.setEnabled(self.report is not None and not self.active)
-        for widget in (self.threads, self.memory, self.duration, self.enhanced):
+        for widget in (self.threads, self.memory, self.duration):
             widget.setEnabled(not self.active)
-        access = getattr(self.window, "monitor_access", None)
-        authorized = bool(access and access.authorized)
-        self.enhanced.setVisible(not authorized and getattr(self.window, "monitor_permission_resolved", False))
-        self.retry_monitor.setVisible(authorized and access.status in {"error", "denied", "stopped", "unavailable"})
 
     def refresh_warning(self):
         lang = self.window.language
@@ -400,7 +388,7 @@ class StressPage(QWidget):
             return
         command = app_command("sensor-worker") + ["--parent-pid", str(os.getpid()), "--bin-dir", str(ROOT / "bin"),
                                                   "--snapshot-file", str(self.sensor_samples)]
-        if self.enhanced.isChecked():
+        if self.enhanced_enabled:
             command.append("--enhanced")
             command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
         self.buffers[self.preview] = b""
@@ -412,19 +400,9 @@ class StressPage(QWidget):
             self.preview_stopping = True
             self.preview.terminate()
 
-    def enhanced_changed(self):
-        if self.enhanced.isChecked():
-            self.window.request_monitor_access()
-        self.sync_access()
-        if self.preview.state() != QProcess.NotRunning:
-            self.stop_preview()
-            self.preview_restart = True
-        else:
-            self.start_preview()
-
     def sync_access(self):
         if hasattr(self.window, "monitor_access"):
-            self.window.monitor_access.set_active(self.enhanced.isChecked() and
+            self.window.monitor_access.set_active(self.enhanced_enabled and
                 not self.shutting_down and not self.window.closing and (self.active or self.isVisible()))
 
     def preview_finished(self, *_):
@@ -647,7 +625,7 @@ class StressPage(QWidget):
             command.extend(["--mode", mode])
         if not selected:
             command.append("--no-load")
-        if self.enhanced.isChecked():
+        if self.enhanced_enabled:
             command.append("--enhanced")
             command += ["--privileged-samples", str(self.window.monitor_access.samples_path)]
         self.sync_access()

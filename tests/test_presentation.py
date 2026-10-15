@@ -381,7 +381,7 @@ class NativePresentationTests(unittest.TestCase):
                 self.window.theme_combo.setCurrentIndex(self.window.theme_combo.findData(theme))
                 self.app.processEvents()
                 self.window.grab().save(str(evidence / f"stress-{language}-{theme}.png"))
-                for widget in (page.start_button, page.enhanced, page.window_minutes):
+                for widget in (page.start_button, page.stop_button, page.window_minutes):
                     self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(0, 0))))
 
     def test_hardware_card_at_compact_window_in_all_themes(self):
@@ -407,52 +407,59 @@ class NativePresentationTests(unittest.TestCase):
                     self.assertTrue(widget.text())
                     self.assertTrue(self.window.rect().contains(widget.mapTo(self.window, QPoint(widget.width(), widget.height()))))
 
-    def test_permission_decline_keeps_benchmarks_unprivileged(self):
+    def test_standard_startup_uses_fallback_without_any_permission_request(self):
         from PySide6.QtWidgets import QMessageBox
-        with patch("desktop_window.QMessageBox.question", return_value=QMessageBox.No), \
+        self.window.administrator = False
+        self.window.stress_page.enhanced_enabled = False
+        with patch("desktop_window.QMessageBox.question", return_value=QMessageBox.No) as prompt, \
              patch.object(self.window.monitor_access, "start") as start:
-            self.window.request_monitor_access(explain=True)
+            self.window.start_monitor_access()
             start.assert_not_called()
-        self.assertFalse(self.window.stress_page.enhanced.isChecked())
+            prompt.assert_not_called()
+        self.assertFalse(self.window.stress_page.enhanced_enabled)
         self.assertFalse(self.window.benchmark_active)
 
-    def test_authorized_helper_failure_is_not_shown_as_ready(self):
+    def test_reader_failure_is_not_shown_as_ready(self):
         self.window.monitor_access.status = "error"
-        self.window.stress_page.access_status_key = "monitor_authorized"
-        self.window.monitor_authorized()
+        self.window.stress_page.access_status_key = "monitor_standard"
+        self.window.monitor_access_changed()
         self.assertEqual(self.window.stress_page.access_status_key, "monitor_failed")
-        self.assertFalse(self.window.stress_page.enhanced.isChecked())
-        self.assertFalse(self.window.authorization_timer.isActive())
+        self.assertFalse(self.window.monitor_state_timer.isActive())
 
-    def test_authorization_automatically_enables_monitoring_and_hides_checkbox(self):
+    def test_admin_startup_automatically_starts_once_and_never_exposes_mode_controls(self):
         access, page = self.window.monitor_access, self.window.stress_page
-        access.authorized = True  # Verified helper handshake, not just clicking Yes.
+        self.window.administrator = True
+        page.enhanced_enabled = True
+        with patch.object(access, "available", return_value=True), patch.object(access, "start") as start, \
+                patch("desktop_window.QMessageBox.question") as prompt:
+            self.window.start_monitor_access()
+            self.window.start_monitor_access()
+            start.assert_called_once()
+            prompt.assert_not_called()
+        access.authorized = True
         access.status = "ready"
-        self.window.monitor_authorized()
-        self.assertTrue(page.enhanced.isChecked())
-        self.assertTrue(page.enhanced.isHidden())
-        self.assertTrue(page.retry_monitor.isHidden())
+        self.window.monitor_access_changed()
+        self.assertTrue(page.enhanced_enabled)
+        self.assertFalse(hasattr(page, "enhanced"))
+        self.assertFalse(hasattr(page, "retry_monitor"))
         access.status = "error"
-        self.window.monitor_authorized()
-        self.assertTrue(page.enhanced.isChecked())
-        self.assertTrue(page.enhanced.isHidden())
-        self.assertFalse(page.retry_monitor.isHidden())
+        self.window.monitor_access_changed()
+        self.assertTrue(page.enhanced_enabled)
+        self.assertFalse(hasattr(page, "enhanced"))
+        self.assertFalse(hasattr(page, "retry_monitor"))
         self.assertEqual(page.access_status_key, "monitor_failed")
-        with patch.object(self.window, "request_monitor_access") as retry:
-            page.retry_monitor.click()
-            retry.assert_called_once()
 
     def test_normal_monitoring_has_no_engineering_prose_or_empty_notice_rows(self):
         page = self.window.stress_page
         for language in ("zh", "en"):
             self.window.language = language
-            for state in ("monitor_standard", "monitor_authorized"):
+            for state in ("monitor_standard",):
                 page.access_status_key = state
                 page.retranslate()
                 self.assertEqual(page.access_status.text(), "")
                 self.assertTrue(page.access_status.isHidden())
                 self.assertTrue(page.warning.isHidden())
-            self.assertNotRegex(page.enhanced.toolTip(), "只读|推算|read-only|inferred")
+            self.assertFalse(hasattr(page, "enhanced"))
         page.modes["cpu"].setEnabled(True)
         page.active = True
         try:

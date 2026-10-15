@@ -15,7 +15,8 @@ from unittest.mock import Mock, patch
 
 from hardware_access import InspectionFailure, InspectorAccess, operation
 from hardware_inspector import Reader, cpu_info, gpu_info, dram_info, disk_info
-from monitor_access import authorization_command
+from monitor_access import reader_command
+from runtime_permissions import is_administrator
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -124,15 +125,67 @@ class PlatformInventoryTests(unittest.TestCase):
                      ["smartctl", "-a", "-j", "-n", "standby", "/dev/sda;echo bad"], ["dmidecode", "--dump-bin", "/tmp/data"]):
             self.assertIsNone(operation(args))
 
-    def test_os_authorization_preserves_arguments_and_uses_inspection_mode(self):
-        for system in ("darwin", "linux", "win32"):
-            args = authorization_command("/tmp/space dir/reader", 1234, "a" * 64, 123, platform=system, inspection=True)
-            unpacked = shlex.split(args[-1]) if system == "darwin" else args
-            self.assertEqual(unpacked[-1], "--inspect")
-            self.assertIn(str(Path("/tmp/space dir/reader").resolve()), unpacked)
+    def test_reader_inherits_token_without_os_authorization_command(self):
+        args = reader_command("/tmp/space dir/reader", 1234, "a" * 64, 123, inspection=True)
+        self.assertEqual(args, [str(Path("/tmp/space dir/reader").resolve()), "1234", "a" * 64, "123", "--inspect"])
+
+    def test_root_and_filtered_windows_tokens_select_distinct_startup_modes(self):
+        with patch("runtime_permissions.os.name", "posix"), patch("runtime_permissions.os.geteuid", return_value=1000, create=True):
+            self.assertFalse(is_administrator())
+        with patch("runtime_permissions.os.name", "posix"), patch("runtime_permissions.os.geteuid", return_value=0, create=True):
+            self.assertTrue(is_administrator())
+        for elevated in (False, True):
+            with patch("runtime_permissions.os.name", "nt"), patch("runtime_permissions._windows_elevated", return_value=elevated):
+                self.assertEqual(is_administrator(), elevated)
+        with patch("runtime_permissions.os.name", "nt"), patch("runtime_permissions._windows_elevated", side_effect=OSError):
+            self.assertFalse(is_administrator())
+
+    def test_default_reader_automatically_follows_current_process_privileges(self):
+        for elevated in (False, True):
+            with patch("hardware_inspector.is_administrator", return_value=elevated):
+                self.assertEqual(Reader().privileged, elevated)
+
+    def test_windows_uses_actual_token_elevation_and_closes_query_handle(self):
+        from runtime_permissions import _windows_elevated
+        for elevated in (0, 1):
+            kernel, security = Mock(), Mock()
+            kernel.GetCurrentProcess.return_value = 7
+            def open_token(process, mask, result):
+                self.assertEqual((process, mask), (7, 0x0008))
+                result._obj.value = 123
+                return True
+            def query(token, kind, result, size, length):
+                self.assertEqual(token.value, 123)
+                self.assertEqual(kind, 20)  # TokenElevation, not group membership.
+                result._obj.value = elevated
+                length._obj.value = size
+                return True
+            security.OpenProcessToken.side_effect = open_token
+            security.GetTokenInformation.side_effect = query
+            with patch("runtime_permissions.ctypes.WinDLL", side_effect=[kernel, security], create=True):
+                self.assertEqual(_windows_elevated(), bool(elevated))
+            self.assertEqual(kernel.CloseHandle.call_args.args[0].value, 123)
+            security.GetTokenInformation.side_effect = None
+            security.GetTokenInformation.return_value = False
+            with patch("runtime_permissions.ctypes.WinDLL", side_effect=[kernel, security], create=True):
+                self.assertFalse(_windows_elevated())
+            self.assertEqual(kernel.CloseHandle.call_count, 2)
 
 
 class InspectionSessionTests(unittest.TestCase):
+    def setUp(self):
+        privilege = patch("hardware_access.is_administrator", return_value=True)
+        privilege.start()
+        self.addCleanup(privilege.stop)
+
+    def test_standard_process_cannot_start_helper_or_request_elevation(self):
+        access = InspectorAccess(Path(__file__))
+        launch = Mock()
+        with patch("hardware_access.is_administrator", return_value=False):
+            access.start("disk", launcher=launch)
+        self.assertEqual(access.status, "denied")
+        self.assertIsNone(access.thread)
+        launch.assert_not_called()
     def test_cancel_prevents_even_unelevated_fallback_reads(self):
         access = InspectorAccess()
         access.close()
@@ -183,16 +236,16 @@ class InspectionSessionTests(unittest.TestCase):
             self.assertEqual(reader.sources[0]["status"], "partial")
             access.peer.shutdown.assert_not_called()
 
-    def test_authorization_timeout_is_distinct_and_reaps_launcher(self):
+    def test_connect_timeout_is_distinct_and_reaps_reader(self):
         process = Mock(poll=lambda: None)
         access = InspectorAccess(Path(__file__))
-        with patch("hardware_access.AUTHORIZATION_TIMEOUT", .01):
+        with patch("hardware_access.CONNECT_TIMEOUT", .01):
             access.start("cpu", launcher=lambda _: process)
             access.thread.join(timeout=3)
         self.assertFalse(access.thread.is_alive())
         self.assertEqual(access.status, "timeout")
         self.assertIsNone(access.snapshot)
-        process.terminate.assert_called_once()
+        process.terminate.assert_not_called()
         process.wait.assert_called_once_with(timeout=2)
 
     def test_cancel_during_launcher_does_not_resume_collection(self):
@@ -215,11 +268,16 @@ class InspectionSessionTests(unittest.TestCase):
         self.assertFalse(access.thread.is_alive())
         self.assertEqual(access.status, "cancelled")
         self.assertIsNone(access.snapshot)
-        process.terminate.assert_called_once()
+        process.terminate.assert_not_called()
         process.wait.assert_called_once_with(timeout=2)
 
 
 class NativeInspectionTests(unittest.TestCase):
+    def setUp(self):
+        privilege = patch("hardware_access.is_administrator", return_value=True)
+        privilege.start()
+        self.addCleanup(privilege.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="memorytest-inspect-protocol-")
@@ -257,7 +315,7 @@ class NativeInspectionTests(unittest.TestCase):
             processes.append(subprocess.Popen(args))
             return processes[-1]
         try:
-            with patch("hardware_access.authorization_command", side_effect=command):
+            with patch("hardware_access.reader_command", side_effect=command):
                 access.start("cpu", launcher=launch)
                 access.thread.join(timeout=25)
             self.assertFalse(access.thread.is_alive())
@@ -270,20 +328,20 @@ class NativeInspectionTests(unittest.TestCase):
                 if process.poll() is None:
                     process.wait(timeout=3)
 
-    def test_missing_helper_and_denied_authorization_are_distinct(self):
+    def test_missing_helper_and_failed_start_are_distinct(self):
         missing = InspectorAccess(Path(self.temp.name) / "missing")
         missing.start("disk"); missing.thread.join(timeout=3)
         self.assertEqual(missing.status, "unavailable")
         denied = InspectorAccess(self.binary)
         denied.start("disk", launcher=lambda _: Mock(poll=lambda: 1))
         denied.thread.join(timeout=3)
-        self.assertEqual(denied.status, "denied")
+        self.assertEqual(denied.status, "error")
 
     def test_connected_reader_failure_cannot_publish_success_snapshot(self):
         access = InspectorAccess(self.binary)
         def command(helper, port, token, parent, **_):
             return [str(helper), str(port), token, str(parent), "--inspect"]
-        with patch("hardware_access.authorization_command", side_effect=command), \
+        with patch("hardware_access.reader_command", side_effect=command), \
                 patch("hardware_access.collect", side_effect=InspectionFailure("timeout")):
             access.start("disk", launcher=lambda args: subprocess.Popen(args))
             access.thread.join(timeout=5)

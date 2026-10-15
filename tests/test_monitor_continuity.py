@@ -103,9 +103,7 @@ class MonitorTransitionTests(unittest.TestCase):
         self.page.plot.visible.clear()
         access = self.window.monitor_access
         access.authorized, access.status = True, "ready"
-        self.page.enhanced.blockSignals(True)
-        self.page.enhanced.setChecked(True)
-        self.page.enhanced.blockSignals(False)
+        self.page.enhanced_enabled = True
         access.active = True
         before = list(self.page.plot.samples)
         with patch.object(self.page.preview, "state", return_value=QProcess.Running), \
@@ -115,8 +113,8 @@ class MonitorTransitionTests(unittest.TestCase):
             self.assertEqual(list(self.page.plot.samples), before)
             self.assertEqual(self.page.plot.visible, set())
             self.assertTrue(access.active)
-            self.assertTrue(self.page.enhanced.isChecked())
-            self.assertTrue(self.page.enhanced.isHidden())
+            self.assertTrue(self.page.enhanced_enabled)
+            self.assertFalse(hasattr(self.page, "enhanced"))
             terminate.assert_not_called()
             args = start.call_args.args[1]
             self.assertIn("--sensor-samples", args)
@@ -162,9 +160,7 @@ class MonitorTransitionTests(unittest.TestCase):
     def test_finished_load_preserves_visible_monitor_and_access(self):
         self.page.active = True
         self.page.run_dir = Path(self.temp.name)
-        self.page.enhanced.blockSignals(True)
-        self.page.enhanced.setChecked(True)
-        self.page.enhanced.blockSignals(False)
+        self.page.enhanced_enabled = True
         with patch.object(self.page, "isVisible", return_value=True), \
              patch.object(self.page.preview, "state", return_value=QProcess.Running), \
              patch.object(self.page, "stop_preview") as stop, \
@@ -226,23 +222,23 @@ class MonitorTransitionTests(unittest.TestCase):
         self.assertEqual(self.page.plot.visible, set(self.page.catalog))
         self.assertEqual(self.page.all_sensors.checkState(), Qt.Checked)
 
-    def test_startup_authorization_is_per_launch_and_decline_reveals_manual_entry(self):
-        self.assertTrue(self.page.enhanced.isHidden())
+    def test_standard_startup_never_prompts_or_reveals_manual_entry(self):
+        self.window.administrator = False
+        self.page.enhanced_enabled = False
+        self.assertFalse(hasattr(self.page, "enhanced"))
         self.window.settings.setValue("monitorPermissionAskedV2", True)
         with patch("desktop_window.QMessageBox.question", return_value=QMessageBox.No) as prompt, \
              patch.object(self.window.monitor_access, "start") as elevate:
-            self.window.probe_monitor_access()
-            self.window.probe_monitor_access()
-            prompt.assert_called_once()
+            self.window.start_monitor_access()
+            self.window.start_monitor_access()
+            prompt.assert_not_called()
             elevate.assert_not_called()
-        self.assertFalse(self.page.enhanced.isHidden())
-        self.assertFalse(self.page.enhanced.isChecked())
+        self.assertFalse(self.page.enhanced_enabled)
+        self.assertFalse(hasattr(self.page, "retry_monitor"))
 
     def test_hide_during_stress_does_not_pause_monitoring(self):
         self.page.active = True
-        self.page.enhanced.blockSignals(True)
-        self.page.enhanced.setChecked(True)
-        self.page.enhanced.blockSignals(False)
+        self.page.enhanced_enabled = True
         with patch.object(self.page, "stop_preview") as stop:
             from PySide6.QtGui import QHideEvent
             self.page.hideEvent(QHideEvent())

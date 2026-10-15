@@ -37,7 +37,7 @@ def main():
     window = MainWindow()
     window.show()
     if "--smoke-gui" not in sys.argv and "--idle-seconds" not in sys.argv:
-        QTimer.singleShot(600, window.probe_monitor_access)
+        QTimer.singleShot(600, window.start_monitor_access)
     if "--smoke-gui" in sys.argv:
         QTimer.singleShot(300, app.quit)
     if "--idle-seconds" in sys.argv:
