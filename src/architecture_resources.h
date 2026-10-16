@@ -30,9 +30,11 @@
 #define RES_PAYLOAD_rob_nop "nop\n"
 #define RES_PAYLOAD_prf_i32 "lea 1(%%r8),%%r9d\n"
 #define RES_PAYLOAD_prf_i64 "lea 1(%%r8),%%r9\n"
-#define RES_PAYLOAD_prf_vec128 "pshufd $0x1b,%%xmm0,%%xmm2\n"
+/* Darwin's .rept macro expansion consumes positional $0 in $0x1b. Encode
+ * PSHUFD xmm0/xmm1 -> xmm2, imm8=0x1b explicitly on every x86 assembler. */
+#define RES_PAYLOAD_prf_vec128 ".byte 0x66,0x0f,0x70,0xd0,0x1b\n"
 #define RES_PAYLOAD_sched_int "lea 1(%%r10),%%r9\n"
-#define RES_PAYLOAD_sched_vector "pshufd $0x1b,%%xmm1,%%xmm2\n"
+#define RES_PAYLOAD_sched_vector ".byte 0x66,0x0f,0x70,0xd1,0x1b\n"
 #define RES_PAYLOAD_load_ready "mov res_off%=(%%r8),%%r9\n"
 #define RES_PAYLOAD_load_wait "mov res_off%=(%%r10),%%r9\n"
 #define RES_PAYLOAD_store_ready "mov %%r8,res_off%=(%%r8)\n"

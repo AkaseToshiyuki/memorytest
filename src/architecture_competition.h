@@ -37,12 +37,21 @@
 #define MIX_CLOBBERS "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"
 #endif
 #define MIX_NONE ""
+/* Expand these small fixed streams in C, preserving x86 $ immediates through
+ * Darwin assemblers' positional-argument handling inside .rept macros. */
+#define MIX_REPEAT_4(text) text text text text
+#define MIX_REPEAT_8(text) MIX_REPEAT_4(text) MIX_REPEAT_4(text)
+#define MIX_REPEAT_16(text) MIX_REPEAT_8(text) MIX_REPEAT_8(text)
+#define MIX_STREAM_4_32(a,b) MIX_REPEAT_8(MIX_##a MIX_##b)
+#define MIX_STREAM_8_32(a,b) MIX_REPEAT_4(MIX_##a MIX_##b)
+#define MIX_STREAM_4_64(a,b) MIX_REPEAT_16(MIX_##a MIX_##b)
+#define MIX_STREAM_8_64(a,b) MIX_REPEAT_8(MIX_##a MIX_##b)
 #define MIX_LIST(M,u) M(iadd,IADD,NONE,4,u) M(imul,IMUL,NONE,4,u) M(fadd,FADD,NONE,4,u) M(fmul,FMUL,NONE,4,u) \
     M(load,LOAD,NONE,4,u) M(store,STORE,NONE,4,u) M(iadd_imul,IADD,IMUL,8,u) M(fadd_fmul,FADD,FMUL,8,u) \
     M(iadd_fadd,IADD,FADD,8,u) M(load_store,LOAD,STORE,8,u) M(iadd_load,IADD,LOAD,8,u) M(fadd_load,FADD,LOAD,8,u)
 #define MIX_FN(name,a,b,group,u) \
 static __attribute__((noinline,aligned(64))) void mix_##name##_##u(uint64_t reps, void *memory) { \
-    __asm__ volatile(MIX_INIT ".balign 64\n8:\n.rept " FE_STR(u) "/" FE_STR(group) "\n" MIX_##a MIX_##b ".endr\n" MIX_TAIL MIX_SAVE \
+    __asm__ volatile(MIX_INIT ".balign 64\n8:\n" MIX_STREAM_##group##_##u(a,b) MIX_TAIL MIX_SAVE \
         : [reps] "+&r" (reps) : [mem] "r" (memory) : MIX_CLOBBERS, "cc", "memory"); \
 }
 MIX_LIST(MIX_FN,32) MIX_LIST(MIX_FN,64)
