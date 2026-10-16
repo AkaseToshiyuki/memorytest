@@ -24,17 +24,20 @@
 #else
 #define MIX_INIT "ldp x8,x9,[%[mem]]\nldp x10,x11,[%[mem],#16]\nldp x12,x13,[%[mem],#32]\nldp x14,x15,[%[mem],#48]\n" \
     "ldp d0,d1,[%[mem],#64]\nldp d2,d3,[%[mem],#80]\nldp d4,d5,[%[mem],#96]\nldp d6,d7,[%[mem],#112]\n" \
-    "ldp d8,d9,[%[mem],#256]\nmov x16,#3\n"
+    "ldp d16,d17,[%[mem],#256]\nmov x16,#3\n"
 #define MIX_SAVE "stp x8,x9,[%[mem]]\nstp x10,x11,[%[mem],#16]\nstp x12,x13,[%[mem],#32]\nstp x14,x15,[%[mem],#48]\n" \
     "stp d0,d1,[%[mem],#64]\nstp d2,d3,[%[mem],#80]\nstp d4,d5,[%[mem],#96]\nstp d6,d7,[%[mem],#112]\n"
 #define MIX_IADD "add x8,x8,#3\nadd x9,x9,#3\nadd x10,x10,#3\nadd x11,x11,#3\n"
 #define MIX_IMUL "mul x12,x12,x16\nmul x13,x13,x16\nmul x14,x14,x16\nmul x15,x15,x16\n"
-#define MIX_FADD "fadd d0,d0,d8\nfadd d1,d1,d8\nfadd d2,d2,d8\nfadd d3,d3,d8\n"
-#define MIX_FMUL "fmul d4,d4,d9\nfmul d5,d5,d9\nfmul d6,d6,d9\nfmul d7,d7,d9\n"
+#define MIX_FADD "fadd d0,d0,d16\nfadd d1,d1,d16\nfadd d2,d2,d16\nfadd d3,d3,d16\n"
+#define MIX_FMUL "fmul d4,d4,d17\nfmul d5,d5,d17\nfmul d6,d6,d17\nfmul d7,d7,d17\n"
 #define MIX_LOAD "ldr x12,[%[mem],#128]\nldr x13,[%[mem],#136]\nldr x14,[%[mem],#144]\nldr x15,[%[mem],#152]\n"
 #define MIX_STORE "str x8,[%[mem],#192]\nstr x9,[%[mem],#200]\nstr x10,[%[mem],#208]\nstr x11,[%[mem],#216]\n"
 #define MIX_TAIL "subs %[reps],%[reps],#1\nb.ne 8b\n"
-#define MIX_CLOBBERS "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"
+/* Keep this aligned leaf entirely caller-saved. D8/D9 spills would require
+ * SEH unwind records on Windows ARM; LLVM cannot size internal alignment
+ * fragments while emitting those records. V16/V17 are ABI scratch registers. */
+#define MIX_CLOBBERS "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v16", "v17"
 #endif
 #define MIX_NONE ""
 /* Expand these small fixed streams in C, preserving x86 $ immediates through
