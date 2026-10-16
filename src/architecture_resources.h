@@ -12,6 +12,7 @@
 #define RES_SMALL(M,f,d) M(f,d,0) M(f,d,8) M(f,d,16) M(f,d,24) M(f,d,32) M(f,d,48) M(f,d,64) M(f,d,80) M(f,d,96) M(f,d,128) M(f,d,160) M(f,d,192) M(f,d,224) M(f,d,256) M(f,d,320) M(f,d,384) M(f,d,448) M(f,d,512)
 #define RES_LARGE(M,f,d) RES_SMALL(M,f,d) M(f,d,640) M(f,d,768) M(f,d,1024) M(f,d,1280) M(f,d,1536) M(f,d,2048)
 #define RES_ROB(M,f,d) RES_LARGE(M,f,d) M(f,d,2560) M(f,d,3072) M(f,d,3584) M(f,d,4096)
+#define RES_MEMORY(M,f,d) M(f,d,0) M(f,d,8) M(f,d,16) M(f,d,24) M(f,d,32) M(f,d,40) M(f,d,48) M(f,d,56) M(f,d,64) M(f,d,72) M(f,d,80) M(f,d,88) M(f,d,96) M(f,d,112) M(f,d,128) M(f,d,144) M(f,d,160) M(f,d,176) M(f,d,192) M(f,d,208) M(f,d,224) M(f,d,240) M(f,d,256) M(f,d,288) M(f,d,320) M(f,d,352) M(f,d,384) M(f,d,416) M(f,d,448) M(f,d,480) M(f,d,512)
 #if defined(__aarch64__) || defined(__arm64__)
 #define RES_SCALAR_FP(M,d) RES_LARGE(M,prf_fp32,d) RES_LARGE(M,prf_fp64,d) RES_SMALL(M,sched_fp32,d) RES_SMALL(M,sched_fp64,d)
 #else
@@ -19,13 +20,37 @@
  * carry false dependencies. Do not use them as independent PRF allocators. */
 #define RES_SCALAR_FP(M,d)
 #endif
-#define RES_FAMILIES(M,d) RES_ROB(M,rob_nop,d) RES_LARGE(M,prf_i32,d) RES_LARGE(M,prf_i64,d) RES_LARGE(M,prf_vec128,d) \
-    RES_SMALL(M,sched_int,d) RES_SMALL(M,sched_vector,d) RES_SMALL(M,load_ready,d) RES_SMALL(M,load_wait,d) \
-    RES_SMALL(M,store_ready,d) RES_SMALL(M,store_wait,d) RES_SCALAR_FP(M,d)
+#define RES_FAMILIES(M,d) RES_ROB(M,rob_nop,d) RES_LARGE(M,rob_mixed,d) RES_LARGE(M,prf_i32,d) RES_LARGE(M,prf_i64,d) RES_LARGE(M,prf_vec128,d) \
+    RES_SMALL(M,sched_int,d) RES_SMALL(M,sched_vector,d) RES_MEMORY(M,load_ready,d) RES_MEMORY(M,load_wait,d) \
+    RES_MEMORY(M,store_ready,d) RES_MEMORY(M,store_wait,d) RES_SCALAR_FP(M,d) \
+    RES_MEMORY(M,compute_nop,d) RES_MEMORY(M,compute_load_ready,d) RES_MEMORY(M,compute_load_wait,d) \
+    RES_MEMORY(M,compute_store_ready,d) RES_MEMORY(M,compute_store_wait,d)
+#define RES_COMPUTE_rob_nop 0
+#define RES_COMPUTE_rob_mixed 0
+#define RES_COMPUTE_prf_i32 0
+#define RES_COMPUTE_prf_i64 0
+#define RES_COMPUTE_prf_vec128 0
+#define RES_COMPUTE_prf_fp32 0
+#define RES_COMPUTE_prf_fp64 0
+#define RES_COMPUTE_sched_int 0
+#define RES_COMPUTE_sched_vector 0
+#define RES_COMPUTE_sched_fp32 0
+#define RES_COMPUTE_sched_fp64 0
+#define RES_COMPUTE_load_ready 0
+#define RES_COMPUTE_load_wait 0
+#define RES_COMPUTE_store_ready 0
+#define RES_COMPUTE_store_wait 0
+#define RES_COMPUTE_compute_nop 1
+#define RES_COMPUTE_compute_load_ready 1
+#define RES_COMPUTE_compute_load_wait 1
+#define RES_COMPUTE_compute_store_ready 1
+#define RES_COMPUTE_compute_store_wait 1
 #if defined(__x86_64__)
 #define RES_INIT "lea 64(%[scratch]),%%r8\nmovdqu (%[scratch]),%%xmm0\n"
 #define RES_ANCHOR_A "mov (%[a]),%[a]\nxor %[key],%[a]\n"
 #define RES_ANCHOR_B "mov (%[b]),%[b]\nxor %[key],%[b]\n"
+#define RES_COMPUTE_A(d) "mov %[a],%%rax\n.rept 8*" FE_STR(d) "\nxor %%edx,%%edx\ndiv %[key]\n.endr\nmov %%rax,%[a]\n"
+#define RES_COMPUTE_B(d) "movq %[b],%%xmm3\n.rept 8*" FE_STR(d) "\nsqrtsd %%xmm3,%%xmm3\n.endr\nmovq %%xmm3,%[b]\n"
 #define RES_WAIT "mov %[a],%%r10\nand $63,%%r10\nadd %%r8,%%r10\nmovq %%r10,%%xmm1\n"
 #define RES_PAYLOAD_rob_nop "nop\n"
 #define RES_PAYLOAD_prf_i32 "lea 1(%%r8),%%r9d\n"
@@ -33,6 +58,7 @@
 /* Darwin's .rept macro expansion consumes positional $0 in $0x1b. Encode
  * PSHUFD xmm0/xmm1 -> xmm2, imm8=0x1b explicitly on every x86 assembler. */
 #define RES_PAYLOAD_prf_vec128 ".byte 0x66,0x0f,0x70,0xd0,0x1b\n"
+#define RES_MIXED_SECOND RES_PAYLOAD_prf_vec128
 #define RES_PAYLOAD_sched_int "lea 1(%%r10),%%r9\n"
 #define RES_PAYLOAD_sched_vector ".byte 0x66,0x0f,0x70,0xd1,0x1b\n"
 #define RES_PAYLOAD_load_ready "mov res_off%=(%%r8),%%r9\n"
@@ -42,11 +68,13 @@
 #define RES_GATE(s) ".if " FE_STR(s) "\nmov %[a],%%r11\n.else\nmov %[scratch],%%r11\n.endif\nand $63,%%r11\nadd %%r11,%[b]\n"
 #define RES_JOIN "mov %[a],%%r11\nand $63,%%r11\nadd %%r11,%[b]\nmov %[b],%%r11\nand $63,%%r11\nadd %%r11,%[a]\n"
 #define RES_TAIL "dec %[reps]\njnz 8b\n"
-#define RES_CLOBBERS "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2"
+#define RES_CLOBBERS "rax", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3"
 #else
 #define RES_INIT "add x8,%[scratch],#64\nldr q0,[%[scratch]]\n"
 #define RES_ANCHOR_A "ldr %[a],[%[a]]\neor %[a],%[a],%[key]\n"
 #define RES_ANCHOR_B "ldr %[b],[%[b]]\neor %[b],%[b],%[key]\n"
+#define RES_COMPUTE_A(d) ".rept 8*" FE_STR(d) "\nudiv %[a],%[a],%[key]\n.endr\n"
+#define RES_COMPUTE_B(d) "fmov d5,%[b]\n.rept 8*" FE_STR(d) "\nfsqrt d5,d5\n.endr\nfmov %[b],d5\n"
 #define RES_WAIT "and x10,%[a],#63\nadd x10,x10,x8\ndup v1.2d,x10\nucvtf d3,x10\nfcvt s4,d3\n"
 #define RES_PAYLOAD_rob_nop "nop\n"
 #define RES_PAYLOAD_prf_i32 "add w9,w8,#1\n"
@@ -54,6 +82,7 @@
 #define RES_PAYLOAD_prf_vec128 "add v2.2d,v0.2d,v0.2d\n"
 #define RES_PAYLOAD_prf_fp32 "fadd s2,s0,s0\n"
 #define RES_PAYLOAD_prf_fp64 "fadd d2,d0,d0\n"
+#define RES_MIXED_SECOND RES_PAYLOAD_prf_fp64
 #define RES_PAYLOAD_sched_int "add x9,x10,#1\n"
 #define RES_PAYLOAD_sched_vector "add v2.2d,v1.2d,v0.2d\n"
 #define RES_PAYLOAD_sched_fp32 "fadd s2,s4,s0\n"
@@ -65,14 +94,29 @@
 #define RES_GATE(s) ".if " FE_STR(s) "\nand x11,%[a],#63\n.else\nand x11,%[scratch],#63\n.endif\nadd %[b],%[b],x11\n"
 #define RES_JOIN "and x11,%[a],#63\nadd %[b],%[b],x11\nand x11,%[b],#63\nadd %[a],%[a],x11\n"
 #define RES_TAIL "subs %[reps],%[reps],#1\nb.ne 8b\n"
-#define RES_CLOBBERS "x8", "x9", "x10", "x11", "v0", "v1", "v2", "v3", "v4"
+#define RES_CLOBBERS "x8", "x9", "x10", "x11", "v0", "v1", "v2", "v3", "v4", "v5"
 #endif
+/* Alternate independently ready integer and FP/vector destinations. This
+ * tests a non-NOP window and distributes destination pressure across files.
+ * The reader requires headroom in both corresponding single-file controls. */
+#define RES_PAYLOAD_rob_mixed ".if (res_off%=/64)&1\n" RES_MIXED_SECOND ".else\n" RES_PAYLOAD_prf_i32 ".endif\n"
+#define RES_PAYLOAD_compute_nop RES_PAYLOAD_rob_nop
+#define RES_PAYLOAD_compute_load_ready RES_PAYLOAD_load_ready
+#define RES_PAYLOAD_compute_load_wait RES_PAYLOAD_load_wait
+#define RES_PAYLOAD_compute_store_ready RES_PAYLOAD_store_ready
+#define RES_PAYLOAD_compute_store_wait RES_PAYLOAD_store_wait
+/* Different execution domains avoid filling one scheduler with both anchor
+ * chains. A divides an aligned integer by one; B takes sqrt(1.0). Low
+ * six bits stay zero, retaining real, in-bounds serial/address dependencies.
+ * Both outputs feed the next iteration. Neither anchor occupies a load slot. */
+#define RES_ANCHOR(f,d,which) ".if " FE_STR(RES_COMPUTE_##f) "\n" RES_COMPUTE_##which(d) \
+    ".else\n.rept " FE_STR(d) "\n" RES_ANCHOR_##which ".endr\n.endif\n"
 #define RES_FN(f,d,n,s) \
 static __attribute__((noinline, aligned(64))) void res_##f##_##d##_##n##_##s(uint64_t reps, uintptr_t *pa, uintptr_t *pb, uintptr_t key, void *scratch) { \
     uintptr_t a = *pa, b = *pb; \
-    __asm__ volatile(RES_INIT ".balign 64\n8:\n.rept " FE_STR(d) "\n" RES_ANCHOR_A ".endr\n" RES_WAIT \
+    __asm__ volatile(RES_INIT ".balign 64\n8:\n" RES_ANCHOR(f,d,A) RES_WAIT \
         ".set res_off%=,0\n.rept " FE_STR(n) "\n" RES_PAYLOAD_##f ".set res_off%=,res_off%=+64\n.endr\n" \
-        RES_GATE(s) ".rept " FE_STR(d) "\n" RES_ANCHOR_B ".endr\n" RES_JOIN RES_TAIL \
+        RES_GATE(s) RES_ANCHOR(f,d,B) RES_JOIN RES_TAIL \
         : [a] "+&r" (a), [b] "+&r" (b), [reps] "+&r" (reps) \
         : [key] "r" (key), [scratch] "r" (scratch) : RES_CLOBBERS, "cc", "memory"); \
     *pa = a; *pb = b; \
@@ -80,8 +124,8 @@ static __attribute__((noinline, aligned(64))) void res_##f##_##d##_##n##_##s(uin
 #define RES_PAIR(f,d,n) RES_FN(f,d,n,0) RES_FN(f,d,n,1)
 RES_FAMILIES(RES_PAIR,1) RES_FAMILIES(RES_PAIR,2)
 typedef void (*ResourceKernel)(uint64_t, uintptr_t *, uintptr_t *, uintptr_t, void *);
-typedef struct { const char *family; unsigned depth, count; ResourceKernel run[2]; } ResourceDefinition;
-#define RES_ROW(f,d,n) {#f,d,n,{res_##f##_##d##_##n##_0,res_##f##_##d##_##n##_1}},
+typedef struct { const char *family; unsigned depth, count; ResourceKernel run[2]; unsigned compute; } ResourceDefinition;
+#define RES_ROW(f,d,n) {#f,d,n,{res_##f##_##d##_##n##_0,res_##f##_##d##_##n##_1},RES_COMPUTE_##f},
 static const ResourceDefinition resource_definitions[] = {RES_FAMILIES(RES_ROW,1) RES_FAMILIES(RES_ROW,2)};
 typedef struct { void *allocation; unsigned char *base; uintptr_t head; size_t bytes; } ResourceRing;
 static uint64_t resource_random(uint64_t *state) {
@@ -117,15 +161,20 @@ typedef struct {
     void *scratch;
     unsigned calls, duration_retries;
     uint64_t elapsed[2][BENCH_SAMPLES];
+    uintptr_t compute_heads[2];
 } ResourceWork;
 static int resource_work(void *context, uint64_t repetitions) {
     ResourceWork *work = context;
     for (unsigned pass = 0; pass < 2; ++pass) {
         unsigned serial = pass ^ (work->calls & 1), slot = work->calls % BENCH_SAMPLES;
         uint64_t start = get_time_ns();
-        work->definition->run[serial](repetitions, &work->a->head, &work->b->head, work->key, work->scratch);
+        int compute = work->definition->compute;
+        uintptr_t *a = compute ? &work->compute_heads[0] : &work->a->head;
+        uintptr_t *b = compute ? &work->compute_heads[1] : &work->b->head;
+        work->definition->run[serial](repetitions, a, b, compute ? 1 : work->key, work->scratch);
         uint64_t stop = get_time_ns();
-        if (stop < start || !resource_ring_contains(work->a, work->a->head) || !resource_ring_contains(work->b, work->b->head)) return -1;
+        if (stop < start || (compute ? ((*a | *b) & 63) != 0 :
+            !resource_ring_contains(work->a, *a) || !resource_ring_contains(work->b, *b))) return -1;
         work->elapsed[serial][slot] = stop-start;
     }
     ++work->calls; return 0;
@@ -158,15 +207,18 @@ static int resource_report(FILE *json, ReportContext *report) {
                     !resource_ring_init(&b, ARCH_RESOURCE_RING_BYTES, key, 7654321);
     uint64_t target = BENCH_TARGET_NS < UINT64_C(2000000) ? BENCH_TARGET_NS : UINT64_C(2000000);
     uint64_t warmup = BENCH_WARMUP_NS < UINT64_C(250000) ? BENCH_WARMUP_NS : UINT64_C(250000);
-    fprintf(json, ",\"resource_scan\":{\"protocol\":\"dual-ring-resource-v1\",\"status\":\"%s\","
-        "\"ring_bytes\":%u,\"line_bytes\":64,\"scratch_bytes\":%zu,\"sample_target_ns\":%llu,\"records\":[",
+    fprintf(json, ",\"resource_scan\":{\"protocol\":\"dual-anchor-resource-v2\",\"status\":\"%s\","
+        "\"ring_bytes\":%u,\"line_bytes\":64,\"scratch_bytes\":%zu,\"sample_target_ns\":%llu,"
+        "\"compute_divisions_per_depth\":8,\"compute_sqrts_per_depth\":8,\"records\":[",
         available ? "measured" : "allocation_failed", (unsigned)ARCH_RESOURCE_RING_BYTES, sizeof(scratch), (unsigned long long)target);
     report_section(report, "Backend Resource Windows");
     report_write(report, "- Dual encoded random rings: %u B each; 1/2 dependent loads per anchor; AB/BA serial controls.\n"
         "- Available speculative filler windows; NOP coalescing, dispatch, scheduler and memory queues may share a limit.\n"
+        "- Non-NOP ROB control: alternating integer32 and FP64 (AArch64) / vector (x86) results.\n"
         "- 32/64-bit integer and 128-bit vector destinations; vector payload is SSE2 shuffle / AArch64 SIMD add.\n"
         "- AArch64 adds independent scalar FP32/FP64 windows; baseline x86 SSE2 scalar PRF windows are unsupported.\n"
         "- Pending memory: address-dependent loads / data-dependent stores, distinct 64-byte locations.\n"
+        "- Compute-anchor controls: A = 8/16 unsigned divisions, B = 8/16 FP64 square roots; finer memory grid.\n"
         "- Raw wall-time pairs retained. Physical capacities require matching controls and independent hardware validation.\n\n", (unsigned)ARCH_RESOURCE_RING_BYTES);
     int failed = 0;
     if (available) for (unsigned index = 0; index < sizeof(resource_definitions)/sizeof(resource_definitions[0]); ++index) {
@@ -174,10 +226,15 @@ static int resource_report(FILE *json, ReportContext *report) {
         unsigned half = sizeof(resource_definitions)/sizeof(resource_definitions[0])/2;
         unsigned selected = index < half ? index : 3*half-1-index;
         const ResourceDefinition *def = &resource_definitions[selected];
-        ResourceWork work = {.definition = def, .a = &a, .b = &b, .key = key, .scratch = scratch};
+        ResourceWork work = {.definition = def, .a = &a, .b = &b, .key = key, .scratch = scratch,
+                             .compute_heads = {UINT64_C(0x1000000000000000), UINT64_C(0x3ff0000000000000)}};
         BenchMeasurement result;
         printf("Resource window: %s %u depth %u\n", def->family, def->count, def->depth); fflush(stdout);
         if (resource_measure(&work, &result, target, warmup)) { failed = 1; break; }
+        ArchSampleBatch previous[2];
+        for (unsigned s = 0; s < 2; ++s) arch_batch_capture(&previous[s], &result, work.calls, work.elapsed[s], NULL);
+        int retried = !arch_pair_stable(&previous[0], &previous[1], 0);
+        if (retried && resource_measure(&work, &result, target*4, warmup*4)) { failed = 1; break; }
         for (unsigned serial = 0; serial < 2; ++serial) {
             fprintf(json, "%s{\"family\":\"%s\",\"depth\":%u,\"count\":%u,\"serial\":%u,\"blocks\":%llu,\"duration_retries\":%u,\"elapsed_ns\":[",
                 index || serial ? "," : "", def->family, def->depth, def->count, serial, (unsigned long long)result.repetitions, work.duration_retries);
@@ -186,7 +243,9 @@ static int resource_report(FILE *json, ReportContext *report) {
                 if (!ns) failed = 1;
                 fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)ns);
             }
-            fputs("]}", json);
+            fputc(']', json);
+            arch_previous_json(json, &previous[serial], retried, 0, 0);
+            fputc('}', json);
         }
         if (failed || ferror(json)) { failed = 1; break; }
     }

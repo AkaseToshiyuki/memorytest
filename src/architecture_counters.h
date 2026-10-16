@@ -1,5 +1,6 @@
 #ifndef ARCHITECTURE_COUNTERS_H
 #define ARCHITECTURE_COUNTERS_H
+#include <errno.h>
 /* Raw hardware counts only. Never substitute TSC, CNTVCT, advertised MHz,
  * or QueryThreadCycleTime for actual core cycles. No system-wide PMU writes. */
 #ifdef __linux__
@@ -12,7 +13,14 @@
 #include <sys/resource.h>
 #endif
 typedef struct { uint64_t cycles, instructions, enabled, running, mite; } ArchCounts;
-typedef struct { int cycles, instructions; const char *source; int mite; const char *decode_source; } ArchCounter;
+typedef struct {
+    int cycles, instructions;
+    const char *source;
+    int mite;
+    const char *decode_source;
+    const char *status;
+    int error;
+} ArchCounter;
 static int arch_counter_read(const ArchCounter *counter, ArchCounts *out) {
     memset(out, 0, sizeof(*out));
 #ifdef __linux__
@@ -54,27 +62,30 @@ static int arch_has_skl_mite_event(void) {
 #endif
 }
 static ArchCounter arch_counter_open(void) {
-    ArchCounter counter = {-1, -1, "unavailable", -1, "unavailable"};
+    ArchCounter counter = {-1, -1, "unavailable", -1, "unavailable", "platform_unsupported", 0};
 #ifdef __linux__
     struct perf_event_attr attr = {.size = sizeof(attr), .type = PERF_TYPE_HARDWARE,
         .config = PERF_COUNT_HW_CPU_CYCLES, .exclude_kernel = 1, .exclude_hv = 1,
         .read_format = PERF_FORMAT_GROUP | PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING};
     counter.cycles = (int)syscall(__NR_perf_event_open, &attr, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+    if (counter.cycles < 0) counter.error = errno;
     if (counter.cycles >= 0) {
         attr.config = PERF_COUNT_HW_INSTRUCTIONS;
         counter.instructions = (int)syscall(__NR_perf_event_open, &attr, 0, -1, counter.cycles, PERF_FLAG_FD_CLOEXEC);
-        if (counter.instructions >= 0) counter.source = "linux-perf-thread-user";
-        else arch_counter_close(&counter);
+        if (counter.instructions >= 0) { counter.source = "linux-perf-thread-user"; counter.status = "available"; }
+        else { counter.error = errno; arch_counter_close(&counter); }
         if (counter.instructions >= 0 && arch_has_skl_mite_event()) {
             attr.type = PERF_TYPE_RAW; attr.config = 0x0479;
             counter.mite = (int)syscall(__NR_perf_event_open, &attr, 0, -1, counter.cycles, PERF_FLAG_FD_CLOEXEC);
             if (counter.mite >= 0) counter.decode_source = "intel-skl-kbl-idq-mite-uops";
         }
     }
+    if (counter.error) counter.status = counter.error == EACCES || counter.error == EPERM ? "permission_denied" : "event_unavailable";
 #elif defined(__APPLE__) && defined(RUSAGE_INFO_V4)
     ArchCounts value;
-    if (!arch_counter_read(&counter, &value) && value.cycles && value.instructions)
-        counter.source = "macos-rusage-process-user-and-kernel";
+    if (arch_counter_read(&counter, &value)) { counter.status = "read_failed"; counter.error = errno; }
+    else if (value.cycles && value.instructions) { counter.source = "macos-rusage-process-user-and-kernel"; counter.status = "available"; }
+    else counter.status = "zero_counts";
 #endif
     return counter;
 }

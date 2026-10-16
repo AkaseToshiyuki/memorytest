@@ -3,6 +3,16 @@
 #undef main
 #ifdef ARCH_KERNEL_ISA
 static int resource_reference_check(void) {
+    ArchSampleBatch sample = {.blocks = 100};
+    for (unsigned i = 0; i < BENCH_SAMPLES; ++i) {
+        sample.elapsed[i] = 1000000;
+        sample.counts[i] = (ArchCounts){.cycles = 2000000, .instructions = 3000000};
+    }
+    if (!arch_batch_stable(&sample, 1) || !arch_pair_stable(&sample, &sample, 1)) return 25;
+    sample.elapsed[3] = 1200000;
+    if (arch_batch_stable(&sample, 0)) return 26;
+    sample.elapsed[3] = 1000000; sample.counts[3].cycles = 0;
+    if (arch_batch_stable(&sample, 1) || !arch_batch_stable(&sample, 0)) return 27;
     ResourceWork timing = {0};
     for (unsigned i = 0; i < BENCH_SAMPLES; ++i) { timing.elapsed[0][i] = 250000; timing.elapsed[1][i] = 250000; }
     if (!resource_samples_long_enough(&timing, 1000000)) return 36;
@@ -33,15 +43,18 @@ static int resource_reference_check(void) {
         const ResourceDefinition *def = &resource_definitions[i];
         for (unsigned serial = 0; serial < 2; ++serial) {
             memset(storage, 0xa5, sizeof(storage));
-            uintptr_t expected_a = a.head, expected_b = b.head;
-            for (unsigned step = 0; step < 3*def->depth; ++step) {
+            uintptr_t actual_a = def->compute ? UINT64_C(0x1000000000000000) : a.head, actual_b = def->compute ? UINT64_C(0x3ff0000000000000) : b.head;
+            uintptr_t expected_a = actual_a, expected_b = actual_b;
+            /* Division by one and binary64 sqrt(1.0) preserve both seeds. */
+            for (unsigned step = 0; !def->compute && step < 3*def->depth; ++step) {
                 uintptr_t next;
                 memcpy(&next, (void *)expected_a, sizeof(next)); expected_a = next ^ key;
                 memcpy(&next, (void *)expected_b, sizeof(next)); expected_b = next ^ key;
             }
-            def->run[serial](3, &a.head, &b.head, key, scratch);
-            if (a.head != expected_a || b.head != expected_b) return 34;
-            int stores = !strcmp(def->family, "store_ready") || !strcmp(def->family, "store_wait");
+            def->run[serial](3, &actual_a, &actual_b, def->compute ? 1 : key, scratch);
+            if (actual_a != expected_a || actual_b != expected_b) return 34;
+            int stores = !strcmp(def->family, "store_ready") || !strcmp(def->family, "store_wait") ||
+                !strcmp(def->family, "compute_store_ready") || !strcmp(def->family, "compute_store_wait");
             for (size_t byte = 0; byte < sizeof(storage); ++byte) {
                 unsigned char expected = 0xa5;
                 if (stores && byte >= 128 && byte < 128+64*def->count && (byte-128)%64 < sizeof(uintptr_t)) {
@@ -92,6 +105,24 @@ int main(int argc, char **argv) {
 #ifndef ARCH_KERNEL_ISA
     return 77;
 #else
+    if (argc > 1 && !strcmp(argv[1], "compute-baseline")) {
+        int cpu; const char *placement;
+        if (architecture_placement(&cpu, &placement)) return 77;
+        _Alignas(64) unsigned char scratch[32832] = {0};
+        for (unsigned i = 0; i < sizeof(resource_definitions)/sizeof(resource_definitions[0]); ++i) {
+            const ResourceDefinition *def = &resource_definitions[i];
+            if (strcmp(def->family, "compute_nop") || def->count) continue;
+            ResourceWork work = {.definition = def, .scratch = scratch,
+                                 .compute_heads = {UINT64_C(0x1000000000000000), UINT64_C(0x3ff0000000000000)}};
+            BenchMeasurement result;
+            if (resource_measure(&work, &result, 1000000, 250000)) return 50;
+            printf("%u", def->depth);
+            for (unsigned j = 0; j < BENCH_SAMPLES; ++j) printf(" %.6f", (double)work.elapsed[0][j]/work.elapsed[1][j]);
+            printf(" ns/loop=%.3f/%.3f", (double)work.elapsed[0][0]/result.repetitions, (double)work.elapsed[1][0]/result.repetitions);
+            putchar('\n');
+        }
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "resources")) return resource_reference_check();
     if (argc > 1 && !strcmp(argv[1], "btb-layout")) return btb_layout_reference_check();
     if (argc > 1 && !strcmp(argv[1], "competition")) return competition_reference_output();

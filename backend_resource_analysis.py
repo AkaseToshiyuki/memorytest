@@ -2,6 +2,7 @@
 from statistics import median
 from sample_statistics import summarize
 from frontend_width_analysis import counter_sources, samples, stable as stable_samples
+from architecture_sampling import batch_consistent, paired_history
 
 SMALL = (0, 8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512)
 LARGE = SMALL + (640, 768, 1024, 1280, 1536, 2048)
@@ -9,10 +10,16 @@ FAMILIES = {"rob_nop": LARGE + (2560, 3072, 3584, 4096), "prf_i32": LARGE,
             "prf_i64": LARGE, "prf_vec128": LARGE, **dict.fromkeys(
                 ("sched_int", "sched_vector", "load_ready", "load_wait", "store_ready", "store_wait"), SMALL)}
 ARM_SCALAR = {"prf_fp32": LARGE, "prf_fp64": LARGE, "sched_fp32": SMALL, "sched_fp64": SMALL}
+MEMORY = tuple(sorted(set(SMALL) | {40, 56, 72, 88, 112, 144, 176, 208, 240, 288, 352, 416, 480}))
+COMPUTE_FAMILIES = ("compute_nop", "compute_load_ready", "compute_load_wait", "compute_store_ready", "compute_store_wait")
 
 
-def resource_families(isa):
-    return {**FAMILIES, **(ARM_SCALAR if isa == "aarch64-fp64" else {})}
+def resource_families(isa, protocol="dual-ring-resource-v1"):
+    families = {**FAMILIES, **(ARM_SCALAR if isa == "aarch64-fp64" else {})}
+    if protocol == "dual-anchor-resource-v2":
+        families["rob_mixed"] = LARGE
+        families.update(dict.fromkeys(("load_ready", "load_wait", "store_ready", "store_wait")+COMPUTE_FAMILIES, MEMORY))
+    return families
 
 
 BTB_COUNTS = (16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096)
@@ -24,10 +31,19 @@ def timing(row):
             type(n) is not int or not 1 <= n < 2**64 for n in elapsed):
         raise ValueError("invalid resource timing samples")
     stats = summarize(elapsed)
-    return stats["median"] / blocks, not stats["unstable"] and (max(elapsed)-min(elapsed))/median(elapsed) <= .15
+    consistent = batch_consistent(row)
+    return stats["median"] / blocks, not stats["unstable"] and (max(elapsed)-min(elapsed))/median(elapsed) <= .15 and consistent
 
 
 def window_candidate(points):
+    result = _window_candidate(points)
+    if result["status"] == "unstable":
+        observed = _window_candidate([dict(p, stable=True) for p in points])
+        if observed["status"] == "candidate": result["observed_interval"] = [observed["lower"], observed["upper"]]
+    return result
+
+
+def _window_candidate(points):
     """An abrupt, sustained loss of overlap at the same bracket for both anchors.
 
     Smooth throughput saturation, failed baseline overlap and depth-sensitive
@@ -56,16 +72,18 @@ def window_candidate(points):
 
 
 def read_resources(data, isa="x86_64-sse2"):
-    if not isinstance(data, dict) or data.get("protocol") != "dual-ring-resource-v1":
+    if not isinstance(data, dict) or data.get("protocol") not in {"dual-ring-resource-v1", "dual-anchor-resource-v2"}:
         raise ValueError("missing backend resource scan")
     size, target = data.get("ring_bytes"), data.get("sample_target_ns")
     if type(size) is not int or not 128 <= size <= 512*1024**2 or size % 64 or data.get("line_bytes") != 64 or data.get("scratch_bytes") != 32832:
         raise ValueError("invalid resource memory layout")
     if type(target) is not int or not 1 <= target <= 2_000_000: raise ValueError("invalid resource target")
+    if data["protocol"] == "dual-anchor-resource-v2" and (data.get("compute_divisions_per_depth"), data.get("compute_sqrts_per_depth")) != (8, 8):
+        raise ValueError("invalid compute anchor instruction count")
     if data.get("status") == "allocation_failed" and data.get("records") == []:
         return {"status": "allocation_failed", "records": [], "candidates": {}, "stable": False, "ring_bytes": size}
     if data.get("status") != "measured": raise ValueError("invalid resource scan status")
-    families = resource_families(isa)
+    families = resource_families(isa, data["protocol"])
     expected = {(f, d, n, s) for f, counts in families.items() for n in counts for d in (1, 2) for s in (0, 1)}
     raw = data.get("records")
     if not isinstance(raw, list) or len(raw) != len(expected): raise ValueError("incomplete resource scan")
@@ -88,16 +106,24 @@ def read_resources(data, isa="x86_64-sse2"):
                     raise ValueError("unmatched resource pair")
                 ratios = [x/y for x, y in zip(a["elapsed_ns"], b["elapsed_ns"])]
                 stats = summarize(ratios)
-                stable = a["stable"] and b["stable"] and not stats["unstable"] and (max(ratios)-min(ratios))/median(ratios) <= .15
+                consistent = paired_history(a, b)
+                stable = a["stable"] and b["stable"] and not stats["unstable"] and (max(ratios)-min(ratios))/median(ratios) <= .15 and consistent
                 records.append({"family": family, "depth": depth, "count": count, "ratio": median(ratios),
-                                "parallel_ns": a["ns"], "serial_ns": b["ns"], "stable": stable})
+                                "parallel_ns": a["ns"], "serial_ns": b["ns"], "stable": stable,
+                                "retried": bool(a.get("previous_batches")),
+                                "anchor": "compute" if family in COMPUTE_FAMILIES else "memory"})
     candidates = {family: window_candidate([r for r in records if r["family"] == family]) for family in families}
+    for family in COMPUTE_FAMILIES:
+        if candidates.get(family, {}).get("status") == "candidate": candidates[family]["basis"] = "compute-serial-control"
     # A result-writing or dependent stream must lose overlap before its ready
     # control. Otherwise the shared ROB/frontend/dispatch limit is unresolved.
     controls = {"prf_i32": "rob_nop", "prf_i64": "rob_nop", "prf_vec128": "rob_nop",
                 "sched_int": "prf_i64", "sched_vector": "prf_vec128", "load_wait": "load_ready",
                 "store_wait": "store_ready", "load_ready": "rob_nop", "store_ready": "rob_nop"}
     if isa == "aarch64-fp64": controls.update(prf_fp32="rob_nop", prf_fp64="rob_nop", sched_fp32="prf_fp32", sched_fp64="prf_fp64")
+    if data["protocol"] == "dual-anchor-resource-v2":
+        controls.update(compute_load_ready="compute_nop", compute_store_ready="compute_nop",
+                        compute_load_wait="compute_load_ready", compute_store_wait="compute_store_ready")
     for family, control in controls.items():
         candidate = candidates[family]
         if candidate["status"] != "candidate": continue
@@ -110,7 +136,16 @@ def read_resources(data, isa="x86_64-sse2"):
         if shared or unverified:
             candidates[family] = {"status": "shared_limit" if shared else "control_unstable",
                 "observed_interval": [candidate["lower"], candidate["upper"]]}
-    return {"status": "measured", "records": records, "candidates": candidates,
+    if "rob_mixed" in candidates and candidates["rob_mixed"]["status"] == "candidate":
+        candidate, references = candidates["rob_mixed"], []
+        for control in ("prf_i32", "prf_fp64" if isa == "aarch64-fp64" else "prf_vec128"):
+            for depth in (1, 2):
+                references.extend([p for p in records if p["family"] == control and p["depth"] == depth and p["count"] >= candidate["upper"]/2][:2])
+        shared = any(p["stable"] and p["ratio"] >= .8 for p in references)
+        if shared or len(references) != 8 or not all(p["stable"] for p in references):
+            candidates["rob_mixed"] = {"status": "shared_limit" if shared else "control_unstable",
+                "observed_interval": [candidate["lower"], candidate["upper"]]}
+    return {"status": "measured", "protocol": data["protocol"], "records": records, "candidates": candidates,
             "stable": all(r["stable"] for r in records), "ring_bytes": size}
 
 
@@ -134,7 +169,8 @@ def read_btb_layout(data):
         ns, stable = timing(row)
         if min(row["elapsed_ns"]) < target//2: raise ValueError("short BTB sample")
         seen.add(key)
-        records.append({"count": count, "stride": stride, "offset": offset, "ns": ns/count, "stable": stable})
+        records.append({"count": count, "stride": stride, "offset": offset, "ns": ns/count, "stable": stable,
+                        "retried": bool(row.get("previous_batches"))})
     votes = {}
     for stride in (4, 8, 16, 32, 64):
         for offset in (0, 32):
@@ -157,16 +193,18 @@ def read_btb_layout(data):
 
 COMPETITION_SINGLE = ("iadd", "imul", "fadd", "fmul", "load", "store")
 COMPETITION_MIX = ("iadd_imul", "fadd_fmul", "iadd_fadd", "load_store", "iadd_load", "fadd_load")
+COMPETITION_EXTENDED = ("iadd8", "imul8", "fadd8", "fmul8", "iwrite", "vwrite", "iwrite_vwrite")
 
 
 def read_competition(data, placement):
-    if not isinstance(data, dict) or data.get("protocol") != "mixed-throughput-v1" or data.get("chains_per_family") != 4:
+    if not isinstance(data, dict) or data.get("protocol") not in {"mixed-throughput-v1", "mixed-throughput-v2"} or data.get("chains_per_family") != 4:
         raise ValueError("missing execution competition scan")
     source, decode = counter_sources(data, placement)
     if decode != "unavailable": raise ValueError("unexpected competition decoder event")
     target = data.get("sample_target_ns")
     if type(target) is not int or not 1 <= target <= 5_000_000: raise ValueError("invalid competition target")
-    expected = {(f, n) for f in COMPETITION_SINGLE+COMPETITION_MIX for n in (32, 64)}
+    extended = data["protocol"] == "mixed-throughput-v2"
+    expected = {(f, n) for f in COMPETITION_SINGLE+COMPETITION_MIX+(COMPETITION_EXTENDED if extended else ()) for n in (32, 64)}
     rows = data.get("records")
     if not isinstance(rows, list) or len(rows) != len(expected): raise ValueError("incomplete competition scan")
     records, seen = [], set()
@@ -177,16 +215,19 @@ def read_competition(data, placement):
             raise ValueError("invalid competition payload")
         ns, time_stable = timing(row)
         elapsed, cycles, instructions, _ = samples(row, source, decode, max(1, target//2), False)
+        consistent = batch_consistent(row, lambda previous: samples(previous, source, decode, 1, False), key[1])
+        time_stable = time_stable and consistent
         ops = row["blocks"]*key[1]
         if any(c and i < ops for c, i in zip(cycles, instructions)): raise ValueError("retired count below competition work")
         ipc = [ops/c for c in cycles] if all(cycles) else []
         counter_stable = stable_samples(ipc)
         records.append({"family": key[0], "unroll": key[1], "ns": ns/key[1], "stable": time_stable,
                         "instructions_per_cycle": median(ipc) if ipc else None, "counter_stable": counter_stable,
+                        "retried": bool(row.get("previous_batches")),
                         "allocation_floor": min(ipc) if counter_stable and time_stable else None})
         seen.add(key)
     mixtures = []
-    for family in COMPETITION_MIX:
+    for family in COMPETITION_MIX+(("iwrite_vwrite",) if extended else ()):
         first, second = family.split("_")
         gains, valid = [], True
         for unroll in (32, 64):
@@ -197,11 +238,13 @@ def read_competition(data, placement):
         mixtures.append({"family": family, "gain": median(gains), "unroll_gains": gains,
                          "status": "measured" if valid and consistent else "unstable" if not valid else "unroll_sensitive"})
     # Non-eliminable result writes provide an allocation-throughput floor only.
-    # Four-chain latency, execution and retire bottlenecks can all lower it.
+    # Execution and retire bottlenecks can still lower the independent-write
+    # result; four/eight chains additionally reveal dependency limitations.
     floors = []
-    for family in ("iadd", "imul", "fadd", "fmul", "iadd_imul", "fadd_fmul", "iadd_fadd"):
+    for family in ("iadd", "imul", "fadd", "fmul", "iadd_imul", "fadd_fmul", "iadd_fadd")+(COMPETITION_EXTENDED if extended else ()):
         values = [r["allocation_floor"] for r in records if r["family"] == family]
         if len(values) == 2 and all(values) and max(values)/min(values) <= 1.10: floors.append(min(values))
     rename = {"status": "lower_bound", "value": max(floors), "unit": "writes/cycle", "basis": "non-eliminable-result-throughput"} if floors else None
     return {"records": records, "mixtures": mixtures, "rename_width": rename, "counter_source": source,
+            "counter_status": data.get("counter_status", "available" if source != "unavailable" else "unavailable"),
             "stable": all(r["stable"] for r in records)}

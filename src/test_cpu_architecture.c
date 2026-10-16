@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
     if (!json) { report_free(report); return 1; }
     report_write_system_info(report);
     report_section(report, "Architecture Probe Conditions");
-    report_write(report, "- Protocol: architecture-probes-v4\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
+    report_write(report, "- Protocol: architecture-probes-v5\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
     bench_report_conditions(report);
     report_write(report, "- Instruction count is explicit payload work, NOT retired instructions from a PMU.\n"
         "- The twelve instruction/memory probes use wall time, including loop and result retention overhead.\n"
@@ -203,7 +203,7 @@ int main(int argc, char **argv) {
         "Windows uses the largest OS-reported instance per level. Shared caches are not per-core capacities.\n\n");
     report_section(report, "Architecture Measurements");
     report_write(report, "| Probe | ns/op | Operations | Samples | Status |\n|---|---|---|---|---|\n");
-    fprintf(json, "{\"schema_version\":4,\"protocol\":\"architecture-probes-v4\",\"isa\":\"" ARCH_KERNEL_ISA "\","
+    fprintf(json, "{\"schema_version\":5,\"protocol\":\"architecture-probes-v5\",\"isa\":\"" ARCH_KERNEL_ISA "\","
         "\"placement\":\"%s\",\"cpu_id\":%d,\"sample_count\":%u,\"sample_target_ns\":%llu,"
         "\"timer\":\"monotonic-wall-time\",\"cache_source\":\"OS-reported-not-probed\","
         "\"reported_cache_bytes\":{\"l1i\":%zu,\"l1d\":%zu,\"l2\":%zu,\"l3\":%zu},\"records\":[",

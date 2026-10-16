@@ -2,6 +2,7 @@
 import html
 import math
 from i18n import display, tr
+from presentation import _text_width
 
 
 def architecture_svg(chart, language, color):
@@ -20,8 +21,10 @@ def architecture_svg(chart, language, color):
         dash = ' stroke-dasharray="5 4"' if dashed else ""
         fill = color(tone + "_fill") if tone in {"frontend", "cache", "register", "compute", "memory"} else color("base")
         parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="2" fill="{fill}" stroke="{color(tone)}"{dash}/>')
-        text(x+w/2, y+24, title, 15)
-        for i, line in enumerate(lines): text(x+w/2, y+48+i*23, line, 16 if line[:1].isdigit() else 14)
+        def fitted(value, preferred):
+            return min(preferred, max(10, int((w-18)/max(1, _text_width(value, 1)))))
+        text(x+w/2, y+24, title, fitted(title, 15))
+        for i, line in enumerate(lines): text(x+w/2, y+48+i*23, line, fitted(line, 16 if line[:1].isdigit() else 14))
     def arrow(x1, y1, x2, y2):
         angle = math.atan2(y2-y1, x2-x1)
         left = (x2-7*math.cos(angle-.5), y2-7*math.sin(angle-.5))
@@ -72,7 +75,7 @@ def architecture_svg(chart, language, color):
     rename = competition.get("rename_width") if competition else None
     rename_value = f'≥{rename["value"]:.2f} writes/cycle' if rename else unknown
     if competition and not rename:
-        rename_value = "— · " + tr("arch_counter_unavailable" if competition["counter_source"] == "unavailable" else "arch_unstable", language)
+        rename_value = "— · " + tr("arch_counter_"+competition.get("counter_status", "unavailable") if competition["counter_source"] == "unavailable" else "arch_unstable", language)
     box(350, 383, 300, 72, tr("arch_rename", language), [rename_value], "frontend", dashed=not rename)
     for x, title, family in ((25, "arch_int_window", "prf_i64"), (690, "arch_vec_window", "prf_vec128")):
         box(x, 383, 285, 72, tr(title if resources else "arch_int_registers" if x == 25 else "arch_fp_registers", language),
@@ -95,7 +98,10 @@ def architecture_svg(chart, language, color):
     retire = tr("arch_window", language) + " · " + resource("rob_nop")
     if frontend and frontend.get("retirement_width"):
         retire += "     |     " + tr("arch_retire_rate", language) + " " + width("retirement_width")
-    box(25, 723, 950, 72, tr("arch_retire", language), [retire], "register", dashed=True)
+    retire_lines = [retire]
+    if resources and "rob_mixed" in resources["candidates"]:
+        retire_lines.append(tr("arch_res_rob_mixed", language) + " · " + resource("rob_mixed"))
+    box(25, 723, 950, 88 if len(retire_lines) > 1 else 72, tr("arch_retire", language), retire_lines, "register", dashed=True)
     if not data["stable"]:
         text(30, 825, tr("architecture_unstable", language), 13, color("warning"), "start")
     return "".join(parts) + "</svg>"

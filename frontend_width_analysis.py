@@ -8,6 +8,7 @@ from math import ceil, sqrt
 from statistics import median
 MIN_STABLE_WIDTH_POINTS = 110
 from sample_statistics import summarize
+from architecture_sampling import batch_consistent, paired_history
 
 
 def counter_sources(data, placement):
@@ -19,6 +20,12 @@ def counter_sources(data, placement):
         raise ValueError("invalid front-end counter source")
     if decode != "unavailable" and source != "linux-perf-thread-user":
         raise ValueError("decoder event requires Linux hardware counters")
+    status, error = data.get("counter_status"), data.get("counter_error", 0)
+    if type(error) is not int or not 0 <= error < 65536: raise ValueError("invalid hardware counter error")
+    if status is not None:
+        if status not in {"available", "permission_denied", "event_unavailable", "read_failed", "zero_counts", "platform_unsupported"} or (
+                (status == "available") != (source != "unavailable")) or (status == "available" and error):
+            raise ValueError("inconsistent hardware counter status")
     return source, decode
 
 
@@ -51,7 +58,7 @@ def read_width_scan(data, isa, placement):
     if type(target) is not int or not 1 <= target <= 10_000_000: raise ValueError("invalid width target")
     raw = data.get("records")
     if not isinstance(raw, list) or len(raw) != 122: raise ValueError("incomplete paired width scan")
-    points, seen, repetitions, times = [], set(), {}, {}
+    points, seen, repetitions, times, raw_pairs = [], set(), {}, {}, {}
     for row in raw:
         if not isinstance(row, dict): raise ValueError("invalid width row")
         count, crossed, blocks = (row.get(k) for k in ("count", "crossed", "blocks"))
@@ -64,6 +71,8 @@ def read_width_scan(data, isa, placement):
         if count in repetitions and blocks != repetitions[count]: raise ValueError("unpaired work counts")
         repetitions[count] = blocks
         elapsed, cycles, instructions, mite = samples(row, source, decode)
+        consistent = batch_consistent(row, lambda previous: samples(previous, source, decode), count)
+        raw_pairs[count, crossed] = row
         times[count, crossed] = elapsed
         if (count, 1-crossed) in times and any(a+b < max(1, target//4) for a, b in zip(elapsed, times[count, 1-crossed])):
             raise ValueError("short paired width sample")
@@ -72,8 +81,13 @@ def read_width_scan(data, isa, placement):
         cpi = [v / blocks for v in cycles] if all(cycles) else []
         points.append({"count": count, "crossed": crossed, "code_bytes": row["code_bytes"],
             "ns_per_iteration": median(ns), "cycles_per_iteration": median(cpi) if cpi else None,
-            "stable": stable(ns), "counter_stable": stable(cpi),
+            "stable": stable(ns) and consistent, "counter_stable": stable(cpi) and consistent,
+            "retried": bool(row.get("previous_batches")), "batch_consistent": consistent,
             "decoder_qualified": bool(all(mite) and min(mite) >= blocks*(count-1)*.9)})
+    for count in range(4, 65):
+        if not paired_history(raw_pairs[count, 0], raw_pairs[count, 1]):
+            for p in points:
+                if p["count"] == count: p.update(stable=False, counter_stable=False, batch_consistent=False)
     # An available but noisy/invalid PMU must not silently fall back to a
     # wall-time model that could contradict the measured cycle cost.
     use_cycles = source != "unavailable"
@@ -85,6 +99,7 @@ def read_width_scan(data, isa, placement):
     if not qualified: fit = None
     stable_points = sum(p["stable"] and (not use_cycles or p["counter_stable"]) for p in points)
     return {"records": points, "fetch_width": fit, "counter_source": source,
+        "counter_status": data.get("counter_status", "available" if source != "unavailable" else "unavailable"),
         "decode_counter_source": decode, "page_bytes": page, "sample_target_ns": target,
         "stable_points": stable_points,
         "status": "candidate" if fit else "path_unverified" if not qualified else

@@ -75,8 +75,8 @@
     },
     "cpu_architecture": {
       "name": "Core Architecture Analysis",
-      "description": "Paired fetch-width scan, qualified decode/retirement throughput and BTB evidence",
-      "description_zh": "取指宽度对照扫描、解码／退休吞吐与 BTB 实测",
+      "description": "Fetch/BTB scans, dual-anchor resource windows and execution/write throughput",
+      "description_zh": "取指／BTB 扫描、双锚点资源窗口与执行／写入吞吐",
       "category": "cpu",
       "section": "Core Architecture Analysis",
       "source": "src/test_cpu_architecture.c",

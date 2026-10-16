@@ -35,20 +35,30 @@ static int btb_layout_report(FILE *json, ReportContext *report) {
     fprintf(json, ",\"btb_layout_scan\":{\"protocol\":\"btb-layout-v1\",\"sample_target_ns\":%llu,\"loop_control_branches\":1,\"records\":[", (unsigned long long)target);
     report_section(report, "BTB Layout Controls");
     report_write(report, "- 16–4096 targets; 4/8/16/32/64 B spacing; 0/32 B offsets modulo 128.\n"
-        "- One additional loop-control branch per iteration. Two offsets and reversed sweep order.\n"
+        "- One additional loop-control branch per iteration. Adjacent offset controls, alternating order.\n"
         "- Transitions are spacing-specific; target count, PC indexing and code footprint retained.\n\n");
     unsigned count = sizeof(btb_layout_definitions)/sizeof(btb_layout_definitions[0]);
     for (unsigned i = 0; i < count; ++i) {
-        unsigned index = i < count/2 ? i : count+count/2-1-i;
+        /* Keep both PC-index controls adjacent in time; alternate which
+         * offset goes first at each count instead of separating them by
+         * an entire sweep (thermal/core-placement drift). */
+        unsigned pair = i/2, offset = (i & 1) ^ (pair & 1);
+        unsigned index = pair + offset*(count/2);
         BtbLayoutWork work = {.definition = &btb_layout_definitions[index]};
         const BtbLayoutDefinition *def = work.definition;
         BenchMeasurement result;
         printf("BTB layout: %u x %u B offset %u\n", def->count, def->stride, def->offset); fflush(stdout);
         if (bench_measure_target(btb_layout_work, &work, &result, target, warmup)) return -1;
+        ArchSampleBatch previous;
+        arch_batch_capture(&previous, &result, 0, NULL, NULL);
+        int retried = !arch_batch_stable(&previous, 0);
+        if (retried && bench_measure_target(btb_layout_work, &work, &result, target*4, warmup*4)) return -1;
         fprintf(json, "%s{\"count\":%u,\"stride\":%u,\"offset\":%u,\"actual_offset\":%zu,\"code_bytes\":%zu,\"blocks\":%llu,\"elapsed_ns\":[",
             i ? "," : "", def->count, def->stride, def->offset, (size_t)(work.begin%128), (size_t)(work.end-work.begin), (unsigned long long)result.repetitions);
         for (unsigned j = 0; j < BENCH_SAMPLES; ++j) fprintf(json, "%s%llu", j ? "," : "", (unsigned long long)result.samples[j]);
-        fputs("]}", json);
+        fputc(']', json);
+        arch_previous_json(json, &previous, retried, 0, 0);
+        fputc('}', json);
         if (ferror(json)) return -1;
     }
     fputs("]}", json); return ferror(json) ? -1 : 0;

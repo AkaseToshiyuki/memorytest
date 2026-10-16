@@ -311,7 +311,7 @@ def build_module(name, reports, record=None):
                   ref("measured" if value["stable"] else "unstable")] for name, value in metrics.items()])]
             if frontend:
                 result.conditions.append((ref("arch_frontend_target"), f'{frontend["sample_target_ns"] / 1e6:g} ms'))
-                result.conditions.append((ref("arch_counter_source"), ref("unavailable") if frontend["counter_source"] == "unavailable" else frontend["counter_source"]))
+                result.conditions.append((ref("arch_counter_source"), ref("arch_counter_"+frontend["counter_status"]) if frontend["counter_source"] == "unavailable" else frontend["counter_source"]))
                 if frontend["decode_width"]:
                     result.conditions.append((ref("arch_decode_basis"), "Intel IDQ.MITE_UOPS" if
                         frontend["decode_width"]["basis"] == "intel-mite-counter" else ref("arch_nop_candidate")))
@@ -377,7 +377,7 @@ def build_module(name, reports, record=None):
                      for family, value in resources["candidates"].items()]))
                 for family in resources["candidates"]:
                     xs = sorted({p["count"] for p in points if p["family"] == family})
-                    series = [{"label": f'{depth} load/anchor', "values": [next(p["ratio"] for p in points
+                    series = [{"label": f'{8*depth} DIV + {8*depth} SQRT' if family.startswith("compute_") else f'{depth} load/anchor', "values": [next(p["ratio"] for p in points
                         if p["family"] == family and p["depth"] == depth and p["count"] == count) for count in xs]}
                         for depth in (1, 2)]
                     result.charts.append(Chart("arch_res_"+family, "line", "parallel/serial", xs, series, xs, "arch_filler_count"))
@@ -394,6 +394,17 @@ def build_module(name, reports, record=None):
                     column("latency", "ns/instr"), column("arch_effective_supply", "instr/cycle"), column("status")],
                     [[p["family"], p["unroll"], p["ns"], p["instructions_per_cycle"], ref("measured" if p["stable"] else "unstable")]
                      for p in competition["records"]]))
+            sampling_rows = []
+            for name, label in (("frontend", "arch_code_scan"), ("width_scan", "arch_fetch_scan"),
+                                ("btb_layout_scan", "arch_btb_layout"), ("resource_scan", "arch_resource_scan"),
+                                ("competition_scan", "arch_competition")):
+                stage = evidence.get(name)
+                if stage:
+                    rows = stage["records"]
+                    stable_count = stage["stable_points"] if name == "width_scan" else sum(r["stable"] for r in rows)
+                    sampling_rows.append([ref(label), f'{stable_count}/{len(rows)}', sum(bool(r.get("retried")) for r in rows)])
+            if sampling_rows:
+                result.tables.append(Table("arch_probe_status", [column("measurement"), column("arch_stable_points"), column("arch_remeasured")], sampling_rows))
             return result
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
                              (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),

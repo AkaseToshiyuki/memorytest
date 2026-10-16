@@ -1,6 +1,7 @@
 #ifndef ARCHITECTURE_FRONTEND_H
 #define ARCHITECTURE_FRONTEND_H
 #include "architecture_counters.h"
+#include "architecture_sampling.h"
 /* Static text: works with hardened runtimes and needs no writable executable
  * memory. Each branch is taken; skipped padding controls target spacing. */
 #define FE_STR_(x) #x
@@ -57,8 +58,8 @@ static int frontend_report(FILE *json, ReportContext *report) {
     uint64_t target = BENCH_TARGET_NS < UINT64_C(10000000) ? BENCH_TARGET_NS : UINT64_C(10000000);
     uint64_t warmup = BENCH_WARMUP_NS < UINT64_C(2000000) ? BENCH_WARMUP_NS : UINT64_C(2000000);
     fprintf(json, ",\"frontend\":{\"protocol\":\"frontend-static-v2\",\"sample_target_ns\":%llu,"
-        "\"counter_source\":\"%s\",\"decode_counter_source\":\"%s\",\"records\":[",
-        (unsigned long long)target, counter.source, counter.decode_source);
+        "\"counter_source\":\"%s\",\"decode_counter_source\":\"%s\",\"counter_status\":\"%s\",\"counter_error\":%d,\"records\":[",
+        (unsigned long long)target, counter.source, counter.decode_source, counter.status, counter.error);
     report_section(report, "Front-end Working Sets");
     report_write(report, "- Counter source: %s\n- BTB: 128–32768 taken targets, 8/16/32-byte spacing.\n"
         "- NOP working sets: 128 B–256 KiB. Calls, returns and loop overhead are retained.\n"
@@ -69,6 +70,12 @@ static int frontend_report(FILE *json, ReportContext *report) {
         BenchMeasurement result;
         printf("Front-end probe: %s %u x %u B\n", def->kind, def->count, def->stride); fflush(stdout);
         if (bench_measure_target(frontend_work, &work, &result, target, warmup)) {
+            arch_counter_close(&counter); return -1;
+        }
+        ArchSampleBatch previous;
+        arch_batch_capture(&previous, &result, work.calls, NULL, work.counts);
+        int retried = !arch_batch_stable(&previous, strcmp(counter.source, "unavailable"));
+        if (retried && bench_measure_target(frontend_work, &work, &result, target*4, warmup*4)) {
             arch_counter_close(&counter); return -1;
         }
         fprintf(json, "%s{\"kind\":\"%s\",\"count\":%u,\"stride\":%u,\"code_bytes\":%u,\"blocks\":%llu,\"elapsed_ns\":[",
@@ -84,7 +91,9 @@ static int frontend_report(FILE *json, ReportContext *report) {
         fputs("],\"mite_uops\":[", json);
         for (unsigned i = 0; i < BENCH_SAMPLES; ++i)
             fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)work.counts[(work.calls+i) % BENCH_SAMPLES].mite);
-        fputs("]}", json);
+        fputc(']', json);
+        arch_previous_json(json, &previous, retried, 1, 1);
+        fputc('}', json);
     }
     fputs("]}", json);
     arch_counter_close(&counter);

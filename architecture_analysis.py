@@ -3,6 +3,7 @@ from sample_statistics import summarize
 from statistics import median
 from frontend_width_analysis import counter_sources, samples, read_width_scan, sustained_widths, stable as stable_samples
 from backend_resource_analysis import read_resources, read_btb_layout, read_competition
+from architecture_sampling import batch_consistent
 
 PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "imul_ind8": 32,
           "fadd_dep": 32, "fadd_ind8": 32, "fmul_dep": 32, "fmul_ind8": 32,
@@ -11,7 +12,7 @@ PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "im
 
 def read_architecture(data):
     if not isinstance(data, dict) or (data.get("schema_version"), data.get("protocol")) not in {
-            (1, "architecture-probes-v1"), (2, "architecture-probes-v2"), (3, "architecture-probes-v3"), (4, "architecture-probes-v4")}:
+            (1, "architecture-probes-v1"), (2, "architecture-probes-v2"), (3, "architecture-probes-v3"), (4, "architecture-probes-v4"), (5, "architecture-probes-v5")}:
         raise ValueError("unsupported architecture probe protocol")
     if data.get("isa") not in {"x86_64-sse2", "aarch64-fp64"}:
         raise ValueError("unsupported instruction probe ISA")
@@ -70,6 +71,12 @@ def read_architecture(data):
     resources = read_resources(data.get("resource_scan"), data["isa"]) if data["schema_version"] >= 4 else None
     btb_layout = read_btb_layout(data.get("btb_layout_scan")) if data["schema_version"] >= 4 else None
     competition = read_competition(data.get("competition_scan"), policy) if data["schema_version"] >= 4 else None
+    if data["schema_version"] >= 5:
+        if data["resource_scan"]["protocol"] != "dual-anchor-resource-v2" or data["competition_scan"]["protocol"] != "mixed-throughput-v2":
+            raise ValueError("missing extended architecture probes")
+        for name in ("frontend", "width_scan", "resource_scan", "btb_layout_scan", "competition_scan"):
+            if any("previous_batches" not in row for row in data[name]["records"]):
+                raise ValueError("missing whole-batch sampling history")
     return {"metrics": metrics, "reported_cache_bytes": caches, "placement": policy, "cpu_id": cpu,
             "cache_instances": cache_instances,
             "protocol": data["protocol"], "frontend": frontend, "width_scan": width_scan,
@@ -130,8 +137,9 @@ def read_frontend(data, isa, placement):
             raise ValueError("invalid front-end code footprint")
         seen.add(key)
         elapsed, cycles, instructions, mite = samples(row, source, decode_source, max(1, target//2), data["protocol"] == "frontend-static-v2")
+        consistent = batch_consistent(row, lambda previous: samples(previous, source, decode_source, 1, data["protocol"] == "frontend-static-v2"), count)
         stats = summarize(elapsed)
-        stable = not stats["unstable"] and (max(elapsed)-min(elapsed))/stats["raw_median"] <= .15
+        stable = not stats["unstable"] and (max(elapsed)-min(elapsed))/stats["raw_median"] <= .15 and consistent
         cycle_ok = all(cycles) and all(i >= count * blocks for i in instructions)
         ipc = median(count * blocks / c for c in cycles) if cycle_ok else None
         if cycle_ok:
@@ -140,6 +148,7 @@ def read_frontend(data, isa, placement):
             cycle_ok = not cycle_stats["unstable"] and (max(ratios)-min(ratios))/median(ratios) <= .15
         records.append({"kind": kind, "count": count, "stride": stride, "code_bytes": count*stride,
             "ns": stats["median"] / (count*blocks), "stable": stable,
+            "retried": bool(row.get("previous_batches")), "batch_consistent": consistent,
             "instructions_per_cycle": ipc, "counter_stable": bool(cycle_ok),
             "supply_floor": min(count*blocks/c for c in cycles) if cycle_ok else None,
             "decoder_qualified": bool(cycle_ok and min(mite) >= count*blocks*.9 and stable_samples([m/c for m, c in zip(mite, cycles)])),
@@ -148,6 +157,7 @@ def read_frontend(data, isa, placement):
             "bytes_per_cycle": ipc * stride if ipc is not None else None})
     supply = [r for r in records if r["kind"] == "nop" and r["stable"] and r["counter_stable"]]
     return {"records": records, "counter_source": source, "decode_counter_source": decode_source, "sample_target_ns": target,
+            "counter_status": data.get("counter_status", "available" if source != "unavailable" else "unavailable"),
             "btb_transitions": btb_transitions(records), "stable": all(r["stable"] for r in records),
             "peak_supply_ipc": max((r["instructions_per_cycle"] for r in supply), default=None),
             "fetch_width": None, "decode_width": None, "retirement_width": None}

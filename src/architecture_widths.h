@@ -93,8 +93,8 @@ static int width_report(FILE *json, ReportContext *report) {
 #endif
     if (!page || page > WIDTH_ALIGNMENT || WIDTH_ALIGNMENT % page) { arch_counter_close(&counter); return -1; }
     fprintf(json, ",\"width_scan\":{\"protocol\":\"page-boundary-width-v1\",\"page_bytes\":%zu,"
-        "\"sample_target_ns\":%llu,\"counter_source\":\"%s\",\"decode_counter_source\":\"%s\",\"records\":[",
-        page, (unsigned long long)target, counter.source, counter.decode_source);
+        "\"sample_target_ns\":%llu,\"counter_source\":\"%s\",\"decode_counter_source\":\"%s\",\"counter_status\":\"%s\",\"counter_error\":%d,\"records\":[",
+        page, (unsigned long long)target, counter.source, counter.decode_source, counter.status, counter.error);
     report_section(report, "Page-boundary Fetch Scan");
     report_write(report, "- 4–64 instructions/iteration; identical page-start/page-end loops, alternating AB/BA.\n"
         "- Page size: %zu B; 4-byte NOP; loop branch bytes included; raw wall times and hardware counts retained.\n"
@@ -104,6 +104,10 @@ static int width_report(FILE *json, ReportContext *report) {
         BenchMeasurement result;
         printf("Fetch width pair: %u instructions\n", work.definition->count); fflush(stdout);
         if (bench_measure_target(width_work, &work, &result, target, warmup)) { arch_counter_close(&counter); return -1; }
+        ArchSampleBatch previous[2];
+        for (unsigned c = 0; c < 2; ++c) arch_batch_capture(&previous[c], &result, work.calls, work.elapsed[c], work.counts[c]);
+        int retried = !arch_pair_stable(&previous[0], &previous[1], strcmp(counter.source, "unavailable"));
+        if (retried && bench_measure_target(width_work, &work, &result, target*4, warmup*4)) { arch_counter_close(&counter); return -1; }
         for (unsigned crossed = 0; crossed < 2; ++crossed) {
             for (unsigned i = 0; i < BENCH_SAMPLES; ++i) if (!work.elapsed[crossed][i]) {
                 fputs("Fetch timing sample is below timer resolution.\n", stderr);
@@ -129,7 +133,9 @@ static int width_report(FILE *json, ReportContext *report) {
                     fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)(field == 0 ? v->cycles : field == 1 ? v->instructions : v->mite));
                 }
             }
-            fputs("]}", json);
+            fputc(']', json);
+            arch_previous_json(json, &previous[crossed], retried, 1, 1);
+            fputc('}', json);
         }
     }
     fputs("]}", json); arch_counter_close(&counter);

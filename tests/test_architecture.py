@@ -47,15 +47,18 @@ def frontend_fixture(footprint_knee=False):
     return data
 
 
-def resource_fixture():
-    from backend_resource_analysis import FAMILIES
-    knees = dict(rob_nop=512, prf_i32=192, prf_i64=128, prf_vec128=256, sched_int=48,
-                 sched_vector=64, load_ready=224, load_wait=64, store_ready=256, store_wait=96)
-    return {"protocol": "dual-ring-resource-v1", "status": "measured", "ring_bytes": 67108864,
+def resource_fixture(protocol="dual-ring-resource-v1"):
+    from backend_resource_analysis import resource_families
+    families = resource_families("x86_64-sse2", protocol)
+    knees = dict(rob_nop=512, rob_mixed=384, prf_i32=192, prf_i64=128, prf_vec128=256, sched_int=48,
+                 sched_vector=64, load_ready=224, load_wait=64, store_ready=256, store_wait=96,
+                 compute_nop=512, compute_load_ready=224, compute_load_wait=64, compute_store_ready=256, compute_store_wait=96)
+    return {"protocol": protocol, "status": "measured", "ring_bytes": 67108864,
         "line_bytes": 64, "scratch_bytes": 32832, "sample_target_ns": 1000000,
+        "compute_divisions_per_depth": 8, "compute_sqrts_per_depth": 8,
         "records": [{"family": f, "depth": d, "count": n, "serial": s, "blocks": 100000,
                      "elapsed_ns": [10000000 if s else 9500000 if n >= knees[f] else 5500000]*10}
-                    for f, counts in FAMILIES.items() for d in (1, 2) for n in counts for s in (0, 1)]}
+                    for f, counts in families.items() for d in (1, 2) for n in counts for s in (0, 1)]}
 
 
 def btb_layout_fixture():
@@ -69,6 +72,44 @@ def btb_layout_fixture():
 
 
 class BackendResourceContracts(unittest.TestCase):
+    def test_dense_memory_grid_and_compute_anchor_controls(self):
+        from backend_resource_analysis import read_resources
+        for protocol in ("dual-ring-resource-v1", "dual-anchor-resource-v2"):
+            raw = resource_fixture(protocol)
+            for row in raw["records"]:
+                if row["family"] == "load_ready" and not row["serial"]:
+                    row["elapsed_ns"] = [9500000 if row["count"] >= 80 else 5500000]*10
+            result = read_resources(raw)
+            if protocol.endswith("v1"):
+                self.assertEqual(result["candidates"]["load_wait"]["status"], "shared_limit")
+            else:
+                self.assertEqual(result["candidates"]["load_wait"]["status"], "candidate")
+                self.assertEqual(result["candidates"]["load_wait"]["lower"], 56)
+                self.assertEqual(result["candidates"]["load_wait"]["upper"], 64)
+                self.assertEqual(result["candidates"]["compute_load_wait"]["status"], "candidate")
+                self.assertEqual({r["anchor"] for r in result["records"]}, {"memory", "compute"})
+                self.assertEqual(result["candidates"]["rob_mixed"]["status"], "shared_limit")
+                raw["records"] = [r for r in raw["records"] if r["family"] != "compute_nop"]
+                with self.assertRaises(ValueError): read_resources(raw)
+
+    def test_retry_history_cannot_hide_drift_or_unmatched_pairs(self):
+        from backend_resource_analysis import read_resources
+        raw = resource_fixture()
+        pair = [r for r in raw["records"] if r["family"] == "prf_i64" and r["count"] == 128 and r["depth"] == 1]
+        for row in pair:
+            previous = {k: copy.deepcopy(row[k]) for k in ("blocks", "elapsed_ns")}
+            previous["elapsed_ns"][0] *= 2
+            row["previous_batches"] = [previous]
+            row["blocks"] *= 4
+            row["elapsed_ns"] = [n*4 for n in row["elapsed_ns"]]
+        self.assertEqual(read_resources(raw)["candidates"]["prf_i64"]["status"], "candidate")
+        for row in pair: row["previous_batches"][0]["elapsed_ns"] = [n*2 for n in row["previous_batches"][0]["elapsed_ns"]]
+        result = read_resources(raw)["candidates"]["prf_i64"]
+        self.assertEqual(result["status"], "unstable")
+        self.assertEqual(result["observed_interval"], [96, 128])
+        pair[0]["previous_batches"] = []
+        with self.assertRaises(ValueError): read_resources(raw)
+
     def test_ready_control_noise_does_not_claim_shared_limit(self):
         from backend_resource_analysis import read_resources
         raw = resource_fixture()
@@ -250,18 +291,26 @@ class ArchitectureContracts(unittest.TestCase):
         self.assertEqual(read_architecture(frontend_fixture(True))["frontend"]["btb_transitions"], [])
 
     def test_frontend_requires_complete_raw_samples_and_hardware_source(self):
-        for mode in ("duplicate", "partial", "footprint", "counter", "zero-cycles", "missing"):
+        for mode in ("duplicate", "partial", "footprint", "counter", "counter-status", "zero-cycles", "missing", "retry-counts"):
             data = frontend_fixture(); frontend = data["frontend"]
             if mode == "duplicate": frontend["records"][-1] = frontend["records"][0]
             if mode == "partial": frontend["records"][0]["cycles"].pop()
             if mode == "footprint": frontend["records"][0]["code_bytes"] += 4
             if mode == "counter": frontend["counter_source"] = "unavailable"
+            if mode == "counter-status": frontend["counter_status"] = "permission_denied"
             if mode == "zero-cycles": frontend["records"][0]["cycles"][0] = 0
             if mode == "missing": data.pop("frontend")
+            if mode == "retry-counts":
+                row = frontend["records"][0]
+                previous = {k: copy.deepcopy(row[k]) for k in ("blocks", "elapsed_ns", "cycles", "instructions")}
+                previous["instructions"][0] = 1
+                row["previous_batches"] = [previous]
             with self.subTest(mode=mode), self.assertRaises(ValueError): read_architecture(data)
         data = frontend_fixture(); data["frontend"]["counter_source"] = "unavailable"
+        data["frontend"].update(counter_status="zero_counts", counter_error=0)
         for row in data["frontend"]["records"]: row["cycles"] = row["instructions"] = [0]*10
         self.assertIsNone(read_architecture(data)["frontend"]["peak_supply_ipc"])
+        self.assertEqual(read_architecture(data)["frontend"]["counter_status"], "zero_counts")
 
     def test_scoring_is_wall_time_and_not_stored_summary_or_clock_inference(self):
         data = fixture()
@@ -357,7 +406,7 @@ class ArchitectureNativeTests(unittest.TestCase):
     def test_resource_pointers_stores_bounds_and_btb_machine_code(self):
         from backend_resource_analysis import resource_families, BTB_COUNTS as LAYOUT_COUNTS
         isa = "aarch64-fp64" if platform.machine().lower() in {"aarch64", "arm64"} else "x86_64-sse2"
-        expected = {"resources": 4*sum(map(len, resource_families(isa).values())), "btb-layout": len(LAYOUT_COUNTS)*5*2}
+        expected = {"resources": 4*sum(map(len, resource_families(isa, "dual-anchor-resource-v2").values())), "btb-layout": len(LAYOUT_COUNTS)*5*2}
         for mode, count in expected.items():
             run = subprocess.run([str(self.binary), mode], capture_output=True, text=True, timeout=15)
             self.assertEqual(run.returncode, 0, (mode, run.stdout, run.stderr))
@@ -366,7 +415,7 @@ class ArchitectureNativeTests(unittest.TestCase):
     def test_competition_all_results_against_independent_integer_rational_reference(self):
         run = subprocess.run([str(self.binary), "competition"], capture_output=True, text=True, timeout=5)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(len(run.stdout.splitlines()), 24)
+        self.assertEqual(len(run.stdout.splitlines()), 38)
         def bits(number): return struct.unpack("=Q", struct.pack("=d", float(number)))[0]
         for line in run.stdout.splitlines():
             family, unroll, *output = line.split()
@@ -376,6 +425,13 @@ class ArchitectureNativeTests(unittest.TestCase):
             expected[32:34] = [bits(Fraction(1, 4)), bits(1+Fraction(1, 2**32))]
             streams = family.split("_")
             steps = 3*int(unroll)//(4*len(streams))
+            if family.endswith("8"):
+                steps = 3*int(unroll)//8
+                for i in range(8):
+                    if family == "iadd8": expected[i] += 3*steps
+                    if family == "imul8": expected[i] = (i+1)*3**steps % 2**64
+                    if family == "fadd8": expected[8+i] = bits(Fraction(i+1)+Fraction(steps, 4))
+                    if family == "fmul8": expected[8+i] = bits(Fraction(i+1)*(1+Fraction(1, 2**32))**steps)
             for i in range(4):
                 if "iadd" in streams: expected[i] += 3*steps
                 if "imul" in streams: expected[4+i] = (5+i)*3**steps % 2**64
@@ -383,10 +439,14 @@ class ArchitectureNativeTests(unittest.TestCase):
                 if "fmul" in streams: expected[12+i] = bits(Fraction(5+i)*(1+Fraction(1, 2**32))**steps)
                 if "load" in streams: expected[4+i] = 17+i
                 if "store" in streams: expected[24+i] = 1+i
+                if "iwrite" in streams: expected[i] = 6
+                if "vwrite" in streams:
+                    expected[8+i] = (bits(Fraction(1, 4))*2) % 2**64 if platform.machine().lower() in {"aarch64", "arm64"} else 0
             for i, (a, b) in enumerate(zip(actual, expected)):
                 # FP multiplication rounds at every step, unlike the exact
                 # rational reference. Bound the accumulated error in ULPs.
-                self.assertLessEqual(abs(a-b), steps if "fmul" in streams and 12 <= i < 16 else 0, (family, unroll, i))
+                rounded = ("fmul" in streams and 12 <= i < 16) or (family == "fmul8" and 8 <= i < 16)
+                self.assertLessEqual(abs(a-b), steps if rounded else 0, (family, unroll, i))
 
     def test_each_register_against_modular_integer_and_exact_rational_references(self):
         run = subprocess.run([str(self.binary)], capture_output=True, text=True, timeout=5)
@@ -430,6 +490,19 @@ class ArchitectureNativeTests(unittest.TestCase):
         if arm: probes += [("prf_fp32", r"\bfadd\s+s2,", 128), ("prf_fp64", r"\bfadd\s+d2,", 128)]
         for family, pattern, count in probes:
             self.assertEqual(len(re.findall(pattern, body(f"res_{family}_1_{count}_0"))), count, family)
+        mixed = body("res_rob_mixed_1_128_0")
+        self.assertEqual(len(re.findall(r"\badd\s+w9," if arm else r"\blea[^\n]*%r9d", mixed)), 64)
+        self.assertEqual(len(re.findall(r"\bfadd\s+d2," if arm else r"\bpshufd\b", mixed)), 64)
+        for serial in (0, 1):
+            for depth in (1, 2):
+                payload = body(f"res_compute_load_wait_{depth}_128_{serial}")
+                self.assertEqual(len(re.findall(r"\budiv\b" if arm else r"\bdiv\b", payload)), 8*depth)
+                self.assertEqual(len(re.findall(r"\bfsqrt\b" if arm else r"\bsqrtsd\b", payload)), 8*depth)
+                self.assertEqual(len(re.findall(r"\bldr\s+x9," if arm else r"\bmov\s+[^\n]*\(%r10\),%r9\b", payload)), 128)
+        for family, pattern in (("iwrite", r"\badd\s+x(?:8|9|10|11),\s*x12," if arm else r"\blea[^\n]*%r(?:8|9|10|11)\b"),
+                                ("vwrite", r"\badd\s+v[0-3]\.2d," if arm else r"\bpshufd\b")):
+            for unroll in (32, 64):
+                self.assertEqual(len(re.findall(pattern, body(f"mix_{family}_{unroll}"))), unroll)
         # Independent machine-code reference: exact taken-target spacing and
         # explicit NOP instruction length, excluding call/prologue/return.
         for name, mnemonic, count, stride in (("fe_btb_128_8", "b" if arm else "jmp", 128, 8),
@@ -477,7 +550,8 @@ class ArchitectureNativeTests(unittest.TestCase):
         self.assertEqual(result.charts[0].kind, "architecture")
         self.assertGreaterEqual(len(result.charts), 4)
         self.assertEqual(len(evidence["width_scan"]["records"]), 122)
-        self.assertEqual(len(evidence["resource_scan"]["records"]), 584 if evidence["isa"] == "aarch64-fp64" else 416)
+        from backend_resource_analysis import resource_families
+        self.assertEqual(len(evidence["resource_scan"]["records"]), 2*sum(map(len, resource_families(evidence["isa"], "dual-anchor-resource-v2").values())))
         self.assertEqual(len(evidence["btb_layout_scan"]["records"]), 160)
         self.assertEqual(len(evidence["frontend"]["records"]), 57 if platform.machine().lower() in {"arm64", "aarch64"} else 81)
         if sys.platform.startswith("linux"):
