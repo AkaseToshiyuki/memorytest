@@ -69,8 +69,8 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual(result.charts[1].unit, "GB/s")
         self.assertFalse(any("L3" in str(table.rows) for table in result.tables))
         svg = plot_svg(result.charts[0])
-        # 1.25 / maximum 6 on a 185px axis => y=186.4583; x=72 at 4 KiB.
-        self.assertIn('cx="72.00" cy="186.46"', svg)
+        # One 24px legend row; 1.25 / 6 on a 185px axis => y=210.4583.
+        self.assertIn('cx="72.00" cy="210.46"', svg)
 
     def test_heatmap_cell_values_round_half_up_and_keep_raw_precision(self):
         import copy
@@ -216,6 +216,42 @@ except ImportError:
 
 @unittest.skipUnless(HAVE_QT, "Qt desktop test dependency")
 class NativePresentationTests(unittest.TestCase):
+    def test_line_legend_geometry_and_offset_styles(self):
+        import xml.etree.ElementTree as ET
+        from PySide6.QtGui import QFont, QFontMetricsF
+        from PySide6.QtSvg import QSvgRenderer
+        from result_model import Chart
+        series = [{"label": f"{stride} B / +{offset} B", "values": [index+1, index+2],
+                   "color_index": index, "dashed": bool(offset)}
+                  for offset in (0, 32) for index, stride in enumerate((4, 8, 16, 32, 64))]
+        chart = Chart("arch_btb_layout", "line", "ns/branch", [16, 4096], series, [16, 4096], "arch_target_count", True)
+        ns = {"s": "http://www.w3.org/2000/svg"}
+        for language in ("zh", "en"):
+            for theme in ("dark", "light"):
+                for width in (360, 720, 1100):
+                    with self.subTest(language=language, theme=theme, width=width):
+                        content = plot_svg(chart, language, theme, width=width)
+                        self.assertTrue(QSvgRenderer(content.encode()).isValid())
+                        root = ET.fromstring(content)
+                        headers = root.findall('s:text[@class="legend-label"]', ns) + root.findall('s:text[@class="chart-unit"]', ns)
+                        bounds = []
+                        for element in headers:
+                            font = QFont("sans-serif"); font.setPixelSize(int(element.get("font-size")))
+                            metrics = QFontMetricsF(font)
+                            rect = metrics.boundingRect(element.text)
+                            rect.translate(float(element.get("x")), float(element.get("y")))
+                            self.assertGreaterEqual(rect.left(), 8)
+                            self.assertLessEqual(rect.right(), width-8)
+                            self.assertTrue(all(not rect.intersects(other) for other in bounds))
+                            bounds.append(rect)
+                        grid_top = min(float(e.get("y1")) for e in root.findall("s:line", ns) if not e.get("class"))
+                        self.assertLess(max(rect.bottom() for rect in bounds), grid_top)
+                        self.assertEqual(len(root.findall('s:line[@class="legend-marker"]', ns)), 10)
+                        curves = root.findall("s:polyline", ns)
+                        self.assertEqual(len(curves), 10)
+                        self.assertEqual(sum(bool(c.get("stroke-dasharray")) for c in curves), 5)
+                        self.assertEqual([c.get("stroke") for c in curves[:5]], [c.get("stroke") for c in curves[5:]])
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

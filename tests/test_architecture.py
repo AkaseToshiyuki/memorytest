@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import struct
 import xml.etree.ElementTree as ET
+from unittest.mock import patch
 from benchmark_registry import ROOT
 from architecture_analysis import PROBES, BTB_COUNTS, CODE_BYTES, read_architecture
 from result_model import build_module
@@ -57,7 +58,51 @@ def resource_fixture():
                     for f, counts in FAMILIES.items() for d in (1, 2) for n in counts for s in (0, 1)]}
 
 
+def btb_layout_fixture():
+    from backend_resource_analysis import BTB_COUNTS
+    return {"protocol": "btb-layout-v1", "sample_target_ns": 1000000, "loop_control_branches": 1,
+        "records": [dict(count=n, stride=stride, offset=offset, actual_offset=offset,
+                         code_bytes=n*stride, blocks=1000000,
+                         elapsed_ns=[n*1000000*(2 if n >= knee else 1)]*10)
+                    for stride, knee in zip((4, 8, 16, 32, 64), (128, 192, 256, 384, 512))
+                    for offset in (0, 32) for n in BTB_COUNTS]}
+
+
 class BackendResourceContracts(unittest.TestCase):
+    def test_ready_control_noise_does_not_claim_shared_limit(self):
+        from backend_resource_analysis import read_resources
+        raw = resource_fixture()
+        for row in raw["records"]:
+            if row["family"] == "rob_nop" and row["depth"] == 1 and row["count"] == 160 and row["serial"]:
+                row["elapsed_ns"][0] *= 2
+        result = read_resources(raw)["candidates"]["prf_i64"]
+        self.assertEqual(result, {"status": "control_unstable", "observed_interval": [96, 128]})
+        for row in raw["records"]:
+            if row["family"] == "rob_nop" and row["count"] == 128 and not row["serial"]:
+                row["elapsed_ns"] = [9500000]*10
+        self.assertEqual(read_resources(raw)["candidates"]["prf_i64"]["status"], "shared_limit")
+
+    def test_btb_plot_combines_offsets_without_losing_measurements(self):
+        from backend_resource_analysis import read_btb_layout
+        raw = btb_layout_fixture()
+        for row in raw["records"]:
+            row["elapsed_ns"] = [row["count"]*1000000*(1+row["stride"]//4+row["offset"]//32)]*10
+        evidence = read_architecture(frontend_fixture())
+        evidence["btb_layout_scan"] = read_btb_layout(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory)
+            (reports / "cpu_architecture_report.md").write_text("# Architecture\n")
+            (reports / "cpu_architecture.json").write_text("{}")
+            with patch("architecture_analysis.read_architecture", return_value=evidence):
+                model = build_module("cpu_architecture", reports)
+        charts = [c for c in model.charts if c.title == "arch_btb_layout"]
+        self.assertEqual(len(charts), 1)
+        self.assertEqual(len(charts[0].series), 10)
+        for index, series in enumerate(charts[0].series):
+            self.assertEqual(series["values"], [1+(4, 8, 16, 32, 64)[index % 5]//4+index//5]*16)
+            self.assertEqual(series["color_index"], index % 5)
+            self.assertEqual(series["dashed"], bool(index//5))
+
     def test_effective_windows_need_depth_and_ready_control_agreement(self):
         from backend_resource_analysis import read_resources, window_candidate, SMALL
         raw = resource_fixture()
@@ -98,13 +143,8 @@ class BackendResourceContracts(unittest.TestCase):
         self.assertEqual(read_resources(raw)["candidates"], {})
 
     def test_btb_offset_votes_and_footprint_ambiguity(self):
-        from backend_resource_analysis import read_btb_layout, BTB_COUNTS
-        raw = {"protocol": "btb-layout-v1", "sample_target_ns": 1000000, "loop_control_branches": 1, "records": []}
-        for stride, knee in zip((4, 8, 16, 32, 64), (128, 192, 256, 384, 512)):
-            for offset in (0, 32):
-                for n in BTB_COUNTS:
-                    raw["records"].append(dict(count=n, stride=stride, offset=offset, actual_offset=offset,
-                        code_bytes=n*stride, blocks=1000000, elapsed_ns=[n*1000000*(2 if n >= knee else 1)]*10))
+        from backend_resource_analysis import read_btb_layout
+        raw = btb_layout_fixture()
         result = read_btb_layout(raw)
         self.assertEqual(len(result["transitions"]), 5)
         self.assertEqual({r["upper"] for r in result["transitions"]}, {128, 192, 256, 384, 512})
@@ -183,6 +223,12 @@ class ArchitectureContracts(unittest.TestCase):
                     "page_offset": 16380 if crossed else 0, "blocks": 1_000_000,
                     "elapsed_ns": [n*100_000]*10, "cycles": [0]*10, "instructions": [0]*10, "mite_uops": [0]*10})
         parsed = read_width_scan(raw, "aarch64-fp64", "macos-qos-user-initiated")
+        self.assertIsNone(parsed["fetch_width"])
+        self.assertEqual((parsed["status"], parsed["stable_points"]), ("no_fit", 122))
+        noisy = copy.deepcopy(raw)
+        for row in noisy["records"][:13]: row["elapsed_ns"][0] *= 2
+        parsed = read_width_scan(noisy, "aarch64-fp64", "macos-qos-user-initiated")
+        self.assertEqual((parsed["status"], parsed["stable_points"]), ("unstable", 109))
         self.assertIsNone(parsed["fetch_width"])
         self.assertEqual(read_width_scan(raw, "aarch64-fp64", "linux-pinned-one-logical-cpu")["status"], "path_unverified")
         for field, value in (("code_bytes", 21), ("page_offset", 1), ("blocks", 500)):

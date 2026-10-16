@@ -6,6 +6,7 @@ the instruction-supply path; x86 requires measured legacy-decoder traffic.
 """
 from math import ceil, sqrt
 from statistics import median
+MIN_STABLE_WIDTH_POINTS = 110
 from sample_statistics import summarize
 
 
@@ -82,9 +83,12 @@ def read_width_scan(data, isa, placement):
     # implementations can have MOP caches too; ISA alone proves no fetch path.
     qualified = (isa == "aarch64-fp64" and placement.startswith("macos")) or all(p["decoder_qualified"] for p in points)
     if not qualified: fit = None
+    stable_points = sum(p["stable"] and (not use_cycles or p["counter_stable"]) for p in points)
     return {"records": points, "fetch_width": fit, "counter_source": source,
         "decode_counter_source": decode, "page_bytes": page, "sample_target_ns": target,
-        "status": "candidate" if fit else "path_unverified" if not qualified else "no_fit",
+        "stable_points": stable_points,
+        "status": "candidate" if fit else "path_unverified" if not qualified else
+                  "unstable" if stable_points < MIN_STABLE_WIDTH_POINTS else "no_fit",
         "stable": all(p["stable"] for p in points)}
 
 
@@ -97,7 +101,7 @@ def fetch_candidate(points, use_cycles=False):
     Reject flat/linear curves, weak page penalties and ambiguous widths.
     """
     good = [p for p in points if p["stable"] and (not use_cycles or p["counter_stable"])]
-    if len(good) < 110: return None
+    if len(good) < MIN_STABLE_WIDTH_POINTS: return None
     field = "cycles_per_iteration" if use_cycles else "ns_per_iteration"
     paired = {(p["count"], p["crossed"]): p[field] for p in good}
     penalties = [paired[n, 1]-paired[n, 0] for n in range(4, 65) if (n, 1) in paired and (n, 0) in paired]

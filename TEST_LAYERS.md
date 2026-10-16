@@ -13,7 +13,7 @@
 | `cpu_float` | 浮点运算 | 同引擎 ID |
 | `cpu_branch` | 分支模式 | 同引擎 ID |
 | `cpu_multi` | ComputeMark | 同引擎 ID |
-| `cpu_architecture` | 架构分析 | 同引擎 ID |
+| `cpu_architecture` | 核心架构分析 | 同引擎 ID |
 
 模块和分类选择取并集。仅构建选中的引擎；缓存延迟与层级检测合选时共享当前扫描。
 

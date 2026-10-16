@@ -16,7 +16,7 @@
 | 缓存 | 带宽、依赖链延迟、层级检测 |
 | 内存 | 读写／复制／Scale／Add／Triad／步长带宽，读写／复制延迟 |
 | 核心性能 | 整数、浮点、分支、核间通信、ComputeMark 单线程／多线程评分 |
-| 架构分析 | 取指与解码扫描、BTB 布局、资源窗口、执行竞争、吞吐下界 |
+| 核心架构分析 | 取指与解码扫描、BTB 布局、资源窗口、执行竞争、吞吐下界 |
 | 小工具 | CPU、GPU、DRAM 参数，磁盘 SMART，压力测试与实时监控 |
 
 测试可单独运行或组合运行。缓存延迟与层级检测同时选中时共用一次扫描。
@@ -73,7 +73,7 @@ python3 run_benchmarks.py -m cpu_multi --cpu-threads 2
 python3 run_benchmarks.py --system-info     # 仅查询系统信息
 ```
 
-CLI 的 `cpu` 分类包含架构分析；桌面端将它作为独立一级入口。
+CLI 的 `cpu` 分类包含核心架构分析；桌面端将它作为独立一级入口。
 `--cpu-threads` 只限制 ComputeMark；压力测试从小工具单独启动。
 
 | 参数 | 用途 |

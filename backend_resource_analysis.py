@@ -101,11 +101,15 @@ def read_resources(data, isa="x86_64-sse2"):
     for family, control in controls.items():
         candidate = candidates[family]
         if candidate["status"] != "candidate": continue
+        references = []
         for depth in (1, 2):
             reference = [p for p in records if p["family"] == control and p["depth"] == depth and p["count"] >= candidate["upper"]][:2]
-            if len(reference) < 2 or not all(p["stable"] and p["ratio"] < .8 for p in reference):
-                candidates[family] = {"status": "shared_limit", "observed_interval": [candidate["lower"], candidate["upper"]]}
-                break
+            references.extend(reference)
+        shared = any(p["stable"] and p["ratio"] >= .8 for p in references)
+        unverified = len(references) != 4 or not all(p["stable"] for p in references)
+        if shared or unverified:
+            candidates[family] = {"status": "shared_limit" if shared else "control_unstable",
+                "observed_interval": [candidate["lower"], candidate["upper"]]}
     return {"status": "measured", "records": records, "candidates": candidates,
             "stable": all(r["stable"] for r in records), "ring_bytes": size}
 

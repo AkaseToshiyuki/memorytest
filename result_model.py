@@ -338,6 +338,7 @@ def build_module(name, reports, record=None):
             scan = evidence.get("width_scan")
             if scan:
                 result.conditions.append((ref("arch_width_status"), ref("arch_" + scan["status"])))
+                result.conditions.append((ref("arch_width_stable_points"), f'{scan["stable_points"]}/{len(scan["records"])}'))
                 points = scan["records"]
                 cycles = all(r["counter_stable"] for r in points)
                 field = "cycles_per_iteration" if cycles else "ns_per_iteration"
@@ -358,11 +359,11 @@ def build_module(name, reports, record=None):
             if layout:
                 points = layout["records"]
                 xs = sorted({r["count"] for r in points})
-                for offset in (0, 32):
-                    series = [{"label": f'{stride} B / +{offset} B', "values": [next(r["ns"] for r in points
+                series = [{"label": f'{stride} B / +{offset} B', "color_index": index, "dashed": bool(offset),
+                    "values": [next(r["ns"] for r in points
                         if r["count"] == count and r["stride"] == stride and r["offset"] == offset) for count in xs]}
-                        for stride in (4, 8, 16, 32, 64)]
-                    result.charts.append(Chart("arch_btb_layout", "line", "ns/branch", xs, series, xs, "arch_target_count", True))
+                    for offset in (0, 32) for index, stride in enumerate((4, 8, 16, 32, 64))]
+                result.charts.append(Chart("arch_btb_layout", "line", "ns/branch", xs, series, xs, "arch_target_count", True))
                 result.tables.append(Table("arch_btb_layout", [column("arch_spacing", "B"), column("arch_window"), column("status")],
                     [[r["stride"], f'{r["lower"]}–{r["upper"]}', ref("arch_"+r["status"])] for r in layout["transitions"]]))
             resources = evidence.get("resource_scan")
@@ -370,7 +371,8 @@ def build_module(name, reports, record=None):
                 result.conditions.append((ref("arch_ring_size"), f'{resources["ring_bytes"]/1024**2:g} MiB'))
                 points = resources["records"]
                 result.tables.append(Table("arch_resource_scan", [column("measurement"), column("arch_window", "instr"), column("status")],
-                    [[ref("arch_res_"+family), f'{value["lower"]}–{value["upper"]}' if value["status"] == "candidate" else "—",
+                    [[ref("arch_res_"+family), f'{value["lower"]}–{value["upper"]}' if value["status"] == "candidate" else
+                      "–".join(map(str, value["observed_interval"])) if value.get("observed_interval") else "—",
                       ref("arch_window_candidate" if value["status"] == "candidate" else "arch_"+value["status"])]
                      for family, value in resources["candidates"].items()]))
                 for family in resources["candidates"]:

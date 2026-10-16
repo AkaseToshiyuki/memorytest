@@ -43,10 +43,16 @@ def architecture_svg(chart, language, color):
         if not resources: return unknown
         value = resources["candidates"].get(family, {"status": resources["status"]})
         if value["status"] == "candidate": return f'{value["lower"]}–{value["upper"]} instr · {tr("arch_candidate", language)}'
+        if value.get("observed_interval"):
+            low, high = value["observed_interval"]
+            return f'{low}–{high} instr · {tr("arch_" + value["status"], language)}'
         return "— · " + tr("arch_" + value["status"], language)
     def width(key):
         value = frontend.get(key) if frontend else None
-        if not value: return unknown
+        if not value:
+            if key == "fetch_width" and data.get("width_scan"):
+                return "— · " + tr("arch_" + data["width_scan"]["status"], language)
+            return unknown
         sign = "≥" if value["status"] == "lower_bound" else "≈"
         return f'{sign}{value["value"]:.2f} {value["unit"]} · {tr("arch_" + value["status"], language)}'
     box(350, 92, 300, 70, tr("arch_instruction_cache", language), [cache("l1i") + " · " + tr("arch_reported", language)], "cache")

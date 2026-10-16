@@ -2,6 +2,7 @@
 import colorsys
 import html
 import math
+import unicodedata
 from i18n import display, tr
 
 THEMES = {
@@ -33,6 +34,26 @@ def curve_color(index, theme="dark"):
     return "#" + "".join(f"{round(channel * 255):02x}" for channel in rgb)
 
 
+def _text_width(value, size):
+    # Conservative font-independent advances; Qt and offline SVG share layout.
+    return size * sum(0 if unicodedata.combining(c) else .4 if c.isspace() else
+                     1.1 if unicodedata.east_asian_width(c) in {"W", "F"} else
+                     1 if c in "MW@%" or not c.isascii() else .7 for c in value)
+
+
+def _wrap_text(value, width, size):
+    lines, line = [], ""
+    for character in value:
+        if line and _text_width(line + character, size) > width:
+            split = line.rfind(" ")
+            if split > 0:
+                lines.append(line[:split]); line = line[split+1:]
+            else:
+                lines.append(line); line = ""
+        line += character
+    return lines + [line.strip()]
+
+
 def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=280):
     get = (lambda key: getattr(chart, key)) if not isinstance(chart, dict) else chart.__getitem__
     kind, labels, series, unit = (get(key) for key in ("kind", "labels", "series", "unit"))
@@ -45,6 +66,19 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
         height = max(height, 38 * len(labels) + 50)
     if kind == "heatmap":
         height = min(760, max(320, len(labels) * 24 + 80))
+    legend, legend_height = [], 0
+    if kind not in {"bar", "heatmap"} and series:
+        available = width - 96
+        names = [display(item["label"], language) for item in series]
+        longest = max(_text_width(name, 11) for name in names) + 32
+        columns = max(1, min(len(series), int(available / longest)))
+        cell_width = available / columns
+        for start in range(0, len(series), columns):
+            entries = [_wrap_text(name, cell_width - 28, 11) for name in names[start:start+columns]]
+            for column, lines in enumerate(entries):
+                legend.append((start + column, 72 + column * cell_width, 38 + legend_height, lines))
+            legend_height += 16 * max(map(len, entries)) + 8
+        height += legend_height
     elements = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{esc(tr(get("title"), language))}">',
                 f'<rect width="{width}" height="{height}" fill="{color("surface")}"/>']
 
@@ -104,7 +138,7 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
             text(left + bar + 8, y + 16, f"{value:.4g}", size=11)
         text(width - 16, height - 8, unit, "end")
     else:
-        left, right, top, bottom = 72, width - 24, 40, height - 55
+        left, right, top, bottom = 72, width - 24, 40 + legend_height, height - 55
         xs = get("x") or list(range(len(labels)))
         valid_x = [x for x in xs if isinstance(x, (int, float)) and math.isfinite(x)]
         log_x = get("log_x")
@@ -121,16 +155,24 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
                 if xs[i] is not None:
                     x = left + (transform(xs[i]) - lo) / (hi - lo or 1) * (right - left)
                     text(x, bottom + 20, labels[i], "middle", 10)
-        text(left, 18, unit)
+        text(left, 18, unit, css_class="chart-unit")
         x_title = get("x_title")
         x_unit = " (KiB)" if log_x and x_title == "workset" else " (B)" if x_title == "arch_code_bytes" else ""
         text((left + right) / 2, height - 7, tr(x_title, language) + x_unit, "middle")
+        for index, x, y, lines in legend:
+            item = series[index]
+            ink = paint(item.get("color_index", index))
+            dash = ' stroke-dasharray="5 3"' if item.get("dashed") else ""
+            elements.append(f'<line class="legend-marker" x1="{x:.2f}" y1="{y-4:.2f}" x2="{x+16:.2f}" y2="{y-4:.2f}" stroke="{ink}" stroke-width="2"{dash}/>')
+            for row, value in enumerate(lines):
+                text(x + 24, y + row * 16, value, size=11, fill=ink, css_class="legend-label")
         for index, item in enumerate(series):
-            text(right - index * 190, 18, item["label"], "end", 11, paint(index))
+            ink = paint(item.get("color_index", index))
+            dash = ' stroke-dasharray="5 3"' if item.get("dashed") else ""
             segment = []
             def flush():
                 if segment:
-                    elements.append(f'<polyline points="{" ".join(segment)}" fill="none" stroke="{paint(index)}" stroke-width="2"/>')
+                    elements.append(f'<polyline points="{" ".join(segment)}" fill="none" stroke="{ink}" stroke-width="2"{dash}/>')
                     segment.clear()
             for xvalue, value in zip(xs, item["values"]):
                 if xvalue is None or value is None or not math.isfinite(value):
@@ -139,6 +181,6 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
                 x = left + (transform(xvalue) - lo) / (hi - lo or 1) * (right - left)
                 y = bottom - value / ymax * (bottom - top)
                 segment.append(f"{x:.2f},{y:.2f}")
-                elements.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.5" fill="{paint(index)}"><title>{esc(item["label"])}: {esc(value)} {esc(unit)}</title></circle>')
+                elements.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.5" fill="{ink}"><title>{esc(item["label"])}: {esc(value)} {esc(unit)}</title></circle>')
             flush()
     return "".join(elements) + "</svg>"
