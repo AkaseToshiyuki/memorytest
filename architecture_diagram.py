@@ -55,6 +55,8 @@ def architecture_svg(chart, language, color):
         if not value:
             if key == "fetch_width" and data.get("width_scan"):
                 return "— · " + tr("arch_" + data["width_scan"]["status"], language)
+            if frontend and frontend.get("counter_source") == "unavailable":
+                return "— · " + tr("arch_counter_"+frontend.get("counter_status", "unavailable"), language)
             return unknown
         sign = "≥" if value["status"] == "lower_bound" else "≈"
         return f'{sign}{value["value"]:.2f} {value["unit"]} · {tr("arch_" + value["status"], language)}'
