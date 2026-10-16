@@ -34,6 +34,11 @@ def architecture_svg(chart, language, color):
         f'{tr("core", language)} {data["cpu_id"]}' if data["cpu_id"] >= 0 else tr("arch_os_scope", language))
     text(30, 69, scope, 14, color("muted"), "start")
     unknown = "— · " + tr("arch_unmeasured", language)
+    def width(key):
+        value = frontend.get(key) if frontend else None
+        if not value: return unknown
+        sign = "≥" if value["status"] == "lower_bound" else "≈"
+        return f'{sign}{value["value"]:.2f} {value["unit"]} · {tr("arch_" + value["status"], language)}'
     box(350, 92, 300, 70, tr("arch_instruction_cache", language), [cache("l1i") + " · " + tr("arch_reported", language)], "cache")
     transitions = frontend["btb_transitions"] if frontend else []
     btb_lines = [tr("arch_btb_candidate", language)] + [f'{r["lower"]}–{r["upper"]}' for r in transitions[:2]] if transitions else [
@@ -41,9 +46,9 @@ def architecture_svg(chart, language, color):
     box(25, 180, 285, 120, tr("arch_btb", language), btb_lines, "frontend")
     arrow(310, 215, 347, 215)
     arrow(500, 162, 500, 180)
-    box(350, 183, 300, 72, tr("arch_fetch", language), [tr("arch_width", language) + " · " + unknown], "frontend", dashed=True)
+    box(350, 183, 300, 72, tr("arch_fetch", language), [width("fetch_width")], "frontend", dashed=not (frontend and frontend["fetch_width"]))
     arrow(500, 255, 500, 280)
-    box(350, 283, 300, 72, tr("arch_decode", language), [tr("arch_width", language) + " · " + unknown], "frontend", dashed=True)
+    box(350, 283, 300, 72, tr("arch_decode", language), [width("decode_width")], "frontend", dashed=not (frontend and frontend["decode_width"]))
     arrow(500, 355, 500, 380)
     box(350, 383, 300, 72, tr("arch_rename", language), [tr("arch_width", language) + " · " + unknown], "frontend", dashed=True)
     for x, title in ((25, "arch_int_registers"), (690, "arch_fp_registers")):
@@ -60,7 +65,10 @@ def architecture_svg(chart, language, color):
     box(350, 625, 300, 66, "L1D", [cache("l1d") + " · " + tr("arch_reported", language)], "cache")
     arrow(500, 598, 500, 622)
     for x in (175, 825): arrow(x, 598, x, 720)
-    box(25, 723, 950, 72, tr("arch_retire", language), [tr("arch_capacity", language) + " · " + unknown], "register", dashed=True)
+    retire = tr("arch_capacity", language) + " · " + unknown
+    if frontend and frontend.get("retirement_width"):
+        retire += "     |     " + tr("arch_retire_rate", language) + " " + width("retirement_width")
+    box(25, 723, 950, 72, tr("arch_retire", language), [retire], "register", dashed=True)
     if not data["stable"]:
         text(30, 825, tr("architecture_unstable", language), 13, color("warning"), "start")
     return "".join(parts) + "</svg>"

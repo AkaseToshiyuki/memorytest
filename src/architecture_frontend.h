@@ -56,8 +56,9 @@ static int frontend_report(FILE *json, ReportContext *report) {
     ArchCounter counter = arch_counter_open();
     uint64_t target = BENCH_TARGET_NS < UINT64_C(10000000) ? BENCH_TARGET_NS : UINT64_C(10000000);
     uint64_t warmup = BENCH_WARMUP_NS < UINT64_C(2000000) ? BENCH_WARMUP_NS : UINT64_C(2000000);
-    fprintf(json, ",\"frontend\":{\"protocol\":\"frontend-static-v1\",\"sample_target_ns\":%llu,"
-        "\"counter_source\":\"%s\",\"records\":[", (unsigned long long)target, counter.source);
+    fprintf(json, ",\"frontend\":{\"protocol\":\"frontend-static-v2\",\"sample_target_ns\":%llu,"
+        "\"counter_source\":\"%s\",\"decode_counter_source\":\"%s\",\"records\":[",
+        (unsigned long long)target, counter.source, counter.decode_source);
     report_section(report, "Front-end Working Sets");
     report_write(report, "- Counter source: %s\n- BTB: 128–32768 taken targets, 8/16/32-byte spacing.\n"
         "- NOP working sets: 128 B–256 KiB. Calls, returns and loop overhead are retained.\n"
@@ -80,6 +81,9 @@ static int frontend_report(FILE *json, ReportContext *report) {
         fputs("],\"instructions\":[", json);
         for (unsigned i = 0; i < BENCH_SAMPLES; ++i)
             fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)work.counts[(work.calls+i) % BENCH_SAMPLES].instructions);
+        fputs("],\"mite_uops\":[", json);
+        for (unsigned i = 0; i < BENCH_SAMPLES; ++i)
+            fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)work.counts[(work.calls+i) % BENCH_SAMPLES].mite);
         fputs("]}", json);
     }
     fputs("]}", json);

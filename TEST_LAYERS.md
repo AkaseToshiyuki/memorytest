@@ -242,6 +242,18 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   counters, and a 4096–6144-target candidate supported by 16/32-byte spacings. It is local
   evidence only (`build/frontend-native/reports/cpu_architecture.json`). Native/browser
   previews verify both themes and native narrow-window reflow; no physical width claim.
+- v3 adds 61 paired page-boundary loops (122 records), runtime layout checks, fixed
+  x86 Jcc length, AB/BA order and qualified decoder events. Independent acceptance
+  enumerates byte addresses into fetch packets, rejects linear curves, checks raw
+  machine bytes/backward branch offsets, and tests invalid layout/sample/path gates.
+  The bounded end-to-end run preserves its raw JSON under `build/architecture-evidence/`
+  for native CI inspection; this is a short functional run, not a hardware specification.
+  Local architecture checks: **12/12, 8.729 s**, `build/width-acceptance-final.log`.
+  A separate default-target Linux run saved **122 paired records**, **2 unstable rows**,
+  **7.915 s** of formal paired samples, with unavailable hardware counters. x86 width
+  inference was rejected as path-unverified; evidence: `build/width-native/reports/cpu_architecture.json`.
+  macOS Arm NOP plateaus remain conditional candidates, not verified physical decode
+  widths. Register/queue/ROB capacity measurement is not implemented in v3.
 - Ordered memory write/copy uses a hand-authored five-node cycle and full payload
   comparison, including deliberate corruption. Latency-only allocates two arrays and
   creates no bandwidth workers. Shared cache tests assert one five-point scan, identical

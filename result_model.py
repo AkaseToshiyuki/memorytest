@@ -289,13 +289,17 @@ def build_module(name, reports, record=None):
             frontend = evidence["frontend"]
             transitions = frontend["btb_transitions"] if frontend else []
             btb_value = ", ".join(f'{r["lower"]}–{r["upper"]}' for r in transitions) or "—"
+            def width_kpi(key, label, unit):
+                value = frontend.get(key) if frontend else None
+                return {"label": ref(label), "value": (("≥" if value["status"] == "lower_bound" else "≈") +
+                    f'{value["value"]:.2f}') if value else "—", "unit": value["unit"] if value else unit, "category": "frontend"}
             result.conditions = [(ref("protocol"), evidence["protocol"]), (ref("samples"), 10),
                 (ref("sample_target"), f'{evidence["sample_target_ns"] / 1e6:g} ms'),
                 (ref("placement"), ref("pinned" if evidence["cpu_id"] >= 0 else "qos" if evidence["placement"].startswith("macos") else "arch_os_scope"))]
             result.kpis = [{"label": ref("arch_instruction_cache"), "value": evidence["reported_cache_bytes"]["l1i"] / 1024 or "—", "unit": "KiB", "category": "cache"},
                 {"label": ref("arch_btb_candidate"), "value": btb_value, "unit": "", "category": "frontend"},
-                {"label": ref("arch_fetch_width"), "value": "—", "unit": "B/cycle", "category": "frontend"},
-                {"label": ref("arch_decode_width"), "value": "—", "unit": "instr/cycle", "category": "frontend"}]
+                width_kpi("fetch_width", "arch_fetch_width", "B/cycle"),
+                width_kpi("decode_width", "arch_decode_width", "instr/cycle")]
             result.charts = [Chart("architecture_diagram", "architecture", "", [], [{"evidence": evidence}])]
             result.tables = [Table("architecture_measurements", [column("measurement"), column("latency", "ns/op"),
                 column("samples"), column("rejected"), column("drift", "%"), column("status")],
@@ -317,6 +321,28 @@ def build_module(name, reports, record=None):
                         [[r[key], r["stride"], r["ns"], r["instructions_per_cycle"], ref("measured" if r["stable"] and (
                             r["instructions_per_cycle"] is None or r["counter_stable"]) else "unstable")]
                          for r in records]))
+                cycle_rows = [r for r in frontend["records"] if r["kind"] == "nop" and r["counter_stable"]]
+                if cycle_rows:
+                    xs = sorted({r["code_bytes"] for r in cycle_rows})
+                    series = [{"label": f'{stride} B', "values": [next((r["instructions_per_cycle"] for r in cycle_rows
+                        if r["stride"] == stride and r["code_bytes"] == size), None) for size in xs]}
+                        for stride in sorted({r["stride"] for r in cycle_rows})]
+                    result.charts.append(Chart("arch_decode_scan", "line", "instr/cycle", xs, series, xs, "arch_code_bytes", True))
+            scan = evidence.get("width_scan")
+            if scan:
+                result.conditions.append((ref("arch_width_status"), ref("arch_" + scan["status"])))
+                points = scan["records"]
+                cycles = all(r["counter_stable"] for r in points)
+                field = "cycles_per_iteration" if cycles else "ns_per_iteration"
+                xs = list(range(4, 65))
+                series = [{"label": ref("arch_crossed" if crossed else "arch_aligned"),
+                    "values": [r[field] for r in sorted((r for r in points if r["crossed"] == crossed), key=lambda r: r["count"])]}
+                    for crossed in (0, 1)]
+                result.charts.append(Chart("arch_fetch_scan", "line", "cycles/loop" if cycles else "ns/loop", xs, series, xs, "arch_loop_instructions"))
+                result.tables.append(Table("arch_fetch_scan", [column("arch_loop_instructions"), column("measurement"),
+                    column("latency", "ns/loop"), column("arch_width", "cycles/loop"), column("status")],
+                    [[r["count"], ref("arch_crossed" if r["crossed"] else "arch_aligned"), r["ns_per_iteration"],
+                      r["cycles_per_iteration"], ref("measured" if r["stable"] else "unstable")] for r in points]))
             return result
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
                              (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),

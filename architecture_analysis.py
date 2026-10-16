@@ -1,10 +1,7 @@
-"""Evidence reader for explicit-instruction architecture characterization.
-
-No conversion from elapsed time to cycles, decoded width, execution ports,
-physical registers, scheduler sizes or reorder-buffer capacity.
-"""
+"""Evidence reader: raw timing/counts, qualified candidates and lower bounds."""
 from sample_statistics import summarize
 from statistics import median
+from frontend_width_analysis import counter_sources, samples, read_width_scan, sustained_widths, stable as stable_samples
 
 PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "imul_ind8": 32,
           "fadd_dep": 32, "fadd_ind8": 32, "fmul_dep": 32, "fmul_ind8": 32,
@@ -13,7 +10,7 @@ PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "im
 
 def read_architecture(data):
     if not isinstance(data, dict) or (data.get("schema_version"), data.get("protocol")) not in {
-            (1, "architecture-probes-v1"), (2, "architecture-probes-v2")}:
+            (1, "architecture-probes-v1"), (2, "architecture-probes-v2"), (3, "architecture-probes-v3")}:
         raise ValueError("unsupported architecture probe protocol")
     if data.get("isa") not in {"x86_64-sse2", "aarch64-fp64"}:
         raise ValueError("unsupported instruction probe ISA")
@@ -54,11 +51,18 @@ def read_architecture(data):
         spread = (max(elapsed) - min(elapsed)) * 100 / stats["raw_median"]
         metrics[name] = {"ns": ns, "gops": 1 / ns, "statistics": stats,
                          "spread_pct": spread, "stable": not stats["unstable"] and spread <= 15}
-    frontend = read_frontend(data.get("frontend"), data["isa"], policy) if data["schema_version"] == 2 else None
+    frontend = read_frontend(data.get("frontend"), data["isa"], policy) if data["schema_version"] >= 2 else None
+    width_scan = None
+    if data["schema_version"] == 3:
+        if data.get("frontend", {}).get("protocol") != "frontend-static-v2": raise ValueError("missing decoder-path evidence")
+        width_scan = read_width_scan(data.get("width_scan"), data["isa"], policy)
+        frontend["fetch_width"] = width_scan["fetch_width"]
+        frontend["decode_width"], frontend["retirement_width"] = sustained_widths(frontend, data["isa"], policy, caches["l1i"])
     return {"metrics": metrics, "reported_cache_bytes": caches, "placement": policy, "cpu_id": cpu,
-            "protocol": data["protocol"], "frontend": frontend,
+            "protocol": data["protocol"], "frontend": frontend, "width_scan": width_scan,
             "isa": data["isa"], "sample_target_ns": target,
-            "stable": all(m["stable"] for m in metrics.values()) and (frontend is None or frontend["stable"])}
+            "stable": all(m["stable"] for m in metrics.values()) and (frontend is None or frontend["stable"]) and
+                      (width_scan is None or width_scan["stable"])}
 
 
 BTB_COUNTS = (128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768)
@@ -88,12 +92,10 @@ def btb_transitions(records):
 
 
 def read_frontend(data, isa, placement):
-    if not isinstance(data, dict) or data.get("protocol") != "frontend-static-v1":
+    if not isinstance(data, dict) or data.get("protocol") not in {"frontend-static-v1", "frontend-static-v2"}:
         raise ValueError("missing front-end evidence")
-    source = data.get("counter_source")
-    expected_source = "linux-perf-thread-user" if placement.startswith("linux") else (
-        "macos-rusage-process-user-and-kernel" if placement.startswith("macos") else "unavailable")
-    if source not in {"unavailable", expected_source}: raise ValueError("invalid cycle source")
+    source, decode_source = counter_sources(data, placement)
+    if decode_source != "unavailable" and not isa.startswith("x86"): raise ValueError("incorrect decoder event ISA")
     target = data.get("sample_target_ns")
     if type(target) is not int or not 1 <= target <= 10_000_000: raise ValueError("invalid front-end target")
     widths = (1, 4, 8) if isa.startswith("x86") else (4,)
@@ -111,14 +113,7 @@ def read_frontend(data, isa, placement):
         if key not in expected or key in seen or row.get("code_bytes") != count * stride:
             raise ValueError("invalid front-end code footprint")
         seen.add(key)
-        elapsed, cycles, instructions = (row.get(k) for k in ("elapsed_ns", "cycles", "instructions"))
-        for values in (elapsed, cycles, instructions):
-            if not isinstance(values, list) or len(values) != 10 or any(type(n) is not int or not 0 <= n < 2**64 for n in values):
-                raise ValueError("invalid front-end samples")
-        if min(elapsed) < max(1, target // 2): raise ValueError("short front-end sample")
-        if any(bool(c) != bool(i) for c, i in zip(cycles, instructions)):
-            raise ValueError("partial hardware counter pair")
-        if source == "unavailable" and any(cycles + instructions): raise ValueError("counter has no source")
+        elapsed, cycles, instructions, mite = samples(row, source, decode_source, max(1, target//2), data["protocol"] == "frontend-static-v2")
         stats = summarize(elapsed)
         stable = not stats["unstable"] and (max(elapsed)-min(elapsed))/stats["raw_median"] <= .15
         cycle_ok = all(cycles) and all(i >= count * blocks for i in instructions)
@@ -130,9 +125,13 @@ def read_frontend(data, isa, placement):
         records.append({"kind": kind, "count": count, "stride": stride, "code_bytes": count*stride,
             "ns": stats["median"] / (count*blocks), "stable": stable,
             "instructions_per_cycle": ipc, "counter_stable": bool(cycle_ok),
+            "supply_floor": min(count*blocks/c for c in cycles) if cycle_ok else None,
+            "decoder_qualified": bool(cycle_ok and min(mite) >= count*blocks*.9 and stable_samples([m/c for m, c in zip(mite, cycles)])),
+            "mite_per_cycle": median(m/c for m, c in zip(mite, cycles)) if cycle_ok and all(mite) else None,
+            "mite_floor": min(m/c for m, c in zip(mite, cycles)) if cycle_ok and all(mite) else None,
             "bytes_per_cycle": ipc * stride if ipc is not None else None})
     supply = [r for r in records if r["kind"] == "nop" and r["stable"] and r["counter_stable"]]
-    return {"records": records, "counter_source": source, "sample_target_ns": target,
+    return {"records": records, "counter_source": source, "decode_counter_source": decode_source, "sample_target_ns": target,
             "btb_transitions": btb_transitions(records), "stable": all(r["stable"] for r in records),
             "peak_supply_ipc": max((r["instructions_per_cycle"] for r in supply), default=None),
-            "fetch_width": None, "decode_width": None}
+            "fetch_width": None, "decode_width": None, "retirement_width": None}

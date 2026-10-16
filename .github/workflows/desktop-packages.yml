@@ -135,6 +135,12 @@ jobs:
           path: build/ui-revision/
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: architecture-evidence-${{ matrix.label }}
+          path: build/architecture-evidence/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: diagnostics-${{ matrix.label }}

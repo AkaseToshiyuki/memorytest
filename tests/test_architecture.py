@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from benchmark_registry import ROOT
 from architecture_analysis import PROBES, BTB_COUNTS, CODE_BYTES, read_architecture
 from result_model import build_module
+from frontend_width_analysis import fetch_candidate, read_width_scan, sustained_widths
 
 
 def fixture():
@@ -45,6 +46,45 @@ def frontend_fixture(footprint_knee=False):
 
 
 class ArchitectureContracts(unittest.TestCase):
+    def test_width_inference_against_independent_packet_enumeration(self):
+        # Independent reference: enumerate the distinct fetch packets touched
+        # by each instruction byte, rather than use the inference equation.
+        for width in (16, 32, 64):
+            points = []
+            for n in range(4, 65):
+                for crossed in (0, 1):
+                    start = 65536-4 if crossed else 65536
+                    packets = len({address//width for address in range(start, start+4*n)})
+                    points.append(dict(count=n, crossed=crossed, code_bytes=4*n, stable=True,
+                        counter_stable=True, ns_per_iteration=0.3*max(packets, n/10)+.05))
+            result = fetch_candidate(points)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["value"], width)
+            # A common linear bottleneck or a cache-only staircase must not
+            # identify a physical width without a distinct page penalty.
+            for point in points: point["ns_per_iteration"] = point["count"]*.1
+            self.assertIsNone(fetch_candidate(points))
+
+    def test_width_layout_samples_and_decoder_path_gates(self):
+        raw = {"protocol": "page-boundary-width-v1", "page_bytes": 16384, "sample_target_ns": 1_000_000,
+               "counter_source": "unavailable", "decode_counter_source": "unavailable", "records": []}
+        for n in range(4, 65):
+            for crossed in (0, 1):
+                raw["records"].append({"count": n, "crossed": crossed, "code_bytes": 4*n,
+                    "page_offset": 16380 if crossed else 0, "blocks": 1_000_000,
+                    "elapsed_ns": [n*100_000]*10, "cycles": [0]*10, "instructions": [0]*10, "mite_uops": [0]*10})
+        parsed = read_width_scan(raw, "aarch64-fp64", "macos-qos-user-initiated")
+        self.assertIsNone(parsed["fetch_width"])
+        for field, value in (("code_bytes", 21), ("page_offset", 1), ("blocks", 500)):
+            bad = copy.deepcopy(raw); bad["records"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                read_width_scan(bad, "aarch64-fp64", "macos-qos-user-initiated")
+        evidence = read_architecture(frontend_fixture())["frontend"]
+        decoded, retired = sustained_widths(evidence, "aarch64-fp64", "macos-qos-user-initiated", 131072)
+        self.assertEqual(decoded["value"], 4)
+        self.assertEqual(retired["value"], 4)
+        self.assertIsNone(sustained_widths(evidence, "x86_64-sse2", "linux-pinned-one-logical-cpu", 32768)[0])
+
     def test_frontend_spacing_separates_target_count_from_code_footprint(self):
         result = read_architecture(frontend_fixture())["frontend"]
         self.assertEqual(result["btb_transitions"], [{"lower": 3072, "upper": 4096, "spacings": [8, 16, 32]}])
@@ -178,8 +218,10 @@ class ArchitectureNativeTests(unittest.TestCase):
     def test_compiled_payload_instruction_counts(self):
         objdump = shutil.which("objdump")
         if not objdump or sys.platform == "darwin": self.skipTest("GNU objdump instruction view unavailable")
+        version = subprocess.run([objdump, "--version"], capture_output=True, text=True, timeout=5)
+        symbol_flag = "--disassemble-symbols=" if "LLVM" in version.stdout else "--disassemble="
         def body(name):
-            run = subprocess.run([objdump, "-d", "--disassemble=" + name, str(self.binary)], capture_output=True, text=True, timeout=15)
+            run = subprocess.run([objdump, "-d", symbol_flag + name, str(self.binary)], capture_output=True, text=True, timeout=15)
             self.assertEqual(run.returncode, 0, run.stderr)
             match = re.search(r"<" + name + r">:\n(.*?)(?=\n\n|\Z)", run.stdout, re.S)
             self.assertIsNotNone(match, name)
@@ -198,17 +240,44 @@ class ArchitectureNativeTests(unittest.TestCase):
             self.assertEqual(len(addresses), count, name)
             self.assertEqual([b-a for a, b in zip(addresses, addresses[1:])], [stride]*(count-1))
 
+    def test_page_boundary_machine_bytes_and_forced_branch_encoding(self):
+        run = subprocess.run([str(self.binary), "layout"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(len(run.stdout.splitlines()), 6)
+        arm = platform.machine().lower() in {"arm64", "aarch64"}
+        alignment = 4096 if os.name == "nt" else 65536
+        for line in run.stdout.splitlines():
+            n, crossed, offset, code = line.split()
+            n, crossed, offset, code = int(n), int(crossed), int(offset), bytes.fromhex(code)
+            self.assertEqual(offset, alignment-4 if crossed else 0)
+            self.assertEqual(len(code), 4*n + (0 if arm else 1))
+            self.assertEqual(code[:4*(n-2)], bytes.fromhex("1f2003d5" if arm else "0f1f4000")*(n-2))
+            if arm:
+                branch = int.from_bytes(code[-4:], "little")
+                self.assertEqual(branch & 0xff00001f, 0x54000001)
+                displacement = (branch >> 5) & 0x7ffff
+                if displacement & 0x40000: displacement -= 0x80000
+                self.assertEqual(displacement*4, -(len(code)-4))
+            else:
+                self.assertEqual(code[-6:-4], bytes.fromhex("0f85"))
+                self.assertEqual(int.from_bytes(code[-4:], "little", signed=True), -len(code))
+
     def test_bounded_native_full_pipeline(self):
         work = self.root / "report"; work.mkdir()
         run = subprocess.run([str(self.binary), "report"], cwd=work, capture_output=True, text=True, timeout=20)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         raw = json.loads((work / "reports/cpu_architecture.json").read_text())
         evidence = read_architecture(raw)
+        output = ROOT / "build/architecture-evidence"
+        output.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(work / "reports/cpu_architecture.json", output / "cpu_architecture.json")
+        shutil.copy2(work / "reports/cpu_architecture_report.md", output / "cpu_architecture_report.md")
         self.assertEqual(set(evidence["metrics"]), set(PROBES))
         result = build_module("cpu_architecture", work / "reports")
         self.assertEqual(result.status, "passed")
         self.assertEqual(result.charts[0].kind, "architecture")
-        self.assertEqual(len(result.charts), 3)
+        self.assertGreaterEqual(len(result.charts), 4)
+        self.assertEqual(len(evidence["width_scan"]["records"]), 122)
         self.assertEqual(len(evidence["frontend"]["records"]), 57 if platform.machine().lower() in {"arm64", "aarch64"} else 81)
         if sys.platform.startswith("linux"):
             cpu = evidence["cpu_id"]

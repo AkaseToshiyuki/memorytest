@@ -75,8 +75,8 @@
     },
     "cpu_architecture": {
       "name": "CPU Architecture Analysis",
-      "description": "BTB and instruction-footprint sweeps, core structure and instruction measurements",
-      "description_zh": "BTB／指令工作集扫描、内核结构与指令实测",
+      "description": "Paired fetch-width scan, qualified decode/retirement throughput and BTB evidence",
+      "description_zh": "取指宽度对照扫描、解码／退休吞吐与 BTB 实测",
       "category": "cpu",
       "section": "CPU Architecture Analysis",
       "source": "src/test_cpu_architecture.c",

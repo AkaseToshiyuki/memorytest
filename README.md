@@ -120,7 +120,7 @@ without hardware workloads. Details: [TEST_LAYERS.md](TEST_LAYERS.md)
 | `test_cpu_float` | Floating-point wall time (add, mul, FMA, SIMD dot product) |
 | `test_cpu_branch` | Branch predictor latency (always-taken, never-taken) |
 | `test_cpu_multi` | Multi-core scaling efficiency across thread counts |
-| `test_cpu_architecture` | BTB/code-footprint sweeps, core structure and instruction/memory evidence; no inferred physical widths or ROB/port counts |
+| `test_cpu_architecture` | Paired page-boundary fetch scan, qualified decoder/retirement throughput, BTB and code-footprint sweeps; raw evidence and explicit inference status |
 
 ## Build
 
@@ -385,7 +385,7 @@ python3 run_benchmarks.py --module cpu_alu  # 等价的直接入口
 | `test_cpu_float` | 浮点墙钟时间（加减乘、FMA、SIMD 点积） |
 | `test_cpu_branch` | 分支预测延迟（always-taken、never-taken） |
 | `test_cpu_multi` | 不同线程数下的多核扩展效率 |
-| `test_cpu_architecture` | BTB／指令工作集扫描、内核结构与指令／内存明细；物理宽度和 ROB／端口数量尚未测定 |
+| `test_cpu_architecture` | 页边界取指对照、解码／退休吞吐、BTB／指令工作集扫描；保留原始数据及候选／下界状态 |
 
 ## 构建
 
@@ -693,7 +693,7 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   有效载荷指令数除以实际周期得到实测指令供给，保留调用、返回、循环及读取计数器的开销。
   此比值同时受取指、解码、微操作缓存、重命名及退休约束，不能独立确定取指／解码设计宽度。
 - 架构图分别显示 L1I、BTB、取指、解码、重命名、寄存器、调度、访存和退休。
-  ADD／MUL／内存探针移至明细。尚未独立测定的取指／解码宽度和 ROB、调度器、物理寄存器、端口容量保持空值。
+  ADD／MUL／内存探针移至明细。v3 宽度候选／吞吐下界见下节；ROB、调度器、物理寄存器、端口容量仍未测定。
   系统缓存信息单独标注：Linux 读取绑定 CPU 的 sysfs，Mac 为全局 sysctl 摘要，Windows 为各级最大实例；
   共享缓存不冒充每核容量，缺失值不使用猜测兜底。Linux 固定一个可用逻辑 CPU，Mac 仅验证 QoS，Windows 由系统调度。
 - 内存延迟扩展为依赖读取、64 B 有序写、64 B 有序复制，各 20 个正式样本。
@@ -717,6 +717,41 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 [hydroo 的 macOS 核间测量](https://github.com/hydroo/macos-core-to-core-latency)、
 [XNU 编号布局与 ABI 限制](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/os/tsd.h)。
 本项目独立实现并验证其工作计数；不宣称等同这些项目的成绩或完成 Apple Silicon 微架构逆向工程。
+
+#### 页边界取指与持续解码扫描（architecture-probes-v3）
+
+- **实际工作负载**：4–64 条指令的 61 组成对循环。对照从页首开始，跨页组将第一条 4 B NOP
+  放在页末，余下指令紧随下一页；两组包含相同数量的 NOP、递减和条件分支。每次调用在汇编内
+  重复循环，绕过仅用于对齐的填充区。x86 固定六字节条件跳转，避免短／长跳转切换制造假转折。
+  程序核验每组的实际页内偏移和机器码长度；循环字节数包含递减和分支，x86 为 `4N+1`，Arm 为 `4N`。
+  每组 10 个正式样本、AB/BA 交替执行、等量工作；两条循环合计目标 10 ms，预热 2 ms。
+  使用静态可执行代码，不申请 JIT 权限，不修改系统 PMU 配置。
+- **取指候选**：成对拟合 `max(取指包数, N/D)`。对齐组包数为 `ceil(bytes/W)`，跨页组为
+  `1+ceil((bytes-4)/W)`；共享时间尺度及有限固定成本。扫描 `W=16/32/64/128 B`、`D=2..20`，
+  要求至少 110/122 个稳定测点、可观察页边界惩罚、实际阶梯、归一化拟合误差 ≤6%，且优于其他宽度。
+  墙钟只能通过曲线形状提出 **≈ 候选**，不将 ns 或标称 GHz 换算为核心周期。
+  该模型假定每周期一个取指包，可能受分支处理、预取、指令缓存和跨测点频率变化影响；无清晰阶梯则留空。
+- **解码路径核验**：Linux Intel family 6 的 4E/5E/8E/9E 型号，且 CPUID 未声明虚拟化时，尝试
+  `IDQ.MITE_UOPS`（event 79H / umask 04H）；与实际周期、退休指令同组读取，拒绝多路复用。
+  事件依据 Intel 的 SKL/KBL 定义，其他 CPU 不猜测事件编码。x86 取指候选要求解码器覆盖率 ≥90%，
+  以阻止 DSB／循环缓冲命中曲线直接成为取指宽度；计数器不支持、权限不足或旁路占优时保留曲线并留空。
+- **持续解码**：至少三个相邻倍增 NOP 工作集（起点 ≥4 KiB，最大 ≤系统报告 L1I 的一半）形成
+  吞吐差 ≤12% 的平台，各点同时通过时间／周期稳定性检查。经过 MITE 核验的平台给出实测
+  **µop/cycle 下界**；这与每周期解码多少条多微操作指令不同。macOS AArch64 的 NOP 平台给出
+  **instr/cycle 条件候选**，依赖 NOP 经解码路径供给的假设，尚未通过专用解码事件排除缓存旁路；
+  不标为物理解码器数量或无条件下界。JSON 保存原始计数及数据源，报告保留候选依据，界面用 `≈`／`≥` 区分。
+- **退休吞吐**：有效载荷指令数／实际周期的保守样本下界；包含调用、循环和采集开销。该值属于
+  退休指令吞吐，不等于 ROB 条目、退休组数或微操作退休宽度。所有下界取稳定测点的最慢样本，
+  再选较高的已达值；不把统计下界当作处理器设计规格。
+- **范围限制**：Mac 的进程级计数包含内核执行，QoS 不保证 P/E 类型；平台混合、虚拟化、
+  调度及功耗状态仍可能影响结果。Windows 当前仅有时间曲线。ROB／调度器／寄存器容量需要独立的
+  长延迟阻塞及填充扫描；当前版本未以指令吞吐推算这些容量。
+
+独立方法参考：[JieGec 的 Apple M4 取指／解码实验](https://jia.je/hardware/2025/05/21/apple-m4/)、
+[页边界取指生成器](https://github.com/jiegec/cpu-micro-benchmarks/blob/master/src/if_width_gen.cpp)、
+[Intel SKL 事件定义](https://github.com/intel/perfmon/blob/main/SKL/events/skylake_core.json)、
+[Intel CPU 型号与事件文件映射](https://github.com/intel/perfmon/blob/main/mapfile.csv)、
+[Henry Wong 的乱序窗口／寄存器测量限制](https://blog.stuffedcow.net/2013/05/measuring-rob-capacity/)。
 
 桌面结果与离线报告共用分区配色：缓存为红棕色、寄存器／互连为青色、计算为紫色、访存为橄榄色；
 颜色表示模块类别，完成／错误状态继续使用独立标签。界面采用细边框、低饱和填充、突出数值的指标卡片、
