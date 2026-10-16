@@ -536,13 +536,23 @@ class ArchitectureNativeTests(unittest.TestCase):
 
     def test_bounded_native_full_pipeline(self):
         work = self.root / "report"; work.mkdir()
-        run = subprocess.run([str(self.binary), "report"], cwd=work, capture_output=True, text=True, timeout=90)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        raw = json.loads((work / "reports/cpu_architecture.json").read_text())
         output = ROOT / "build/architecture-evidence"
         output.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(work / "reports/cpu_architecture.json", output / "cpu_architecture.json")
-        shutil.copy2(work / "reports/cpu_architecture_report.md", output / "cpu_architecture_report.md")
+        try:
+            # v5: up to 1046 pairs plus one 4x-duration retry per noisy pair.
+            run = subprocess.run([str(self.binary), "report"], cwd=work, capture_output=True, text=True, timeout=180)
+            (output / "native-pipeline.log").write_text(run.stdout + run.stderr)
+        except subprocess.TimeoutExpired as exc:
+            captured = exc.stdout or b""
+            text = captured.decode(errors="replace") if isinstance(captured, bytes) else captured
+            (output / "native-pipeline.log").write_text(text)
+            self.fail("Architecture pipeline exceeded 180 s; last progress: " + "\n".join(text.splitlines()[-5:]))
+        finally:
+            for name in ("cpu_architecture.json", "cpu_architecture_report.md"):
+                source = work / "reports" / name
+                if source.exists(): shutil.copy2(source, output / name)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        raw = json.loads((work / "reports/cpu_architecture.json").read_text())
         evidence = read_architecture(raw)
         self.assertEqual(set(evidence["metrics"]), set(PROBES))
         result = build_module("cpu_architecture", work / "reports")
