@@ -48,3 +48,12 @@ __pycache__/
 # Layer 3 regression history (regenerated on every run)
 history.jsonl
 history.jsonl.bak
+
+# Local development notes and drafts
+/HANDOFF*
+/handoff*
+/TRANSCRIPT*
+/transcript*
+/.codex/
+/.local/
+/packaging/icon-concepts/

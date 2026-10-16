@@ -291,18 +291,17 @@ class NativePresentationTests(unittest.TestCase):
         finally:
             page.active = False
 
-    def test_selected_pulse_icon_and_native_containers(self):
+    def test_application_icon_and_native_containers(self):
         from PySide6.QtGui import QImageReader, QIcon
         from benchmark_registry import ROOT
         import importlib.util
         spec = importlib.util.spec_from_file_location("build_icons", ROOT / "packaging/build_icons.py")
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
-        self.assertEqual((ROOT / "packaging/memorytest.svg").read_bytes(),
-                         (ROOT / "packaging/icon-concepts/pulse.svg").read_bytes())
         self.assertFalse(self.window.windowIcon().isNull())
         with tempfile.TemporaryDirectory() as directory:
             root = builder.build_icons(directory)
+            self.assertEqual((root / "memorytest.svg").read_bytes(), builder.SOURCE.read_bytes())
             for name in ["memorytest.ico", "memorytest.icns"]:
                 reader = QImageReader(str(root / name))
                 try:

@@ -3,7 +3,7 @@ name: Native desktop installers (unsigned preview)
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/release-v0.1.0', 'codex/update-v0.1.1']
+    branches: ['main']
 
 permissions:
   contents: read
