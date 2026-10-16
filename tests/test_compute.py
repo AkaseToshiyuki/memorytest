@@ -37,6 +37,29 @@ def fixture(threads=2):
 
 
 class ScoreContractTests(unittest.TestCase):
+    def test_repeat10_requires_ten_samples_and_preserves_stability_checks(self):
+        for durations in ([198, 199, 200, 201, 202] * 2,
+                          [1000, 199, 200, 201, 202, 198, 199, 200, 201, 202],
+                          [198, 199, 200, 201, 202, 298, 299, 300, 301, 302]):
+            data = fixture()
+            data.update(sampling_protocol="repeat10-outer-iqr3-v1", sample_count=10)
+            for record in data["records"]:
+                record["samples"] = [dict(sample) for sample in record["samples"] * 2]
+                for sample, elapsed in zip(record["samples"], durations):
+                    sample["elapsed_ns"] = elapsed * 1_000_000
+                record["statistics"] = {"median": 1, "unstable": False, "excluded_indices": list(range(10))}
+            score = compute_mark_score(data)
+            self.assertEqual(score.sample_count, 10)
+            self.assertEqual(score.integer_gops, reference_rates(data)["integer", 2])
+            self.assertEqual(score.stable, max(durations) < 210)
+            for bad_count in (5, 20, True, 10.0):
+                bad = copy.deepcopy(data); bad["sample_count"] = bad_count
+                with self.assertRaises(ValueError):
+                    compute_mark_score(bad)
+            del data["sample_count"]
+            with self.assertRaises(ValueError):
+                compute_mark_score(data)
+
     def test_all_gradient_samples_and_non_linear_measured_curve(self):
         from result_model import build_module
         data = fixture(14)

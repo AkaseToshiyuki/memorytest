@@ -3,7 +3,7 @@
   "_schema_version": 1,
   "categories": {
     "memory": ["cache_hierarchy", "memory_bandwidth", "inter_core"],
-    "cpu": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi"]
+    "cpu": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_architecture", "cpu_multi"]
   },
   "tests": {
     "cache_hierarchy": {
@@ -72,6 +72,18 @@
       "deps": ["src/common.c"],
       "bin": "test_cpu_branch",
       "report": "cpu_branch_report.md"
+    },
+    "cpu_architecture": {
+      "name": "CPU Architecture Analysis",
+      "description": "Explicit instruction dependency/parallelism probes and an evidence-labelled core diagram",
+      "description_zh": "实测指令依赖延迟、并行执行特征与内核架构分析图",
+      "category": "cpu",
+      "section": "CPU Architecture Analysis",
+      "source": "src/test_cpu_architecture.c",
+      "deps": ["src/common.c"],
+      "bin": "test_cpu_architecture",
+      "report": "cpu_architecture_report.md",
+      "linker_flags": ["-lm"]
     },
     "cpu_multi": {
       "name": "CPU Multi-Core Test",

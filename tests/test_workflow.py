@@ -18,7 +18,7 @@ HEADINGS = {
     "cache_hierarchy": "Cache Hierarchy", "memory_bandwidth": "Memory Bandwidth",
     "inter_core": "Inter-Core Latency", "cpu_alu": "CPU ALU (Integer)",
     "cpu_float": "CPU Floating Point &amp; SIMD", "cpu_branch": "CPU Branch",
-    "cpu_multi": "Multi-Core Scaling",
+    "cpu_multi": "Multi-Core Scaling", "cpu_architecture": "Architecture analysis",
 }
 
 
@@ -81,12 +81,21 @@ class WorkflowTests(unittest.TestCase):
         path, manifest = self.latest()
         self.assertEqual(manifest["selected_modules"], list(TESTS))
         self.assertTrue(manifest["success"])
-        self.assertEqual(len(list(path.glob("*/executed"))), 7)
-        self.assertEqual(len(list((path / "reports").glob("*.md"))), 7)
+        self.assertEqual(len(list(path.glob("*/executed"))), len(TESTS))
+        self.assertEqual(len(list((path / "reports").glob("*.md"))), len(TESTS))
         report = (self.output / "benchmark_report.html").read_text()
         self.assert_scope(report, TESTS)
         self.assertIn("CAS latency", report)
         self.assertIn("20", report)
+
+    def test_new_architecture_requires_raw_evidence_before_publishing(self):
+        for mode in ("missing_evidence", "bad_evidence"):
+            with self.subTest(mode=mode):
+                result = self.run_cli("-m", "cpu_architecture", modes={"cpu_architecture": mode})
+                self.assertNotEqual(result.returncode, 0)
+                path, manifest = self.latest()
+                self.assertEqual(manifest["modules"][0]["status"], "invalid_report")
+                self.assertEqual(list((path / "reports").iterdir()), [])
 
     def test_split_selection_passes_engine_mode_and_preserves_raw_samples(self):
         from benchmark_registry import SUBTESTS
@@ -119,12 +128,37 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual("ComputeMark unavailable" in report, name == "cpu_multi")
                 self.assertNotIn("<h2>Memorytest ComputeMark", report)
 
+    def test_cache_pair_is_one_execution_with_two_results_and_one_duration(self):
+        result = self.run_cli("-m", "cache_latency_test", "-m", "cache_detection", modes={"cache_latency_test": "audit"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path, manifest = self.latest()
+        self.assertEqual(len(list(path.glob("*/executed"))), 1)
+        self.assertEqual([r["status"] for r in manifest["modules"]], ["passed", "passed"])
+        first, second = manifest["modules"]
+        self.assertEqual(first["command"][-2:], ["--mode", "latency-detection"])
+        self.assertEqual(first["command"], second["command"])
+        self.assertIsNone(second["duration_seconds"])
+        self.assertEqual(second["shared_duration_seconds"], first["duration_seconds"])
+        self.assertEqual((path / "reports/cache_latency_test_samples.json").read_bytes(),
+                         (path / "reports/cache_detection_samples.json").read_bytes())
+
+    def test_shared_cache_failures_apply_to_both_views_without_publishing_partial_data(self):
+        for mode, expected in (("fail", "failed"), ("missing_peer", "invalid_report"),
+                               ("unsupported", "unsupported"), ("timeout", "timeout")):
+            with self.subTest(mode=mode):
+                result = self.run_cli("-m", "cache_latency_test", "-m", "cache_detection", "--timeout", "0.4",
+                                      modes={"cache_latency_test": mode})
+                self.assertNotEqual(result.returncode, 0)
+                path, manifest = self.latest()
+                self.assertEqual([r["status"] for r in manifest["modules"]], [expected, expected])
+                self.assertFalse(list((path / "reports").iterdir()))
+
     def test_category_and_repeated_modules_are_deduplicated(self):
         result = self.run_cli("--category", "cpu", "-m", "cpu_alu", "-m", "cpu_alu")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         path, manifest = self.latest()
         self.assertEqual(manifest["selected_modules"], CATEGORIES["cpu"])
-        self.assertEqual(len(list(path.glob("*/executed"))), 4)
+        self.assertEqual(len(list(path.glob("*/executed"))), len(CATEGORIES["cpu"]))
         self.assert_scope((self.output / "selected_report.html").read_text(), CATEGORIES["cpu"])
 
     def test_nonzero_exit_keeps_reporting_and_excludes_partial_data(self):

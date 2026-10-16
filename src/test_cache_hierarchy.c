@@ -10,7 +10,7 @@
 static size_t cache_max_bytes;
 static int cache_thread_limit; /* compatibility with bounded regression callers */
 static int cache_quick;
-/* 0 retains the legacy combined CLI; desktop tasks select exactly one mode. */
+/* 0: legacy combined; 4: one latency scan, two independently named reports. */
 static int cache_mode;
 enum { MAX_CACHE_TEST_SIZES = 64 };
 typedef struct {
@@ -81,7 +81,6 @@ int run_cache_hierarchy_test(void) {
     if (!count) return 1;
     int do_bandwidth = cache_mode == 0 || cache_mode == 1;
     int do_latency = cache_mode != 1;
-    int do_detection = cache_mode == 0 || cache_mode == 3;
     for (int i = 0; i < count; ++i) {
         size_t bytes = results[i].size;
         double *a = do_bandwidth ? malloc(bytes) : NULL, *c = malloc(bytes);
@@ -111,83 +110,90 @@ int run_cache_hierarchy_test(void) {
         free(a); free(c);
     }
     const char *names[] = {"cache_hierarchy", "cache_bandwidth_test", "cache_latency_test", "cache_detection"};
-    ReportContext *report = report_init(names[cache_mode], REPORT_FORMAT_MARKDOWN);
-    if (!report) return 1;
-    report_write_system_info(report);
-    report_section(report, "Cache Test Conditions");
-    bench_report_conditions(report);
-    report_write(report, "- Thread Count: 1\n- Node spacing: 64 B\n- Page size: %ld B\n\n", sysconf(_SC_PAGESIZE));
-    if (do_bandwidth) {
-        report_section(report, "Cache Bandwidth Test");
-        report_write(report, "| Size | Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%%) |\n");
-        report_write(report, "|------|-----------|------------------|----------|-------|-----------|\n");
-        for (int i = 0; i < count; ++i) {
-            for (unsigned operation = STREAM_READ; operation <= STREAM_COPY; ++operation) {
-                BenchMeasurement *sample = &results[i].bandwidth[operation];
-                double payload = (double)results[i].size * sample->repetitions;
-                report_write(report, "| %.6f KiB | %s | %.6f | %.9f | %.0f | %.3f |\n",
-                             (double)results[i].size / KB, stream_names[operation],
-                             payload * 1000 / sample->elapsed_ns, (double)sample->elapsed_ns / 1e6,
-                             payload, bench_spread(sample));
+    for (int view = 0; view < (cache_mode == 4 ? 2 : 1); ++view) {
+        int report_mode = cache_mode == 4 ? 2 + view : cache_mode;
+        int do_detection = report_mode == 0 || report_mode == 3;
+        ReportContext *report = report_init(names[report_mode], REPORT_FORMAT_MARKDOWN);
+        if (!report) return 1;
+        report_write_system_info(report);
+        report_section(report, "Cache Test Conditions");
+        bench_report_conditions(report);
+        report_write(report, "- Thread Count: 1\n- Node spacing: 64 B\n- Page size: %ld B\n\n", sysconf(_SC_PAGESIZE));
+        if (cache_mode == 4) report_write(report, "- Sampling source: shared-cache-latency-scan-v1\n"
+            "- Cache latency and hierarchy detection share the SAME ordered raw samples in this invocation.\n\n");
+        if (do_bandwidth) {
+            report_section(report, "Cache Bandwidth Test");
+            report_write(report, "| Size | Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%%) |\n");
+            report_write(report, "|------|-----------|------------------|----------|-------|-----------|\n");
+            for (int i = 0; i < count; ++i) {
+                for (unsigned operation = STREAM_READ; operation <= STREAM_COPY; ++operation) {
+                    BenchMeasurement *sample = &results[i].bandwidth[operation];
+                    double payload = (double)results[i].size * sample->repetitions;
+                    report_write(report, "| %.6f KiB | %s | %.6f | %.9f | %.0f | %.3f |\n",
+                                 (double)results[i].size / KB, stream_names[operation],
+                                 payload * 1000 / sample->elapsed_ns, (double)sample->elapsed_ns / 1e6,
+                                 payload, bench_spread(sample));
+                }
             }
         }
-    }
-    if (do_latency) {
-        report_section(report, "Cache Latency Test");
-        report_write(report, "| Size | RdLat(ns) | Time(ms) | Operations | Spread(%%) |\n");
-        report_write(report, "|------|-----------|----------|------------|-----------|\n");
-        for (int i = 0; i < count; ++i) {
-            BenchMeasurement *sample = &results[i].latency;
-            report_write(report, "| %.6f KiB | %.6f | %.9f | %.0f | %.3f |\n", (double)results[i].size / KB,
-                         results[i].ns, (double)sample->elapsed_ns / 1e6,
-                         (double)sample->repetitions * CHAIN_STEPS, bench_spread(sample));
-        }
-    }
-    if (do_detection) {
-        report_section(report, "Cache Hierarchy Detection");
-        report_write(report, "| Transition | Lower(KiB) | Upper(KiB) | Before(ns) | After(ns) | Ratio |\n");
-        report_write(report, "|------------|------------|------------|------------|-----------|-------|\n");
-        unsigned hits = 0;
-        for (int i = 1; i + 1 < count; ++i) {
-            if (!cache_transition(results, count, i)) continue;
-            report_write(report, "| %u | %.6f | %.6f | %.6f | %.6f | %.3f |\n", ++hits,
-                         (double)results[i - 1].size / KB, (double)results[i].size / KB,
-                         results[i - 1].ns, results[i].ns, results[i].ns / results[i - 1].ns);
-            ++i; /* do not count adjacent parts of the same rise twice */
-        }
-        report_write(report, "\n- Detected transitions: %u\n\n", hits);
-        report_section(report, "Reported Cache Hierarchy");
-        report_write(report, "| Level | Reported(KiB) |\n|-------|---------------|\n");
-        size_t sizes[] = {global_cache_config.l1d_size, global_cache_config.l2_size, global_cache_config.l3_size};
-        const char *levels[] = {"L1D", "L2", "L3"};
-        for (unsigned i = 0; i < 3; ++i)
-            if (sizes[i]) report_write(report, "| %s | %.6f |\n", levels[i], (double)sizes[i] / KB);
-    }
-    report_section(report, "Notes");
-    report_write(report, "Single-thread, ordinary OS pages; OS-selected CPU placement. No privileged flush or guessed cache level.\n"
-                 "Bandwidth is useful decimal MB/s. Copy uses two half-sized arrays for the listed total working set.\n"
-                 "Latency is a warmed dependent permutation cycle with one node per 64 bytes across the full working set.\n"
-                 "Transition intervals require sustained changes and non-overlapping raw interquartile bands, without flagged drift.\n"
-                 "These distribution bands are not confidence intervals or reported capacities.\n"
-                 "TLB, page, migration and frequency effects can also produce transitions; intervals are not exact capacities.\n"
-                 "Reported capacities describe the OS view and may be shared by multiple cores.\n");
-    FILE *audit = bench_audit_begin(report);
-    if (!audit) { report_free(report); return 1; }
-    unsigned audit_index = 0;
-    for (int i = 0; i < count; ++i) {
-        char name[96];
-        for (unsigned operation = STREAM_READ; do_bandwidth && operation <= STREAM_COPY; ++operation) {
-            snprintf(name, sizeof(name), "%zuB %s", results[i].size, stream_names[operation]);
-            bench_audit_row(report, audit, name, &results[i].bandwidth[operation], audit_index++);
-        }
         if (do_latency) {
-            snprintf(name, sizeof(name), "%zuB dependent load", results[i].size);
-            bench_audit_row(report, audit, name, &results[i].latency, audit_index++);
+            report_section(report, "Cache Latency Test");
+            report_write(report, "| Size | RdLat(ns) | Time(ms) | Operations | Spread(%%) |\n");
+            report_write(report, "|------|-----------|----------|------------|-----------|\n");
+            for (int i = 0; i < count; ++i) {
+                BenchMeasurement *sample = &results[i].latency;
+                report_write(report, "| %.6f KiB | %.6f | %.9f | %.0f | %.3f |\n", (double)results[i].size / KB,
+                             results[i].ns, (double)sample->elapsed_ns / 1e6,
+                             (double)sample->repetitions * CHAIN_STEPS, bench_spread(sample));
+            }
         }
+        if (do_detection) {
+            report_section(report, "Cache Hierarchy Detection");
+            report_write(report, "| Transition | Lower(KiB) | Upper(KiB) | Before(ns) | After(ns) | Ratio |\n");
+            report_write(report, "|------------|------------|------------|------------|-----------|-------|\n");
+            unsigned hits = 0;
+            for (int i = 1; i + 1 < count; ++i) {
+                if (!cache_transition(results, count, i)) continue;
+                report_write(report, "| %u | %.6f | %.6f | %.6f | %.6f | %.3f |\n", ++hits,
+                             (double)results[i - 1].size / KB, (double)results[i].size / KB,
+                             results[i - 1].ns, results[i].ns, results[i].ns / results[i - 1].ns);
+                ++i; /* do not count adjacent parts of the same rise twice */
+            }
+            report_write(report, "\n- Detected transitions: %u\n\n", hits);
+            report_section(report, "Reported Cache Hierarchy");
+            report_write(report, "| Level | Reported(KiB) |\n|-------|---------------|\n");
+            size_t sizes[] = {global_cache_config.l1d_size, global_cache_config.l2_size, global_cache_config.l3_size};
+            const char *levels[] = {"L1D", "L2", "L3"};
+            for (unsigned i = 0; i < 3; ++i)
+                if (sizes[i]) report_write(report, "| %s | %.6f |\n", levels[i], (double)sizes[i] / KB);
+        }
+        report_section(report, "Notes");
+        report_write(report, "Single-thread, ordinary OS pages; OS-selected CPU placement. No privileged flush or guessed cache level.\n"
+                     "Bandwidth is useful decimal MB/s. Copy uses two half-sized arrays for the listed total working set.\n"
+                     "Latency is a warmed dependent permutation cycle with one node per 64 bytes across the full working set.\n"
+                     "Transition intervals require sustained changes and non-overlapping raw interquartile bands, without flagged drift.\n"
+                     "These distribution bands are not confidence intervals or reported capacities.\n"
+                     "TLB, page, migration and frequency effects can also produce transitions; intervals are not exact capacities.\n"
+                     "Reported capacities describe the OS view and may be shared by multiple cores.\n");
+        FILE *audit = bench_audit_begin(report);
+        if (!audit) { report_free(report); return 1; }
+        unsigned audit_index = 0;
+        for (int i = 0; i < count; ++i) {
+            char name[96];
+            for (unsigned operation = STREAM_READ; do_bandwidth && operation <= STREAM_COPY; ++operation) {
+                snprintf(name, sizeof(name), "%zuB %s", results[i].size, stream_names[operation]);
+                bench_audit_row(report, audit, name, &results[i].bandwidth[operation], audit_index++);
+            }
+            if (do_latency) {
+                snprintf(name, sizeof(name), "%zuB dependent load", results[i].size);
+                bench_audit_row(report, audit, name, &results[i].latency, audit_index++);
+            }
+        }
+        if (bench_audit_finish(audit)) { report_free(report); return 1; }
+        report_finalize_json(report);
+        if (report_finish(report)) return 1;
     }
-    if (bench_audit_finish(audit)) { report_free(report); return 1; }
-    report_finalize_json(report);
-    return report_finish(report) ? 1 : 0;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -196,13 +202,14 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
             const char *mode = argv[++i];
             cache_mode = !strcmp(mode, "bandwidth") ? 1 : !strcmp(mode, "latency") ? 2 :
-                         !strcmp(mode, "detection") ? 3 : !strcmp(mode, "all") ? 0 : -1;
+                         !strcmp(mode, "detection") ? 3 : !strcmp(mode, "latency-detection") ? 4 :
+                         !strcmp(mode, "all") ? 0 : -1;
             if (cache_mode < 0) return 2;
         } else if ((!strcmp(argv[i], "--max-size") || !strcmp(argv[i], "-s")) && i + 1 < argc) {
             cache_max_bytes = parse_size(argv[++i]);
             if (cache_max_bytes < 8 * KB) return 2;
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            printf("Usage: %s [--max-size SIZE] [--mode all|bandwidth|latency|detection]\n", argv[0]); return 0;
+            printf("Usage: %s [--max-size SIZE] [--mode all|bandwidth|latency|detection|latency-detection]\n", argv[0]); return 0;
         } else return 2;
     }
     print_system_info();

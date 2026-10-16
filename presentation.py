@@ -22,6 +22,9 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
     get = (lambda key: getattr(chart, key)) if not isinstance(chart, dict) else chart.__getitem__
     kind, labels, series, unit = (get(key) for key in ("kind", "labels", "series", "unit"))
     color = lambda key: f"var(--{key})" if css else THEMES[theme][key]
+    if kind == "architecture":
+        from architecture_diagram import architecture_svg
+        return architecture_svg(chart, language, color)
     esc = lambda value: html.escape(display(value, language), quote=True)
     if kind == "bar":
         height = max(height, 38 * len(labels) + 50)

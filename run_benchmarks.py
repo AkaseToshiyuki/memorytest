@@ -40,7 +40,7 @@ def default_timeout(name):
     cores = os.cpu_count() or 1
     if name == "inter_core":
         return min(14400, 300 + cores * cores * 2)
-    # Cache uses 5 samples, other diagnostics 20 and ALU/FP 50. Explicit user
+    # Cache uses 5 samples, ALU/FP 10, other diagnostics 20. Explicit user
     # timeout/CPU_TIMEOUT overrides still win. This is a ceiling, not an ETA.
     limits = {"cache_hierarchy": 600, "memory_bandwidth": 900,
               "cpu_alu": 900, "cpu_float": 1200, "cpu_branch": 600}
@@ -87,6 +87,25 @@ def validate_report(path):
     if not any(rows and headers[0].strip("* ").lower() != "item"
                for headers, rows in tables):
         return "report has no result table"
+    return None
+
+
+def validate_evidence(name, reports):
+    """New protocols require reconstructable raw evidence before publication."""
+    try:
+        if name == "cpu_architecture":
+            from architecture_analysis import read_architecture
+            read_architecture(json.loads((reports / "cpu_architecture.json").read_text(encoding="utf-8")))
+        elif name == "inter_core":
+            report = (reports / TASKS[name]["report"]).read_text(encoding="utf-8")
+            observed = reports / "inter_core_observed.json"
+            if "macos-observed-cpu-pairs-v1" in report or observed.exists():
+                from intercore_observed import read_observed
+                if "macos-observed-cpu-pairs-v1" not in report:
+                    raise ValueError("observed evidence does not match the report protocol")
+                read_observed(json.loads(observed.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, OverflowError) as exc:
+        return f"invalid raw evidence: {exc}"
     return None
 
 
@@ -176,18 +195,26 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
     interrupted = False
     event(type="run", path=str(run_dir), total=len(modules))
     print(f"Run: {run_dir}\nSelected: {', '.join(modules)}", flush=True)
+    shared_cache = {"cache_latency_test", "cache_detection"}.issubset(modules)
     for name in modules:
+        if shared_cache and name == "cache_detection":
+            continue
+        names = [name, "cache_detection"] if shared_cache and name == "cache_latency_test" else [name]
         info = TASKS[name]
         work = run_dir / name
         (work / "reports").mkdir(parents=True)
         log = work / "output.log"
         result = {"module": name, "status": "running", "exit_code": None,
                   "log": str(log.relative_to(run_dir)), "message": ""}
-        manifest["modules"].append(result)
+        siblings = [result, *[dict(result, module=peer) for peer in names[1:]]]
+        if len(names) > 1:
+            result["shared_execution"] = "cache-latency-detection"
+        manifest["modules"].extend(siblings)
         save_manifest(manifest_path, manifest)
         started = time.monotonic()
         print(f"[{name}] starting; log: {log}", flush=True)
-        event(type="module", module=name, status="running")
+        for peer in names:
+            event(type="module", module=peer, status="running")
         try:
             if interrupted:
                 result.update(status="skipped", message="not run after interruption")
@@ -206,7 +233,7 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
             if os.name == "nt":
                 binary = binary.with_suffix(".exe")
             result["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-            command = [str(binary), *info.get("args", [])]
+            command = [str(binary), *(["--mode", "latency-detection"] if len(names) > 1 else info.get("args", []))]
             if name == "cpu_multi" and cpu_threads is not None:
                 command.extend(["--threads", str(cpu_threads)])
             result["command"] = command
@@ -219,20 +246,27 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
             if code:
                 result.update(status="failed", message=f"process exited with code {code}; partial data excluded")
                 continue
-            source = work / "reports" / info["report"]
-            error = validate_report(source)
+            error = next((error for peer in names if
+                          (error := validate_report(work / "reports" / TASKS[peer]["report"]))), None)
+            error = error or validate_evidence(name, work / "reports")
             if error:
                 result.update(status="invalid_report", message=error)
                 continue
-            shutil.copy2(source, raw_dir / info["report"])
-            samples = work / "reports" / f"{name}_samples.json"
-            if samples.is_file():
-                shutil.copy2(samples, raw_dir / samples.name)
-            sidecars = {"inter_core": "inter_core_heatmap_data.json", "cpu_multi": "compute_mark_v2.json"}
+            for peer in names:
+                report = TASKS[peer]["report"]
+                shutil.copy2(work / "reports" / report, raw_dir / report)
+                samples = work / "reports" / f"{peer}_samples.json"
+                if samples.is_file():
+                    shutil.copy2(samples, raw_dir / samples.name)
+            sidecars = {"inter_core": "inter_core_heatmap_data.json", "cpu_multi": "compute_mark_v2.json", "cpu_architecture": "cpu_architecture.json"}
             if name in sidecars:
                 sidecar = work / "reports" / sidecars[name]
                 if sidecar.is_file():
                     shutil.copy2(sidecar, raw_dir / sidecar.name)
+            if name == "inter_core":
+                observed = work / "reports/inter_core_observed.json"
+                if observed.is_file():
+                    shutil.copy2(observed, raw_dir / observed.name)
             result.update(status="passed", message="completed; result table present")
         except subprocess.TimeoutExpired:
             result.update(status="timeout", message="time limit exceeded; process group stopped")
@@ -243,9 +277,14 @@ def run_suite(modules, output_dir, bin_dir, skip_build=False, timeout=None, skip
             result.update(status="failed", message=str(exc))
         finally:
             result["duration_seconds"] = round(time.monotonic() - started, 3)
+            for sibling in siblings[1:]:
+                sibling.update({key: value for key, value in result.items() if key != "module"})
+                sibling["shared_duration_seconds"] = result["duration_seconds"]
+                sibling["duration_seconds"] = None  # Do not double-count one execution.
             print(f"[{name}] {result['status']}: {result['message']}", flush=True)
             save_manifest(manifest_path, manifest)
-            event(type="module", **result)
+            for sibling in siblings:
+                event(type="module", **sibling)
     manifest["finished_at"] = datetime.datetime.now().astimezone().isoformat()
     manifest["all_selected_passed"] = all(r["status"] == "passed" for r in manifest["modules"])
     manifest["success"] = (any(r["status"] == "passed" for r in manifest["modules"]) and

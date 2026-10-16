@@ -32,6 +32,52 @@ def fixture(kind="disk"):
 
 
 class HardwareParserTests(unittest.TestCase):
+    def test_nvme_totals_use_decimal_gb_and_exact_128bit_counters(self):
+        from decimal import Decimal, localcontext, ROUND_HALF_UP
+        from smart_inventory import nvme_gb
+        # User screenshots, computed independently with decimal arithmetic.
+        for read, written, expected in ((3686668, 1817234, ("1,887.57 GB", "930.42 GB")),
+                                        (25361070, 25800776, ("12,984.87 GB", "13,210.00 GB"))):
+            nvme = dict(data_units_read=read, data_units_written=written)
+            dev = smart_device({"nvme_smart_health_information_log": nvme}, "disk")
+            self.assertEqual((fields(dev)["total_read"], fields(dev)["total_written"]), expected)
+        number = 2**128 - 1
+        with localcontext() as context:
+            context.prec = 80
+            expected = (Decimal(number) * Decimal("0.000512")).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        self.assertEqual(nvme_gb({"data_units_read": float(number), "data_units_read_s": str(number)}, "data_units_read"),
+                         f"{expected:,.2f} GB")
+        self.assertEqual(nvme_gb({"data_units_read": 0}, "data_units_read"), "0.00 GB")
+        for bad in (None, True, -1, 2**128, 1.0, "-1", "NaN", "1e3", ""):
+            self.assertIsNone(nvme_gb({"data_units_read": bad}, "data_units_read"), bad)
+        # Never interpret vendor-specific ATA attributes as 512-byte sectors.
+        self.assertIsNone(fields(smart_device({"ata_smart_attributes": {"table": [
+            {"id": 241, "raw": {"value": 200}}]}}, "disk"))["total_written"])
+
+    def test_apple_nvme_partial_log_error_is_not_total_read_failure(self):
+        data = {"model_name": "APPLE SSD AP0512Z", "serial_number": "PRIVATE-SERIAL",
+                "smartctl": {"exit_status": 4, "messages": [{"severity": "error",
+                    "string": "Read Error Information Log failed: unsupported PRIVATE-SERIAL"}]},
+                "smart_status": {"passed": True}, "nvme_smart_health_information_log": {
+                    "critical_warning": 0, "temperature": 29, "data_units_read": 25361070,
+                    "data_units_written": 25800776}}
+        dev = smart_device(data, "/dev/disk0", 4)
+        self.assertEqual(dev["health"], "smart_partial")
+        self.assertIn("smart_partial_read", dev["notices"])
+        self.assertNotIn("smart_read_error", dev["notices"])
+        self.assertEqual(fields(dev)["temperature"], "29 °C")
+        diagnostic = next(t for t in dev["tables"] if t["title"] == "smart_read_details")
+        self.assertEqual(diagnostic["rows"][0][:2], ["exit_status", 4])
+        self.assertNotIn("PRIVATE-SERIAL", json.dumps(diagnostic))
+        for bits, status, critical, expected in ((4, False, 0, "smart_failed"),
+                (4, True, 1, "smart_failed"), (12, True, 0, "smart_failed"),
+                (6, True, 0, "smart_unknown"), (5, True, 0, "smart_unknown")):
+            data["smartctl"]["exit_status"] = bits
+            data["smart_status"]["passed"] = status
+            data["nvme_smart_health_information_log"]["critical_warning"] = critical
+            self.assertEqual(smart_device(data, "disk")["health"], expected)
+        self.assertIn("smart_read_error", smart_device({"smartctl": {"exit_status": 4}}, "disk")["notices"])
+
     def test_complete_structured_smart_counters_logs_and_privacy(self):
         from smart_inventory import smart_tables
         # Shapes and units follow smartmontools 7.5 nvmeprint/ataprint/scsiprint;
@@ -87,7 +133,7 @@ class HardwareParserTests(unittest.TestCase):
         self.assertEqual(dev["health"], "smart_failed")
         self.assertEqual(dev["tables"][0]["rows"][0][:6], ["C5", "Current_Pending_Sector", 5, 4, 1, "3"])
         data["smart_status"]["passed"] = True
-        for bits, expected in ((0, "smart_warning"), (2, "smart_unknown"), (4, "smart_unknown"),
+        for bits, expected in ((0, "smart_warning"), (2, "smart_unknown"), (4, "smart_warning"),
                                (16, "smart_failed"), (32, "smart_warning"), (64, "smart_warning"), (128, "smart_warning")):
             data["smartctl"]["exit_status"] = bits
             self.assertEqual(smart_device(data, "/dev/sda")["health"], expected)
@@ -310,6 +356,10 @@ class HardwarePageTests(unittest.TestCase):
             basic = root.findChild(QTabWidget, "disk_basic_tabs")
             detail = root.findChild(QTabWidget, "disk_detail_tabs")
             self.assertEqual(basic.count(), 2)
+            basic.setCurrentIndex(1)
+            visible = " ".join(item.text() for item in basic.findChildren(QLabel))
+            self.assertIn("63,209.88 GB", visible)
+            self.assertIn("50,567.90 GB", visible)
             self.assertEqual(detail.count(), 2)
             self.assertEqual(detail.widget(0).rowCount(), 19)
             self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)

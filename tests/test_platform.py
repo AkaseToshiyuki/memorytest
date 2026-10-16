@@ -1,6 +1,7 @@
 """Portability acceptance. Darwin checks require an actual macOS host/SDK."""
 import json
 import os
+import platform
 from pathlib import Path
 import shlex
 import subprocess
@@ -78,6 +79,20 @@ class MacOSNativeTests(unittest.TestCase):
         self.assertEqual(values["CACHE_L3"], values["CACHE_L3_API"])
 
     def test_unsupported_intercore_has_a_report_but_no_matrix(self):
+        if platform.machine().lower() in {"arm64", "aarch64"}:
+            from intercore_observed import read_observed
+            work = self.path / "observed"; work.mkdir()
+            run = subprocess.run([str(self.bin / "test_inter_core"), "--budget-ms", "2000", "--workers", "2"],
+                                 cwd=work, capture_output=True, text=True, timeout=8)
+            self.assertIn(run.returncode, (0, 77), run.stdout + run.stderr)
+            self.assertFalse((work / "reports/inter_core_heatmap_data.json").exists())
+            if run.returncode == 0:
+                data = json.loads((work / "reports/inter_core_observed.json").read_text())
+                self.assertGreater(read_observed(data)["covered_pairs"], 0)
+                self.assertTrue((work / "reports/inter_core_latency_report.md").is_file())
+            else:
+                self.assertIn("UNSUPPORTED", run.stderr)
+            return
         output = self.path / "unsupported"
         run = subprocess.run([sys.executable, str(ROOT / "run_benchmarks.py"), "-m", "inter_core",
                               "--bin-dir", str(self.bin), "--output-dir", str(output),

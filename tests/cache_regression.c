@@ -60,5 +60,6 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "bandwidth_only")) cache_mode = 1;
     if (argc > 1 && !strcmp(argv[1], "latency_only")) cache_mode = 2;
     if (argc > 1 && !strcmp(argv[1], "detection_only")) cache_mode = 3;
+    if (argc > 1 && !strcmp(argv[1], "shared")) cache_mode = 4;
     return run_cache_hierarchy_test();
 }

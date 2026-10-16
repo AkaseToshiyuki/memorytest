@@ -40,7 +40,7 @@ def reference_rates(data):
     result = {}
     for record in data["records"]:
         samples = record["samples"]
-        excluded = reference([s["elapsed_ns"] for s in samples])["excluded_indices"] if len(samples) == 20 else []
+        excluded = reference([s["elapsed_ns"] for s in samples])["excluded_indices"] if len(samples) in {10, 20} else []
         result[record["workload"], record["threads"]] = statistics.median(
             s["operations"] / s["elapsed_ns"] for i, s in enumerate(samples) if i not in excluded)
     return result
@@ -90,6 +90,18 @@ class SampleStatisticsTests(unittest.TestCase):
                 self.assertEqual(result["excluded_indices"], [0, 9])
                 self.assertEqual([result[k] for k in ("q1", "median", "q3")], [99, 100, 101])
                 self.assertFalse(result["unstable"])
+
+    def test_ten_samples_allow_only_one_candidate_and_keep_drift_guard(self):
+        one = [1000, 99, 100, 101, 102, 98, 99, 100, 101, 102]
+        result = self.check_values(one)
+        self.assertEqual(result["excluded_indices"], [0])
+        self.assertEqual(result["kept"], 9)
+        two = one[:]; two[-1] = 1
+        result = self.check_values(two)
+        self.assertEqual(result["excluded_indices"], [])
+        self.assertTrue(result["unstable"])
+        drift = [98, 99, 100, 101, 102, 198, 199, 200, 201, 202]
+        self.assertTrue(self.check_values(drift)["unstable"])
 
     def test_zero_spread_and_small_samples_never_filter(self):
         for values in ([100] * 20, [100] * 19 + [1000], [1, 99, 100, 101, 1000]):

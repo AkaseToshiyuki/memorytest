@@ -76,7 +76,7 @@ has been performed here. Local evidence: `/tmp/memorytest-darwin-cross-BWIvhU/`
 Tests are organized by **functional module**, not by smoke/sanity/regression layers.
 
 ```bash
-make test                                 # All 7 modules + summary HTML
+make test                                 # All 8 modules + summary HTML
 make test MODULE=cpu_alu                   # One module + its own HTML
 make test MODULES="cpu_alu cpu_float"       # Selected modules + scoped HTML
 make test CATEGORY=cpu                    # CPU group (or CATEGORY=memory)
@@ -114,10 +114,11 @@ without hardware workloads. Details: [TEST_LAYERS.md](TEST_LAYERS.md)
 
 | Binary | Measures |
 |--------|----------|
-| `test_cpu_alu` | Integer IPC (add, mul, div, and, or, xor) |
-| `test_cpu_float` | Floating-point IPC (add, mul, FMA, SIMD dot product) |
+| `test_cpu_alu` | Integer dependency-chain wall time (add, mul, div, and, or, xor) |
+| `test_cpu_float` | Floating-point wall time (add, mul, FMA, SIMD dot product) |
 | `test_cpu_branch` | Branch predictor latency (always-taken, never-taken) |
 | `test_cpu_multi` | Multi-core scaling efficiency across thread counts |
+| `test_cpu_architecture` | Instruction/memory probes, evidence cards and conceptual architecture diagram; no inferred ROB/port counts |
 
 ## Build
 
@@ -343,7 +344,7 @@ make test
 按**功能子模块**组织测试，不再把 smoke / sanity / regression 作为用户测试层级。
 
 ```bash
-make test                                 # 默认运行全部 7 个模块，生成汇总 HTML
+make test                                 # 默认运行全部 8 个模块，生成汇总 HTML
 make test MODULE=cpu_alu                   # 仅运行整数模块，生成专属 HTML
 make test MODULES="cpu_alu cpu_float"       # 运行指定多个模块
 make test CATEGORY=memory                 # 运行内存组；CPU 组用 CATEGORY=cpu
@@ -378,10 +379,11 @@ python3 run_benchmarks.py --module cpu_alu  # 等价的直接入口
 
 | 二进制 | 测量内容 |
 |--------|----------|
-| `test_cpu_alu` | 整数 IPC（加减乘除、与或异或） |
-| `test_cpu_float` | 浮点 IPC（加减乘、FMA、SIMD 点积） |
+| `test_cpu_alu` | 整数依赖链墙钟时间（加减乘除、与或异或） |
+| `test_cpu_float` | 浮点墙钟时间（加减乘、FMA、SIMD 点积） |
 | `test_cpu_branch` | 分支预测延迟（always-taken、never-taken） |
 | `test_cpu_multi` | 不同线程数下的多核扩展效率 |
+| `test_cpu_architecture` | 指令／内存探针、关键数据卡片和概念架构图；不推算 ROB／端口数量 |
 
 ## 构建
 
@@ -671,7 +673,38 @@ batches; streaming output validation is untimed. ComputeMark v2 is unchanged. St
 the live monitoring stream; report statistics remain scoped to the stress session. The references
 above are methodological comparisons, not bundled third-party benchmark engines.
 
-### 独立测试入口与重复采样修订（diagnostic-v3，2026-10-15）
+### 架构分析、共享扫描和平台诊断（2026-10-16）
+
+- 主测试链路新增 `cpu_architecture`，桌面位于核心性能组，可独立运行，也包含在全选和 CPU 分类中。
+  原生 x86-64 SSE2／AArch64 FP64 后端实测 12 项：NOP 流、整数加／乘、FP64 加／乘的
+  单依赖链和八条独立链，以及 32 KiB 读／有序写、64 KiB 双数组有序复制。
+  每项 10 样本、目标 50 ms、预热至少 10 ms；保存完整 `cpu_architecture.json`，从原始时间重算卡片、图和表。
+- 架构图借鉴前端／整数／访存／浮点／重命名退休的分区布局，不复制截图中的型号或数值。
+  实测量为 ns/op、显式有效指令 G instr/s 及独立链增益，不是 PMU IPC、时钟周期或解码宽度。
+  八条链不代表八个执行单元；ROB、调度器、物理寄存器和端口容量标为尚未测定。
+  系统缓存信息单独标注：Linux 读取绑定 CPU 的 sysfs，Mac 为全局 sysctl 摘要，Windows 为各级最大实例；
+  共享缓存不冒充每核容量，缺失值不使用猜测兜底。Linux 固定一个可用逻辑 CPU，Mac 仅验证 QoS，Windows 由系统调度。
+- 内存延迟扩展为依赖读取、64 B 有序写、64 B 有序复制，各 20 个正式样本。
+  写／复制包含下一地址加载、全内存栅栏和循环成本，数值是已定义事务延迟，不是纯 DRAM 写入延迟，
+  也不是用带宽倒算延迟。复制工作集包含两个数组。计时外校验完整链和所有有效载荷。
+- 同一次选择中同时勾选缓存延迟与层级检测，仅执行一次 `--mode latency-detection` 扫描，
+  两页共享同批原始样本、分别解读；`shared-cache-latency-scan-v1` 标明来源，合计用时不重复计算。
+  单独选择任一项仍可运行；不复用历史扫描。
+- SMART 摘要新增累计读取／写入 GB（十进制），NVMe 数据单元按 512,000 B 转换，保留 128 位整数精度。
+  没有可靠单位的 ATA 厂商属性不臆测为字节。若健康日志有效但扩展日志读取失败，显示“部分读取”及具体错误；
+  不再一概显示整盘读取失败，也不掩盖真实健康告警。截图对应 Apple SSD 的具体失败日志尚待真机核对。
+- Apple Silicon 新增有界的实验性核对延迟：默认 10 秒、上限 30 秒，保留每个已观察有向 CPU 对的
+  10 个首尾编号一致样本，报告 CAS 往返时间的一半。其他线程保持可运行是明确的负载条件。
+  使用实现相关的 `TPIDR_EL0` 编号布局，先以隔离子进程探测；异常、Rosetta、无法验证 QoS 或无足够样本时明确失败／不支持。
+  这不是精确绑核，首尾一致不能排除中途迁移；缺失核对留空，不做 P/E 聚类，也不与 Linux 严格矩阵混为同一协议。
+  独立证据为 `inter_core_observed.json`，Linux 原协议不变；Intel Mac 和 Windows 核间后端仍不支持。
+
+方法参考：[LLVM exegesis 的依赖延迟／并行吞吐探针](https://llvm.org/docs/CommandGuide/llvm-exegesis.html)、
+[hydroo 的 macOS 核间测量](https://github.com/hydroo/macos-core-to-core-latency)、
+[XNU 编号布局与 ABI 限制](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/os/tsd.h)。
+本项目独立实现并验证其工作计数；不宣称等同这些项目的成绩或完成 Apple Silicon 微架构逆向工程。
+
+### 独立测试入口与重复采样修订（diagnostic-v3，默认值更新于 2026-10-16）
 
 此节是最新方法；上文 v2／v2.1 记录描述此前版本，不代表当前采样默认值。
 
@@ -679,9 +712,11 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 |---|---:|---|
 | 缓存带宽／缓存延迟／层级检测 | 5 | 每个工作集、每个实际测量操作；不自动剔除 |
 | 内存带宽／内存延迟／分支 | 20 | 每个测点／模式 |
-| 整数／浮点诊断 | 50 | 每个运算项目 |
-| 核间延迟／CAS 吞吐量 | 20 | 每个有向核对、每种指标；仅 Linux 已验证后端 |
-| ComputeMark v2 | 20 | 每种负载、每个线程数；评分内核、公式、100 ms 校准下限不变 |
+| 整数／浮点诊断 | 10 | 每个运算项目；原为 50 |
+| Linux 核间延迟／CAS 吞吐量 | 20 | 每个有向核对、每种指标 |
+| Apple Silicon 实验性核对延迟 | 10 | 每个实际覆盖的有向核对；不是严格绑核矩阵 |
+| ComputeMark v2 | 10 | 原为 20；每种负载、每个线程数；内核、公式、100 ms 校准下限不变 |
+| 架构分析 | 10 | 每个探针，50 ms 目标、10 ms 预热 |
 
 - 正式样本不包含预热和校准。诊断测试仍默认每个样本目标 150 ms、最低预热 50 ms；
   有界自动测试会缩短这个时长，不把测试夹具的运行时间当成用户测试时长。
@@ -697,9 +732,11 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 - 多核梯度协议 `powers-of-two-plus-max-v1` 按 1、2、4、8……递增，最后加入最大线程数并去重。
   例如 14 线程测 `1, 2, 4, 8, 14`，16 线程测 `1, 2, 4, 8, 16`，1 线程只测一次档位。
   最大值沿用现有进程可用逻辑线程／`--threads` 限制，不冒充物理核绑定或 P 核选择。
-  每档整数与 FP64 分别校准、各采样 20 次；图表和加速比表来自全部实测档位，缺样则拒绝评分。
+  每档整数与 FP64 分别校准、各采样 10 次；图表和加速比表来自全部实测档位，缺样则拒绝评分。
   单核／最大线程评分公式不变；旧报告仍只展示原有实测点，不插值补齐。
-  14 线程因此有 `5 × 2 × 20 = 200` 个正式样本，加上预热和校准；本次未减少重复次数。
+  14 线程因此有 `5 × 2 × 10 = 100` 个正式样本，原为 200；预热和校准仍保留。
+  正式采样预算中整数／浮点减少 80%，多核减少 50%；这不是整个测试墙钟时间的实测缩短比例。
+  `repeat10-outer-iqr3-v1` 与旧 20／5 次协议分开标记，旧报告仍按其原始样本数校验。
 - 整数依赖链移除每轮不必要的 `volatile` 内存访问，采用寄存器读写约束和最终结果 sink；
   乘除数阻止常量折叠，仍包含循环与辅助计算。`Load+ALU` 刻意保留真实内存加载。
   新整数时间不能直接与旧 volatile 循环比较，改善的是测量对象，不是 CPU 本身变快。
@@ -707,8 +744,8 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   5 次采样仍有限，检测不到稳定跃迁是有效结果，不补造缓存容量。
 
 桌面选择区和结果页均拆为缓存三个子项、内存两个子项，各自有状态、报告和独立执行参数。
-内存延迟只分配一个数组且不创建带宽线程池；仅选缓存带宽不会执行依赖链扫描。
-层级检测本身需要一次延迟扫描；同时选择缓存延迟与层级检测会分别测量，不借用历史轮次。
+内存延迟分配两个数组供读写复制使用，不创建带宽线程池；仅选缓存带宽不会执行依赖链扫描。
+层级检测需要一次延迟扫描；同时选择缓存延迟与层级检测共用本轮扫描，不借用历史轮次。
 旧合并报告恢复到对应子页并标明来源，不把合计用时冒充子项独立用时；
 旧内存报告若没有延迟数据，不显示延迟测试已完成。
 表格／图表／数值卡片按十进制换算带宽，最高到 GB/s，例如 `10000 MB/s = 10 GB/s`；
@@ -732,7 +769,7 @@ python run_benchmarks.py -m memory_latency_test
 它包含 x86 特定的跳转间距／间接分支测试，本软件当前是条件分支模式测试，不能据此宣称测到了 BTB 容量。
 **Criterion 不删除异常值**；本软件按用户要求制定的有限剔除策略不同，不冒充 Criterion 的回归或置信区间。
 STREAM 偏重最佳带宽、core-to-core-latency 的统计方法也不同，本软件不把中位数结果冒充这些项目的官方成绩。
-压力测试仍是持续负载和逐批校验，不套用 20／50 次“跑分”采样，也不宣称完整显存故障检测。
+压力测试仍是持续负载和逐批校验，不套用“跑分”采样次数，也不宣称完整显存故障检测。
 本轮没有复制／链接这些基准项目代码；方法级对照和独立正确性检查，不等于完成所有项目的同机 A/B 性能对照。
 
 ### 追加的测试方法修订（diagnostic-v2）
@@ -811,7 +848,8 @@ Windows ICO、macOS ICNS 及多尺寸 PNG，并接入应用与安装包。
 ### macOS 严格核间矩阵调研
 
 结论：当前证据不足以支持把 macOS 普通用户态线程往返测量标为指定 CPU-ID 对的严格
-矩阵。因此 0.1.1 仍明确显示不支持；没有新增要求降低系统安全性的代码。
+矩阵。因此严格矩阵仍不支持；2026-10-16 新增的实验性观察后端是独立协议，
+不改变这个结论；没有要求降低系统安全性、安装内核扩展或提权的代码。
 以下为源码／接口证据与工程判断，不是 Mac 私有接口的真机验证。
 
 | 路线 | CPU-ID 绑定与执行核心验证 | 兼容性和分发判断 |

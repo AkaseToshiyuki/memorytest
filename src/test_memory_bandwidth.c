@@ -5,6 +5,7 @@
 #include "util.h"
 #include "bench_protocol.h"
 #include "memory_kernels.h"
+#include "memory_latency.h"
 #include <errno.h>
 
 #define MAX_THREADS 256
@@ -84,11 +85,11 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
     MemoryPool pool = {.mutex = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER,
                       .done = PTHREAD_COND_INITIALIZER, .threads = (unsigned)threads, .words = bytes / sizeof(double)};
     pool.a = do_bandwidth ? malloc(bytes) : NULL;
-    pool.b = do_bandwidth ? malloc(bytes) : NULL;
+    pool.b = malloc(bytes); /* Also the separate destination for copy latency. */
     pool.c = malloc(bytes);
     unsigned created = 0;
     int status = 1;
-    if ((do_bandwidth && (!pool.a || !pool.b)) || !pool.c) goto cleanup;
+    if ((do_bandwidth && !pool.a) || !pool.b || !pool.c) goto cleanup;
     if (do_bandwidth && threads == 1) stream_initialize(pool.a, pool.b, pool.c, pool.words);
     else if (do_bandwidth) {
         for (unsigned i = 0; i < pool.threads; ++i) {
@@ -100,7 +101,7 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
         while (pool.ready < pool.threads) pthread_cond_wait(&pool.done, &pool.mutex);
         pthread_mutex_unlock(&pool.mutex);
     }
-    BenchMeasurement bandwidth[STREAM_OPERATIONS], latency;
+    BenchMeasurement bandwidth[STREAM_OPERATIONS], latency[MEMORY_LAT_OPERATIONS];
     for (unsigned i = 0; do_bandwidth && i < STREAM_OPERATIONS; ++i) {
         pool.operation = i;
         printf("Warming and sampling: %s\n", stream_names[i]); fflush(stdout);
@@ -115,12 +116,12 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
     /* Retire the workers before using their destination allocation as a chain. */
     memory_stop(&pool, created);
     created = 0;
-    if (do_latency) {
-        chain_build(pool.c, bytes);
-        ChainWork chain = {pool.c, bytes, (uintptr_t)pool.c};
-        if (chain_work(&chain, (bytes / 64 + CHAIN_STEPS - 1) / CHAIN_STEPS)) goto freed;
-        printf("Warming and sampling: dependent random access\n"); fflush(stdout);
-        if (bench_measure(chain_work, &chain, &latency)) goto freed;
+    for (unsigned op = 0; do_latency && op < MEMORY_LAT_OPERATIONS; ++op) {
+        MemoryLatency work = {{pool.c, bytes, (uintptr_t)pool.c}, pool.b, op};
+        memory_latency_initialize(&work);
+        if (memory_latency_work(&work, (bytes / 64 + CHAIN_STEPS - 1) / CHAIN_STEPS)) goto freed;
+        printf("Warming and sampling: %s\n", memory_latency_names[op]); fflush(stdout);
+        if (bench_measure(memory_latency_work, &work, &latency[op]) || memory_latency_validate(&work)) goto freed;
     }
     const char *names[] = {"memory_bandwidth", "memory_bandwidth_test", "memory_latency_test"};
     ReportContext *report = report_init(names[memory_mode], REPORT_FORMAT_MARKDOWN);
@@ -129,7 +130,8 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
     report_section(report, "Memory Test Conditions");
     bench_report_conditions(report);
     report_write(report, "- Memory Size: %.6f MiB\n- Total Allocation: %.6f MiB\n- Thread Count: %d\n\n",
-                 (double)bytes / MB, (double)bytes * (do_bandwidth ? 3 : 1) / MB, threads);
+                 (double)bytes / MB, (double)bytes * (do_bandwidth ? 3 : 2) / MB, threads);
+    if (do_latency) report_write(report, "- Latency protocol: dependent-read-ordered-write-copy64-v1\n\n");
     if (do_bandwidth) {
         report_section(report, "Memory Bandwidth Test Results");
         report_write(report, "| Operation | Bandwidth (MB/s) | Time(ms) | Bytes | Spread(%%) |\n");
@@ -143,12 +145,16 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
     }
     if (do_latency) {
         report_section(report, "Memory Latency");
-        double loads = (double)latency.repetitions * CHAIN_STEPS;
         report_write(report, "| Operation | Size | ns/op | Time(ms) | Operations | Spread(%%) |\n");
         report_write(report, "|-----------|------|-------|----------|------------|-----------|\n");
-        report_write(report, "| Dependent random read | %.6f MiB | %.6f | %.9f | %.0f | %.3f |\n",
-                     (double)bytes / MB, (double)latency.elapsed_ns / loads,
-                     (double)latency.elapsed_ns / 1e6, loads, bench_spread(&latency));
+        for (unsigned op = 0; op < MEMORY_LAT_OPERATIONS; ++op) {
+            BenchMeasurement *sample = &latency[op];
+            double transactions = (double)sample->repetitions * CHAIN_STEPS;
+            report_write(report, "| %s | %.6f MiB | %.6f | %.9f | %.0f | %.3f |\n",
+                         memory_latency_names[op], (double)bytes * (op == MEMORY_LAT_COPY ? 2 : 1) / MB,
+                         sample->elapsed_ns / transactions, sample->elapsed_ns / 1e6,
+                         transactions, bench_spread(sample));
+        }
     }
     report_section(report, "Notes");
     report_write(report, "MB/s is decimal useful bytes / common elapsed time, including worker release/completion overhead.\n"
@@ -156,14 +162,19 @@ int run_memory_bandwidth_test(size_t bytes, int threads) {
                  "No inferred cache-line, write-allocation or DRAM-bus traffic is added.\n"
                  "Arrays use ordinary OS pages and worker first touch, without CPU or NUMA pinning.\n"
                  "Every written element and read/stride reduction is validated outside the timed interval.\n"
-                 "Latency uses one dependent load chain with 64-byte nodes across the full listed size.\n"
-                 "Working sets may still be cache-resident; no forced-DRAM guarantee or inferred write latency.\n");
+                 "Latency uses one dependent permutation chain with 64-byte nodes. Each operation is separately warmed and calibrated.\n"
+                 "Read: one pointer-sized load per node. Ordered write: next-address load, 64-byte write, full memory fence.\n"
+                 "Ordered copy: 64-byte scalar copy to a separate allocation, full memory fence, then reload the next address from destination.\n"
+                 "Size is the actively accessed footprint: copy includes source AND destination; read/write use only one array.\n"
+                 "ns/op is time per defined dependent transaction, including loop/address/fence overhead, NOT inverse bandwidth.\n"
+                 "Working sets may still be cache-resident. Not isolated store latency, DRAM completion, persistence, or optimized memcpy speed.\n");
     FILE *audit = bench_audit_begin(report);
     if (!audit) { report_free(report); goto freed; }
     unsigned audit_index = 0;
     for (unsigned i = 0; do_bandwidth && i < STREAM_OPERATIONS; ++i)
         bench_audit_row(report, audit, stream_names[i], &bandwidth[i], audit_index++);
-    if (do_latency) bench_audit_row(report, audit, "Dependent random read", &latency, audit_index++);
+    for (unsigned op = 0; do_latency && op < MEMORY_LAT_OPERATIONS; ++op)
+        bench_audit_row(report, audit, memory_latency_names[op], &latency[op], audit_index++);
     if (bench_audit_finish(audit)) { report_free(report); goto freed; }
     report_finalize_json(report);
     status = report_finish(report) ? 1 : 0;
@@ -177,7 +188,7 @@ freed:
 
 static void print_usage(const char *name) {
     printf("Usage: %s [-s SIZE] [-t THREADS] [--mode all|bandwidth|latency]\n"
-           "One array for latency; three for bandwidth. Bounded available-memory budget.\n", name);
+           "Two arrays for latency (copy source/destination); three for bandwidth. Bounded available-memory budget.\n", name);
 }
 
 int main(int argc, char **argv) {

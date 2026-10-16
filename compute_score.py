@@ -11,7 +11,8 @@ FLAGS = "-O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=off -f
 CLANG_FLAGS = "-O2 -std=c11 -Wall -Wextra -pthread -fno-fast-math -ffp-contract=off -fno-vectorize -fno-slp-vectorize -fno-lto"
 KERNEL_HASH = "a05a8fc6700545d9a6dd5dfa6221caf7550ff89b65ad3749b586af5dde51e5d5"
 REPEATS = 5
-SAMPLING_PROTOCOL = "repeat20-outer-iqr3-v1"
+SAMPLING_PROTOCOL = "repeat10-outer-iqr3-v1"
+SAMPLING_COUNTS = {"legacy5-median": 5, "repeat20-outer-iqr3-v1": 20, SAMPLING_PROTOCOL: 10}
 SCALING_PROTOCOL = "powers-of-two-plus-max-v1"
 MIN_NS = 100_000_000
 
@@ -78,11 +79,11 @@ def compute_mark_score(data):
     if data.get("translated", False) is not False:
         raise ValueError("translated execution cannot produce a native score")
     sampling = data.get("sampling_protocol", "legacy5-median")
-    if sampling not in {"legacy5-median", SAMPLING_PROTOCOL}:
+    if sampling not in SAMPLING_COUNTS:
         raise ValueError("unsupported sampling protocol")
-    repeats = 20 if sampling == SAMPLING_PROTOCOL else REPEATS
+    repeats = SAMPLING_COUNTS[sampling]
     if (type(data.get("sample_count", repeats)) is not int or data.get("sample_count", repeats) != repeats or
-            sampling == SAMPLING_PROTOCOL and "sample_count" not in data):
+            sampling != "legacy5-median" and "sample_count" not in data):
         raise ValueError("sampling protocol and sample count mismatch")
     threads = _positive_int(data.get("threads"), "thread count")
     cpus = data.get("available_cpus")
@@ -180,7 +181,7 @@ def compute_mark_score(data):
             raise ValueError("nondeterministic workload results")
         raw_median = statistics.median(observed)
         excluded = []
-        if sampling == SAMPLING_PROTOCOL:
+        if sampling != "legacy5-median":
             timing = summarize(sample["elapsed_ns"] for sample in samples)
             excluded = timing["excluded_indices"]
             unstable |= timing["unstable"]

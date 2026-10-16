@@ -1,5 +1,6 @@
 """Native result cards, charts and tables backed by the same model as HTML."""
 import json
+import platform
 import sys
 from PySide6.QtCore import Qt, QAbstractTableModel, QSize
 from PySide6.QtSvgWidgets import QSvgWidget
@@ -11,12 +12,13 @@ from presentation import plot_svg
 from result_model import ModuleResult, build_module, perflevel_table, cache_parts
 
 TITLES = {name: tr(name, "zh") for name in
-          ("cache_hierarchy", "memory_bandwidth", "inter_core", "cpu_alu", "cpu_float", "cpu_branch", "cpu_multi")}
+          ("cache_hierarchy", "memory_bandwidth", "inter_core", "cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "cpu_architecture")}
 STATUS = {key: tr(key, "zh") for key in ("running", "passed", "failed", "unsupported", "interrupted", "skipped", "timeout", "build_failed", "invalid_report")}
 
 
 def supported(name):
-    return not (name == "inter_core" and sys.platform in {"darwin", "win32"})
+    return not (name == "inter_core" and (sys.platform == "win32" or
+                sys.platform == "darwin" and platform.machine().lower() not in {"arm64", "aarch64"}))
 
 
 class ResultsTableModel(QAbstractTableModel):
@@ -89,7 +91,9 @@ class ResultView(QScrollArea):
             layout.addWidget(empty, 1)
         else:
             if model.notice:
-                layout.addWidget(label(tr(model.notice, language), "muted"))
+                notice = label(tr(model.notice, language), "muted")
+                notice.setWordWrap(True)
+                layout.addWidget(notice)
             if model.kpis:
                 grid = QGridLayout()
                 for i, item in enumerate(model.kpis):

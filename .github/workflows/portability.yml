@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build seven module entry points
+      - name: Build module entry points
         run: make -j2 tests
       - name: Independent numerical references and bounded native CPU run
         run: make check-compute
@@ -47,3 +47,6 @@ jobs:
           python -m unittest discover -s tests -p test_sample_statistics.py -v
           python -m unittest discover -s tests -p test_memory_kernels.py -v
           python -m unittest discover -s tests -p test_intercore_protocol.py -v
+          python -m unittest discover -s tests -p test_intercore_observed.py -v
+          python -m unittest discover -s tests -p test_architecture.py -v
+          python -m unittest discover -s tests -p test_cache_report.py -v

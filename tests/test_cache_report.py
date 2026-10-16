@@ -89,6 +89,23 @@ class CacheReportTests(unittest.TestCase):
                 self.assertEqual("## Cache Hierarchy Detection" in text, mode == "detection")
                 self.assertEqual(build_module(name, reports).status, "passed")
 
+    def test_latency_and_detection_share_exactly_one_scan(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as folder:
+            run = subprocess.run([str(self.binary), "shared"], cwd=folder,
+                                 capture_output=True, text=True, timeout=15)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(run.stdout.count("Warming and sampling cache working set:"), 5)
+            reports = Path(folder) / "reports"
+            self.assertFalse((reports / "cache_bandwidth_test_report.md").exists())
+            first = json.loads((reports / "cache_latency_test_samples.json").read_text())
+            second = json.loads((reports / "cache_detection_samples.json").read_text())
+            self.assertEqual(first, second)
+            self.assertEqual(len(first["records"]), 5)
+            for name in ("cache_latency_test", "cache_detection"):
+                self.assertIn("shared-cache-latency-scan-v1", (reports / f"{name}_report.md").read_text())
+                model = build_module(name, reports)
+                self.assertIn(("source", "shared_cache_scan"), [(a["key"], b["key"]) for a, b in model.conditions if isinstance(b, dict)])
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires /dev/full")
     def test_raw_sample_write_failure_fails_module(self):
         with tempfile.TemporaryDirectory(dir=self.root) as folder:

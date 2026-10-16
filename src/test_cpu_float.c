@@ -4,7 +4,7 @@
  * This module is deliberately separate from ComputeMark's scoring kernels. */
 #include "common.h"
 #include "util.h"
-#define BENCH_DEFAULT_SAMPLES 50
+#define BENCH_DEFAULT_SAMPLES 10
 #include "bench_protocol.h"
 #include <math.h>
 #if defined(HAVE_SSE2_INTRINSICS)

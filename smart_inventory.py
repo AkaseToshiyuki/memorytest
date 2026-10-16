@@ -10,6 +10,26 @@ def exact_value(data, key, default=None):
     return data.get(key + "_s", data.get(key, default))
 
 
+def nvme_gb(data, key):
+    """NVMe data units are 1,000 * 512 bytes, NOT host commands or sectors.
+
+    Keep the 128-bit counter exact through conversion, round half up to 0.01
+    decimal GB using integer arithmetic, and leave the raw log untouched.
+    Reject approximate JSON floats without --json=v's exact string companion.
+    """
+    value = exact_value(data, key)
+    if type(value) is int:
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]{1,39}", value):
+        number = int(value)
+    else:
+        return None
+    if not 0 <= number < 2**128:
+        return None
+    hundredths = (number * 512_000 * 100 + 500_000_000) // 1_000_000_000
+    return f"{hundredths // 100:,}.{hundredths % 100:02d} GB"
+
+
 def leaves(value, path=""):
     if isinstance(value, dict):
         for key, child in value.items():
@@ -81,4 +101,14 @@ def smart_tables(data):
         "smartctl", "json_format_version", "local_time", "nvme_smart_health_information_log"}}
     if extra:
         tables.append(details("smart_details", extra, "smartctl extended device / SMART information"))
+    # A command/log error is independent of the health result. Preserve its
+    # evidence without exposing command-line arguments or known serials.
+    control = data.get("smartctl", {})
+    if isinstance(control.get("exit_status"), int) and control["exit_status"] & 7:
+        messages = [str(m.get("string", "")) for m in control.get("messages", []) if isinstance(m, dict)]
+        serial = str(data.get("serial_number") or "")
+        if serial:
+            messages = [message.replace(serial, "[redacted]") for message in messages]
+        tables.append(details("smart_read_details", {"exit_status": control["exit_status"],
+                      "messages": messages}, "smartctl collection diagnostics"))
     return tables

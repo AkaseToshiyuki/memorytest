@@ -11,7 +11,7 @@ from compute_score import compute_mark_score
 from i18n import ref
 
 GROUPS = {"cache_group": ["cache_hierarchy"], "memory_group": ["memory_bandwidth"],
-          "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core"]}
+          "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core", "cpu_architecture"]}
 for _group in ("cache_group", "memory_group"):
     GROUPS[_group] += SELECTION_GROUPS[_group]
 
@@ -115,6 +115,7 @@ OPS = {"add": "add", "sub": "sub", "mul": "mul", "div": "div", "mod": "mod", "sq
        "random 50%": "random50", "2-bit counter": "counter2", "increasing": "increasing"}
 OPS.update({"alternating": "alternating", "ttnn": "ttnn", "scale": "scale", "triad": "triad",
             "dependent random read": "dependent_read", "mul+add": "muladd", "integer": "integer", "fp64": "fp64"})
+OPS.update({"dependent random write 64b (ordered)": "dependent_write", "dependent random copy 64b (ordered)": "dependent_copy"})
 
 
 def operation(value, index=1):
@@ -251,8 +252,56 @@ def build_module(name, reports, record=None):
         text = read_text(reports / TESTS[name]["report"])
         parsed = list(tables(text))
         result.status = "passed"
+        if "- Sampling source: shared-cache-latency-scan-v1" in text:
+            result.conditions.append((ref("source"), ref("shared_cache_scan")))
+        if name == "inter_core" and "- Protocol: macos-observed-cpu-pairs-v1" in text:
+            from intercore_observed import read_observed
+            try:
+                observed = read_observed(json.loads(read_text(reports / "inter_core_observed.json")))
+            except (OSError, ValueError, TypeError, KeyError):
+                result.status, result.reason = "invalid_report", "invalid_report"
+                return result
+            ids, pairs = observed["ids"], observed["pairs"]
+            matrix = [[pairs[i, j]["median"] if (i, j) in pairs else None for j in ids] for i in ids]
+            result.notice = "observed_intercore_notice"
+            result.conditions = [(ref("protocol"), "macos-observed-cpu-pairs-v1"),
+                                 (ref("placement"), ref("qos")), (ref("samples"), 10)]
+            result.kpis = [{"label": ref("observed_pair_coverage"),
+                            "value": f'{observed["covered_pairs"]} / {observed["possible_pairs"]}', "unit": ""},
+                           {"label": ref("observed_cpu_count"), "value": len(ids), "unit": ""},
+                           {"label": ref("migration_rejections"), "value": observed["attempt_counts"].get("migration", 0), "unit": ""}]
+            result.charts = [Chart("observed_cas_latency", "heatmap", "ns", ids,
+                [{"label": ref("observed_cas_latency"), "values": matrix}], x_title="observed_cpu")]
+            result.tables = [Table("observed_cas_latency", [column("from_cpu"), column("to_cpu"), column("samples"),
+                column("observed_cas_latency", "ns"), column("drift", "%"), column("status")],
+                [[i, j, stats["count"], stats["median"], stats["drift_pct"], ref("unstable" if stats["unstable"] else "measured")]
+                 for (i, j), stats in sorted(pairs.items())])]
+            return result
+        if name == "cpu_architecture":
+            from architecture_analysis import read_architecture
+            try:
+                evidence = read_architecture(json.loads(read_text(reports / "cpu_architecture.json")))
+            except (OSError, ValueError, KeyError, TypeError):
+                result.status, result.reason = "invalid_report", "invalid_report"
+                return result
+            metrics = evidence["metrics"]
+            result.notice = "architecture_limits" if evidence["stable"] else "architecture_unstable"
+            result.conditions = [(ref("protocol"), "architecture-probes-v1"), (ref("samples"), 10),
+                (ref("sample_target"), f'{evidence["sample_target_ns"] / 1e6:g} ms'),
+                (ref("placement"), ref("pinned" if evidence["cpu_id"] >= 0 else "qos" if evidence["placement"].startswith("macos") else "arch_os_scope"))]
+            result.kpis = [{"label": ref("arch_iadd_dep"), "value": metrics["iadd_dep"]["ns"], "unit": "ns/op"},
+                {"label": ref("arch_iadd_ind8"), "value": metrics["iadd_ind8"]["gops"], "unit": "Ginstr/s"},
+                {"label": ref("arch_ilp_gain"), "value": metrics["iadd_dep"]["ns"] / metrics["iadd_ind8"]["ns"], "unit": "×"},
+                {"label": ref("arch_fadd_dep"), "value": metrics["fadd_dep"]["ns"], "unit": "ns/op"}]
+            result.charts = [Chart("architecture_diagram", "architecture", "", [], [{"evidence": evidence}])]
+            result.tables = [Table("architecture_measurements", [column("measurement"), column("latency", "ns/op"),
+                column("samples"), column("rejected"), column("drift", "%"), column("status")],
+                [[ref("arch_" + name), value["ns"], 10, value["statistics"]["rejected"], value["statistics"]["drift_pct"],
+                  ref("measured" if value["stable"] else "unstable")] for name, value in metrics.items()])]
+            return result
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
                              (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),
+                             (r"^- Latency protocol: ([\w.-]+)\s*$", "protocol"),
                              (r"^- Thread Count: (\d+)\s*$", "threads"),
                              (r"^- Samples: (\d+)\s*$", "samples"),
                              (r"^- Warmup minimum: ([\d.]+ ms)\s*$", "warmup"),
@@ -423,7 +472,8 @@ def split_legacy_result(result):
             for table in result.tables:
                 if table.title == "sampling_statistics":
                     rows = [row for row in table.rows if
-                            (isinstance(row[0], dict) and row[0].get("key") == "dependent_read") == latency]
+                            (isinstance(row[0], dict) and row[0].get("key") in
+                             {"dependent_read", "dependent_write", "dependent_copy"}) == latency]
                     if rows:
                         part.tables.append(Table(table.title, table.columns, rows))
             # Very old bandwidth-only archives contain no latency evidence.

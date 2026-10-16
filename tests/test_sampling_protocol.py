@@ -46,10 +46,10 @@ class SamplingProtocolTests(unittest.TestCase):
         run = subprocess.run([str(self.even), "even"], check=True, capture_output=True, text=True, timeout=3)
         self.assertEqual(list(map(float, run.stdout.split())), [0, 6, 1, 101.5, 100, 103])
 
-    def test_module_defaults_are_cache5_compute20_and_alu_float50(self):
+    def test_module_defaults_are_cache5_compute10_and_alu_float10(self):
         cc = shlex.split(os.environ.get("CC", "cc"))
         for module, expected in (("cache_hierarchy", 5), ("memory_bandwidth", 20),
-                                 ("cpu_alu", 50), ("cpu_float", 50), ("cpu_branch", 20)):
+                                 ("cpu_alu", 10), ("cpu_float", 10), ("cpu_branch", 20)):
             output = subprocess.check_output([*cc, "-dM", "-E", "-std=c11", "-pthread",
                                               str(ROOT / f"src/test_{module}.c")], text=True)
             macros = dict(re.findall(r"^#define (\w+) ([^\n]+)$", output, re.M))
@@ -58,4 +58,4 @@ class SamplingProtocolTests(unittest.TestCase):
                 value = macros[value]
             self.assertEqual(int(value), expected, module)
         output = subprocess.check_output([*cc, "-dM", "-E", str(ROOT / "src/compute_kernel.h")], text=True)
-        self.assertRegex(output, r"#define CM_REPEATS 20\b")
+        self.assertRegex(output, r"#define CM_REPEATS 10\b")

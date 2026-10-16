@@ -14,6 +14,7 @@ Smoke、sanity、regression 是可选开发检查，不是用户跑分层级。
 | `cpu_float` | CPU 浮点与 SIMD 运算 | cpu |
 | `cpu_branch` | 分支预测 | cpu |
 | `cpu_multi` | 多核吞吐与扩展性 | cpu |
+| `cpu_architecture` | 指令／内存实测、数据卡片与概念架构图 | cpu |
 
 `tests.json` 是统一注册表，供模块选择和报告文件名解析使用。
 
@@ -56,7 +57,8 @@ python3 run_benchmarks.py --module inter_core --timeout 3600
 均在 HTML 中标记，并令命令返回非零退出码；其余选中的模块仍继续执行。
 Ctrl-C 会停止当前进程组、标记剩余模块跳过，并尝试生成部分 HTML，返回 130。
 
-macOS 精确 CPU-ID 绑核/核间矩阵、Linux PMU 不可用；ComputeMark 使用有记录的 QoS 策略。
+macOS 精确 CPU-ID 绑核／严格核间矩阵仍不可用；Apple Silicon 有独立实验性观察协议。
+macOS ComputeMark 使用有记录的 QoS 策略，不保证 P 核。PMU 可用性取决于平台和权限。
 `python3 run_benchmarks.py --system-info` 只查询硬件/大小核信息，不启动任何基准测试。
 
 HTML 表格与内联 SVG 仅需 Python 标准库，包括核间热图和多线程扩展曲线。
@@ -215,7 +217,33 @@ standard-library-only workflow (`python -S`, 17/17, 4.265 s) and storage with th
 new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
 `/tmp/memorytest-oct15-stdlib-workflow.log`, `/tmp/memorytest-oct15-stdlib-storage.log`.
 
-### Repeat sampling and independently selectable tasks (diagnostic-v3)
+### Expanded diagnostics and shorter sampling (2026-10-16)
+
+- Current counts: cache 5; memory/branch/Linux intercore 20; ALU/FP/ComputeMark 10;
+  architecture and reported experimental macOS CPU pairs 10. Calibration, warmup,
+  ordered raw data, drift checks and the ten-percent exclusion cap remain enabled.
+- Architecture arithmetic is checked against independent modular-integer and exact
+  rational references; compiled payload streams and bounded native end-to-end reports
+  are checked. Cache metadata is compared to direct Linux sysfs entries. Missing or
+  corrupt raw evidence is rejected before publication. `/dev/full` checks audit I/O failure.
+- Ordered memory write/copy uses a hand-authored five-node cycle and full payload
+  comparison, including deliberate corruption. Latency-only allocates two arrays and
+  creates no bandwidth workers. Shared cache tests assert one five-point scan, identical
+  audit records, both statuses on failure and no duplicated duration.
+- The observed-intercore protocol uses simulated sparse CPU IDs for failure/cleanup
+  tests: same-CPU, migration, timeout, thread/QoS/probe failure and failed evidence writes.
+  These tests are NOT Apple CPU-ID ABI validation. Native Mac checks accept valid raw
+  coverage or explicit unsupported; a missing pair is never filled or clustered.
+- SMART tests cover exact 128-bit NVMe GB conversion, partial extension-log failure
+  with valid health data, diagnostic messages and bilingual summary UI.
+- Local joint core/protocol acceptance: **95 discovered, 89 passed, 6 skips, 33.316 s**,
+  `build/expanded-diagnostics-acceptance.log`. After evidence/provenance tightening:
+  **34/34 passed, 13.284 s**, `build/final-evidence-acceptance.log` (overlaps the earlier suite).
+  Desktop/SMART acceptance, final native build and CI results are recorded separately.
+  No whole-machine memory/cache benchmark, new privilege operation or unbounded stress
+  run is part of these checks; bounded kernel fixtures are not performance results.
+
+### Repeat sampling and independently selectable tasks (diagnostic-v3, historical 2026-10-15)
 
 - Defaults: cache **5**, memory/branch/intercore/ComputeMark **20**, ALU/FP **50**.
   `test_sampling_protocol.py` checks compiled module defaults. Native cache, memory,

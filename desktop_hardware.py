@@ -19,7 +19,7 @@ MAX_OUTPUT = 2_000_000
 
 def public_snapshot(snapshot, show_serials=False):
     result = copy.deepcopy(snapshot)
-    operational = {"smartctl_missing", "smart_read_error", "smart_standby", "hardware_read_failed", "hardware_no_devices", "hardware_permission_denied"}
+    operational = {"smartctl_missing", "smart_read_error", "smart_partial_read", "smart_standby", "hardware_read_failed", "hardware_no_devices", "hardware_permission_denied"}
     result["notices"] = [key for key in result.get("notices", []) if key in operational]
     for dev in result.get("devices", []):
         dev["notices"] = [key for key in dev.get("notices", []) if key in operational]
@@ -270,7 +270,7 @@ class HardwarePage(QWidget):
         index = self.selector.currentIndex()
         dev = devs[index] if 0 <= index < len(devs) else None
         notices = set((self.snapshot or {}).get("notices", []) + (dev.get("notices", []) if dev else []))
-        for key in ("smartctl_missing", "smart_read_error", "smart_standby", "hardware_permission_denied", "hardware_read_failed"):
+        for key in ("smartctl_missing", "smart_read_error", "smart_partial_read", "smart_standby", "hardware_permission_denied", "hardware_read_failed"):
             if key not in notices:
                 continue
             notice = label(tr(key, self.window.language), "status")
@@ -332,7 +332,7 @@ class HardwarePage(QWidget):
         basic = QTabWidget()
         basic.setObjectName("disk_basic_tabs")
         basic.setMinimumWidth(0)
-        basic.setFixedHeight(148)
+        basic.setFixedHeight(180)
         basic.setStyleSheet("QTabBar::tab { padding: 6px 10px; }")
         health = dev.get("health", "smart_unknown")
         sections = copy.deepcopy(dev.get("groups", []))

@@ -37,7 +37,7 @@ MODULE_ARGS = $(foreach m,$(MODULE) $(MODULES),--module "$(m)") $(if $(CATEGORY)
 
 # Test categories
 MEMORY_TESTS = test_cache_hierarchy test_memory_bandwidth test_inter_core
-CPU_TESTS = test_cpu_alu test_cpu_float test_cpu_branch test_cpu_multi
+CPU_TESTS = test_cpu_alu test_cpu_float test_cpu_branch test_cpu_multi test_cpu_architecture
 ALL_TESTS = $(MEMORY_TESTS) $(CPU_TESTS)
 
 # Common source modules (split from monolithic common.c).
@@ -198,10 +198,10 @@ $(BUILD_DIR):
 $(BUILD_DIR)/test_cache_hierarchy: $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cache_hierarchy.c $(COMMON_SRCS) -lm $(LDFLAGS)
 
-$(BUILD_DIR)/test_memory_bandwidth: $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS) | $(BUILD_DIR)
+$(BUILD_DIR)/test_memory_bandwidth: $(SRC_DIR)/test_memory_bandwidth.c $(SRC_DIR)/memory_latency.h $(SRC_DIR)/memory_kernels.h $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_memory_bandwidth.c $(COMMON_SRCS) $(LDFLAGS)
 
-$(BUILD_DIR)/test_inter_core: $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS) | $(BUILD_DIR)
+$(BUILD_DIR)/test_inter_core: $(SRC_DIR)/test_inter_core.c $(SRC_DIR)/intercore_macos.h $(SRC_DIR)/intercore_observed.h $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_inter_core.c $(COMMON_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/test_cpu_alu: $(SRC_DIR)/test_cpu_alu.c $(COMMON_SRCS) | $(BUILD_DIR)
@@ -212,6 +212,9 @@ $(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) | $(BUIL
 
 $(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) $(LDFLAGS)
+
+$(BUILD_DIR)/test_cpu_architecture: $(SRC_DIR)/test_cpu_architecture.c $(SRC_DIR)/architecture_kernels.h $(SRC_DIR)/memory_latency.h $(SRC_DIR)/memory_kernels.h $(COMMON_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_architecture.c $(COMMON_SRCS) -lm $(LDFLAGS)
 
 .PHONY: force-compute-build
 # Rebuild to capture the actual compiler/profile; never reuse a native/old v1 binary.

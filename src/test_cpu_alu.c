@@ -9,7 +9,7 @@
 
 #include "common.h"
 #include "util.h"
-#define BENCH_DEFAULT_SAMPLES 50
+#define BENCH_DEFAULT_SAMPLES 10
 #include "bench_protocol.h"
 #include <stdlib.h>
 #include <string.h>

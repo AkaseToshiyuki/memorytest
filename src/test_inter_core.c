@@ -38,7 +38,10 @@
 #include <sched.h>
 #endif
 
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+#include "intercore_macos.h"
+int main(int argc, char **argv) { init_platform_layer(); return observed_main(argc, argv); }
+#elif defined(__APPLE__) || defined(_WIN32)
 /* Affinity tags are not CPU IDs. A per-core matrix without verified pinning
  * would mislabel scheduler migrations as inter-core hardware latency. */
 int main(void) {

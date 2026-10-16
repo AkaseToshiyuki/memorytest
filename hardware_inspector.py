@@ -23,7 +23,7 @@ import time
 import psutil
 from benchmark_registry import ROOT
 from runtime_permissions import is_administrator
-from smart_inventory import exact_value, smart_tables
+from smart_inventory import exact_value, nvme_gb, smart_tables
 
 KINDS = ("cpu", "gpu", "dram", "disk")
 LIMIT = 2_000_000
@@ -475,11 +475,21 @@ def smart_device(data, identity, exit_code=0):
     bits = bits if isinstance(bits, int) and bits >= 0 else 0
     critical = nvme.get("critical_warning", 0)
     critical = critical if isinstance(critical, int) else 0
+    # Bit 2 means *a* command failed, not that all SMART data is unreadable.
+    # Apple NVMe can return its health log while rejecting an extended log.
+    readable = (type(status) is bool or bool(nvme) or
+                bool(data.get("ata_smart_attributes", {}).get("table")) or
+                bool(data.get("scsi_error_counter_log")))
+    partial = bool(bits & 4 and not bits & 3 and readable)
     if status is False or bits & 24 or critical:
         health = "smart_failed"
     elif bits & 224:
         health = "smart_warning"
-    elif bits & 7:
+    elif bits & 3:
+        health = "smart_unknown"
+    elif partial and status is True:
+        health = "smart_partial"
+    elif bits & 4:
         health = "smart_unknown"
     elif status is True:
         health = "smart_passed"
@@ -488,10 +498,10 @@ def smart_device(data, identity, exit_code=0):
     raw_attributes = data.get("ata_smart_attributes", {}).get("table", [])
     # Surface common bad-sector counters, but never turn other vendor-specific
     # raw counters into a universal life percentage.
-    if health == "smart_passed" and any(row.get("id") in {5, 197, 198} and
+    if health in {"smart_passed", "smart_partial"} and any(row.get("id") in {5, 197, 198} and
             isinstance(row.get("raw", {}).get("value"), int) and row["raw"]["value"] > 0 for row in raw_attributes):
         health = "smart_warning"
-    if health == "smart_passed" and ((isinstance(nvme.get("percentage_used"), (int, float)) and nvme["percentage_used"] >= 100)
+    if health in {"smart_passed", "smart_partial"} and ((isinstance(nvme.get("percentage_used"), (int, float)) and nvme["percentage_used"] >= 100)
                                     or (isinstance(nvme.get("media_errors"), int) and nvme["media_errors"] > 0)):
         health = "smart_warning"
     capacity = data.get("user_capacity", {}).get("bytes") or data.get("nvme_total_capacity")
@@ -501,6 +511,8 @@ def smart_device(data, identity, exit_code=0):
                     protocol=data.get("device", {}).get("protocol"), device_path=identity,
                     rotation_rate=with_unit(data.get("rotation_rate"), "RPM")),
               group("smart_summary", "smartctl / device", health=health, temperature=with_unit(temp, "°C"),
+                    total_read=nvme_gb(nvme, "data_units_read"),
+                    total_written=nvme_gb(nvme, "data_units_written"),
                     power_on_hours=exact_value(data.get("power_on_time", {}), "hours", exact_value(nvme, "power_on_hours")),
                     power_cycles=exact_value(data, "power_cycle_count", exact_value(nvme, "power_cycles")),
                     percentage_used=with_unit(nvme.get("percentage_used"), "%"),
@@ -509,7 +521,7 @@ def smart_device(data, identity, exit_code=0):
     tables = smart_tables(data)
     notes = ["smart_not_guarantee"]
     if bits & 7:
-        notes.append("smart_read_error")
+        notes.append("smart_partial_read" if partial else "smart_read_error")
     dev = device(identity, data.get("model_name") or data.get("product") or identity, groups, tables, notes)
     dev["health"] = health
     return dev

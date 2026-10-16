@@ -222,7 +222,8 @@ class WindowTests(unittest.TestCase):
         with patch.object(self.window, "begin") as begin:
             self.window.run_all.click()
         selected = begin.call_args.args[0]
-        expected = set(self.window.modules) - ({"inter_core"} if sys.platform in {"darwin", "win32"} else set())
+        from desktop_results import supported
+        expected = {name for name in self.window.modules if supported(name)}
         self.assertEqual(set(selected), expected)
 
     def test_tab_displays_tables_and_validated_cpu_points(self):

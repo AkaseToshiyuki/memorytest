@@ -134,7 +134,7 @@ class DiagnosticKernelTests(unittest.TestCase):
                 path = reports / f"cpu_{kind}_report.md"
                 self.assertIsNone(validate_report(path))
                 text = path.read_text()
-                count = 20 if kind == "branch" else 50
+                count = 20 if kind == "branch" else 10
                 self.assertIn(f"- Samples: {count}", text)
                 audit = json.loads((reports / f"cpu_{kind}_samples.json").read_text())
                 self.assertEqual(audit["protocol"], "diagnostic-v3")

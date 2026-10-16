@@ -6,7 +6,7 @@
 
 enum { STREAM_READ, STREAM_WRITE, STREAM_COPY, STREAM_SCALE, STREAM_ADD,
        STREAM_TRIAD, STREAM_STRIDE64, STREAM_STRIDE256, STREAM_OPERATIONS };
-static const char *stream_names[STREAM_OPERATIONS] = {
+static const char *const stream_names[STREAM_OPERATIONS] = {
     "Read", "Write", "Copy", "Scale", "Add", "Triad", "Stride 64B", "Stride 256B"
 };
 

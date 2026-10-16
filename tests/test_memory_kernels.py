@@ -73,13 +73,28 @@ class MemoryKernelTests(unittest.TestCase):
                         self.assertGreater(rate, 0)
                         self.assertAlmostEqual(rate, payload / (milliseconds * 1000), delta=rate * 2e-6)
                 if "ns/op" in headers:
-                    ns, milliseconds, loads = map(float, rows[0][2:5])
-                    self.assertGreater(ns, 0)
-                    self.assertAlmostEqual(ns, milliseconds * 1e6 / loads, delta=1e-6)
+                    self.assertEqual(len(rows), 3)
+                    self.assertEqual([float(row[1].split()[0]) for row in rows], [.125, .125, .25])
+                    for row in rows:
+                        ns, milliseconds, loads = map(float, row[2:5])
+                        self.assertGreater(ns, 0)
+                        self.assertAlmostEqual(ns, milliseconds * 1e6 / loads, delta=1e-6)
             model = build_module("memory_bandwidth", reports)
             self.assertEqual(model.status, "passed")
             self.assertEqual(len(model.charts[0].labels), 8)
             self.assertEqual(model.charts[1].title, "memory_latency")
+
+    def test_read_write_copy_on_independently_defined_cycle_and_all_payloads(self):
+        run = subprocess.run([str(self.binary), "latency_reference"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        for line in run.stdout.splitlines():
+            operation, words, cursor, *payload = map(int, line.split())
+            self.assertEqual(cursor, [0, 3, 1, 4, 2][768 % 5])
+            expected = []
+            for node, next_node in enumerate([3, 4, 0, 1, 2]):
+                expected += [next_node] + [(node * 17 + word) ^ (0x5a5aa5a5 if operation == 1 else 0x13579bdf)
+                                           for word in range(1, words)]
+            self.assertEqual(payload, expected)
 
     def test_partial_creation_and_allocation_fail_without_report_or_hang(self):
         for mode in ("creation", "allocation"):
@@ -89,7 +104,7 @@ class MemoryKernelTests(unittest.TestCase):
                 self.assertFalse((Path(folder) / "reports/memory_bandwidth_report.md").exists())
 
     def test_separate_modes_and_raw_timing_evidence(self):
-        for mode, count in (("bandwidth", 8), ("latency", 1)):
+        for mode, count in (("bandwidth", 8), ("latency", 3)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as folder:
                 run = subprocess.run([str(self.binary), mode + "_only"], cwd=folder,
                                      capture_output=True, text=True, timeout=15)

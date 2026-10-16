@@ -105,6 +105,8 @@ jobs:
           python -m unittest discover -s tests -p test_sample_statistics.py -v
           python -m unittest discover -s tests -p test_memory_kernels.py -v
           python -m unittest discover -s tests -p test_intercore_protocol.py -v
+          python -m unittest discover -s tests -p test_intercore_observed.py -v
+          python -m unittest discover -s tests -p test_architecture.py -v
           python -m unittest discover -s tests -p test_cache_report.py -v
           python -m unittest discover -s tests -p test_presentation.py -v
           python -m unittest discover -s tests -p test_stress.py -v

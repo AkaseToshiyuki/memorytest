@@ -13,16 +13,46 @@ static int test_create(pthread_t *thread, const void *attributes, void *(*entry)
 #undef pthread_create
 #undef malloc
 
+static int latency_reference(void) {
+    uintptr_t source[5 * 64 / sizeof(uintptr_t)], destination[5 * 64 / sizeof(uintptr_t)];
+    /* Hand-authored cycle independent of chain_build: 0 -> 3 -> 1 -> 4 -> 2 -> 0. */
+    const unsigned next[] = {3, 4, 0, 1, 2};
+    const size_t words = 64 / sizeof(uintptr_t);
+    for (unsigned op = 0; op < MEMORY_LAT_OPERATIONS; ++op) {
+        MemoryLatency work = {{source, sizeof(source), (uintptr_t)source}, destination, op};
+        memory_latency_initialize(&work);
+        for (unsigned node = 0; node < 5; ++node)
+            source[node * words] = (uintptr_t)(source + next[node] * words);
+        if (memory_latency_work(&work, 3) || memory_latency_validate(&work)) return 20;
+        printf("%u %zu %zu", op, words, (size_t)(work.chain.cursor - (uintptr_t)source) / 64);
+        for (unsigned node = 0; node < 5; ++node) {
+            printf(" %zu", (size_t)(source[node * words] - (uintptr_t)source) / 64);
+            for (size_t word = 1; word < words; ++word)
+                printf(" %llu", (unsigned long long)source[node * words + word]);
+        }
+        putchar('\n');
+        source[2 * words + 1] ^= 1;
+        if (!memory_latency_validate(&work)) return 21;
+        source[2 * words + 1] ^= 1;
+        if (op == MEMORY_LAT_COPY) {
+            destination[3 * words + 2] ^= 1;
+            if (!memory_latency_validate(&work)) return 22;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     global_system_config.detected = global_cache_config.detected = 1;
     global_system_config.cpu_cores = global_system_config.cpu_cores_physical = 2;
     if (argc > 1) {
+        if (!strcmp(argv[1], "latency_reference")) return latency_reference();
         fail_allocation = !strcmp(argv[1], "allocation");
         fail_creation = !strcmp(argv[1], "creation");
         if (!strcmp(argv[1], "latency_only")) {
             memory_mode = 2;
             int status = run_memory_bandwidth_test(128 * KB, 2);
-            if (allocations != 1 || creations != 0) return 15;
+            if (allocations != 2 || creations != 0) return 15;
             return status;
         }
         if (!strcmp(argv[1], "bandwidth_only")) memory_mode = 1;
