@@ -80,13 +80,17 @@ class BackendResourceContracts(unittest.TestCase):
 
     def test_resource_validation_missing_pairs_allocation_and_noise(self):
         from backend_resource_analysis import read_resources
-        for mode in ("missing", "duplicate", "pair", "zero", "layout"):
+        for mode in ("missing", "duplicate", "pair", "zero", "layout", "short", "retry"):
             raw = resource_fixture()
             if mode == "missing": raw["records"].pop()
             if mode == "duplicate": raw["records"][-1] = raw["records"][0]
             if mode == "pair": raw["records"][0]["blocks"] += 1
             if mode == "zero": raw["records"][0]["elapsed_ns"][0] = 0
             if mode == "layout": raw["scratch_bytes"] = 32768
+            if mode == "short":
+                raw["records"][0]["elapsed_ns"] = [249999]*10
+                raw["records"][1]["elapsed_ns"] = [250000]*10
+            if mode == "retry": raw["records"][0]["duration_retries"] = 1
             with self.subTest(mode=mode), self.assertRaises(ValueError): read_resources(raw)
         raw = resource_fixture(); raw["records"][0]["elapsed_ns"][0] *= 2
         self.assertEqual(read_resources(raw)["candidates"]["rob_nop"]["status"], "unstable")
@@ -416,11 +420,11 @@ class ArchitectureNativeTests(unittest.TestCase):
         run = subprocess.run([str(self.binary), "report"], cwd=work, capture_output=True, text=True, timeout=90)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         raw = json.loads((work / "reports/cpu_architecture.json").read_text())
-        evidence = read_architecture(raw)
         output = ROOT / "build/architecture-evidence"
         output.mkdir(parents=True, exist_ok=True)
         shutil.copy2(work / "reports/cpu_architecture.json", output / "cpu_architecture.json")
         shutil.copy2(work / "reports/cpu_architecture_report.md", output / "cpu_architecture_report.md")
+        evidence = read_architecture(raw)
         self.assertEqual(set(evidence["metrics"]), set(PROBES))
         result = build_module("cpu_architecture", work / "reports")
         self.assertEqual(result.status, "passed")

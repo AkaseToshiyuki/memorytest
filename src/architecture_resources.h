@@ -115,7 +115,7 @@ typedef struct {
     ResourceRing *a, *b;
     uintptr_t key;
     void *scratch;
-    unsigned calls;
+    unsigned calls, duration_retries;
     uint64_t elapsed[2][BENCH_SAMPLES];
 } ResourceWork;
 static int resource_work(void *context, uint64_t repetitions) {
@@ -129,6 +129,23 @@ static int resource_work(void *context, uint64_t repetitions) {
         work->elapsed[serial][slot] = stop-start;
     }
     ++work->calls; return 0;
+}
+static int resource_samples_long_enough(const ResourceWork *work, uint64_t target) {
+    for (unsigned i = 0; i < BENCH_SAMPLES; ++i) {
+        if (!work->elapsed[0][i] || !work->elapsed[1][i] || work->elapsed[0][i]+work->elapsed[1][i] < target/2) return 0;
+    }
+    return 1;
+}
+static int resource_measure(ResourceWork *work, BenchMeasurement *result, uint64_t target, uint64_t warmup) {
+    /* The generic protocol times the entire callback. On preempted/virtual
+     * hosts, time outside the two inner intervals can inflate calibration.
+     * Retain the inner-duration contract: increase work, never relax it. */
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        work->duration_retries = attempt;
+        if (bench_measure_target(resource_work, work, result, target << (2*attempt), warmup)) return -1;
+        if (resource_samples_long_enough(work, target)) return 0;
+    }
+    fputs("Resource inner samples remain below the duration floor.\n", stderr); return -1;
 }
 static int resource_report(FILE *json, ReportContext *report) {
     const uintptr_t key = (uintptr_t)UINT64_C(0x9e3779b97f4a7c15);
@@ -160,10 +177,10 @@ static int resource_report(FILE *json, ReportContext *report) {
         ResourceWork work = {.definition = def, .a = &a, .b = &b, .key = key, .scratch = scratch};
         BenchMeasurement result;
         printf("Resource window: %s %u depth %u\n", def->family, def->count, def->depth); fflush(stdout);
-        if (bench_measure_target(resource_work, &work, &result, target, warmup)) { failed = 1; break; }
+        if (resource_measure(&work, &result, target, warmup)) { failed = 1; break; }
         for (unsigned serial = 0; serial < 2; ++serial) {
-            fprintf(json, "%s{\"family\":\"%s\",\"depth\":%u,\"count\":%u,\"serial\":%u,\"blocks\":%llu,\"elapsed_ns\":[",
-                index || serial ? "," : "", def->family, def->depth, def->count, serial, (unsigned long long)result.repetitions);
+            fprintf(json, "%s{\"family\":\"%s\",\"depth\":%u,\"count\":%u,\"serial\":%u,\"blocks\":%llu,\"duration_retries\":%u,\"elapsed_ns\":[",
+                index || serial ? "," : "", def->family, def->depth, def->count, serial, (unsigned long long)result.repetitions, work.duration_retries);
             for (unsigned i = 0; i < BENCH_SAMPLES; ++i) {
                 uint64_t ns = work.elapsed[serial][(work.calls+i)%BENCH_SAMPLES];
                 if (!ns) failed = 1;

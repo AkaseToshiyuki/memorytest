@@ -273,6 +273,17 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   HTML was generated from the same model; the local WebEngine module was absent,
   so this v4 check does not claim browser rendering. Six-platform native build
   and installer results must be recorded against the new commit separately.
+  Native CI subsequently found a macOS cache-table mapping error and Darwin
+  `.rept` immediate expansion; both were corrected. Commit `d007dd3` passed
+  all four portability jobs (Linux GCC/Clang, macOS ARM64/x86-64), run
+  `38871756942`. Follow-up opcode/arithmetic/bounds checks passed **3/3, 4.568 s**
+  (`build/architecture-v4-darwin-assembly-fix.log`). The macOS ARM CI report
+  also rendered **20 charts** in both native preview configurations.
+  A short VM sample exposed outer-callback versus inner-pair calibration time.
+  Resource sampling now retries bounded batches at increased work while keeping
+  the same inner duration floor; retry counts are stored. Boundary/reader/native
+  follow-up: **3/3, 15.641 s**, `build/architecture-v4-inner-duration-fix.log`.
+  Failed evidence parsing now preserves the raw CI files before validation.
   Native CI caught Mach-O function-atom relocation invalidating internal-only
   alignment; the implementation now aligns both function and loop to the native
   Mac page size. The local layout/pipeline follow-up passed **2/2, 4.434 s**

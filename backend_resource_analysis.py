@@ -76,13 +76,15 @@ def read_resources(data, isa="x86_64-sse2"):
         if not isinstance(key[0], str) or any(type(n) is not int for n in key[1:]) or key not in expected or key in seen:
             raise ValueError("invalid resource work count")
         ns, stable = timing(row)
+        retries = row.get("duration_retries", 0)
+        if type(retries) is not int or not 0 <= retries <= 2: raise ValueError("invalid resource duration retries")
         seen[key] = dict(row, ns=ns, stable=stable)
     records = []
     for family, counts in families.items():
         for depth in (1, 2):
             for count in counts:
                 a, b = (seen[family, depth, count, s] for s in (0, 1))
-                if a["blocks"] != b["blocks"] or min(x+y for x, y in zip(a["elapsed_ns"], b["elapsed_ns"])) < target//2:
+                if a["blocks"] != b["blocks"] or a.get("duration_retries", 0) != b.get("duration_retries", 0) or min(x+y for x, y in zip(a["elapsed_ns"], b["elapsed_ns"])) < target//2:
                     raise ValueError("unmatched resource pair")
                 ratios = [x/y for x, y in zip(a["elapsed_ns"], b["elapsed_ns"])]
                 stats = summarize(ratios)

@@ -3,6 +3,13 @@
 #undef main
 #ifdef ARCH_KERNEL_ISA
 static int resource_reference_check(void) {
+    ResourceWork timing = {0};
+    for (unsigned i = 0; i < BENCH_SAMPLES; ++i) { timing.elapsed[0][i] = 250000; timing.elapsed[1][i] = 250000; }
+    if (!resource_samples_long_enough(&timing, 1000000)) return 36;
+    --timing.elapsed[1][3];
+    if (resource_samples_long_enough(&timing, 1000000)) return 37;
+    timing.elapsed[1][3] = 500000; timing.elapsed[0][3] = 0;
+    if (resource_samples_long_enough(&timing, 1000000)) return 38;
     ResourceRing a = {0}, b = {0};
     uintptr_t key = (uintptr_t)UINT64_C(0x9e3779b97f4a7c15);
     if (resource_ring_init(&a, 65536, key, 1234567) || resource_ring_init(&b, 65536, key, 7654321)) return 30;
