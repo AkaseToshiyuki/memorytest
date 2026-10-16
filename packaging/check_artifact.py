@@ -101,6 +101,19 @@ def check_native_readers(binary):
     return result
 
 
+def detach_disk_image(mount):
+    """Allow transient Finder/indexer handles to close; never force unmount."""
+    for attempt in range(5):
+        try:
+            subprocess.run(["hdiutil", "detach", mount], check=True,
+                           capture_output=True, text=True, timeout=15)
+            return
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 16 or attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def check_install_payloads(info, data):
     """Test the actual container contents, not only PyInstaller's staging tree."""
     for asset in data["assets"]:
@@ -131,7 +144,7 @@ def check_install_payloads(info, data):
                                    env=cocoa_env, check=True, timeout=30)
                 finally:
                     for mount in mounts:
-                        subprocess.run(["hdiutil", "detach", mount], check=True)
+                        detach_disk_image(mount)
             elif package.suffix == ".zip":
                 with zipfile.ZipFile(package) as archive:
                     archive.extractall(root)  # archive just created by this build

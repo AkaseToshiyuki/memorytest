@@ -7,7 +7,7 @@
 [构建状态](https://github.com/AkaseToshiyuki/memorytest/actions) ·
 [测量方法](MEASUREMENT.md) · [开发与测试](TEST_LAYERS.md)
 
-当前源码版本：**0.1.1**。正式安装包以 Releases 页面为准。
+当前版本：**0.1.1**。安装包见 Releases 页面。
 
 ## 功能
 
@@ -16,7 +16,7 @@
 | 缓存 | 带宽、依赖链延迟、层级检测 |
 | 内存 | 读写／复制／Scale／Add／Triad／步长带宽，读写／复制延迟 |
 | 核心性能 | 整数、浮点、分支、核间通信、ComputeMark 单线程／多线程评分 |
-| 核心架构分析 | 取指与解码、BTB 布局、双锚点资源窗口、执行竞争与独立写入吞吐 |
+| 核心架构分析 | 取指与解码、分支预测、资源窗口与指令吞吐 |
 | 小工具 | CPU、GPU、DRAM 参数，磁盘 SMART，压力测试与实时监控 |
 
 测试可单独运行或组合运行。缓存延迟与层级检测同时选中时共用一次扫描。
@@ -36,7 +36,7 @@
 - Windows：运行安装程序，或解压 ZIP 后打开 `MemoryTest/MemoryTest.exe`。
 - Linux：用系统包管理器安装 DEB／RPM，或解压后运行 `MemoryTest/MemoryTest`。
 
-预览包未作发行签名／公证，首次启动可能出现系统提示。
+安装包未作发行签名／公证，首次启动可能出现系统提示。
 
 ## 源码运行
 
