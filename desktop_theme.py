@@ -36,13 +36,16 @@ QLabel[role="title"] {{ font-size: 24px; font-weight: 600; }}
 QLabel[role="section"] {{ font-size: 15px; font-weight: 600; }}
 QLabel[role="muted"], QLabel[role="status"], QLabel[role="version"] {{ color: {p['muted']}; }}
 QLabel[role="version"] {{ font-size: 11px; }}
-QLabel[role="metric"] {{ font-size: 23px; font-weight: 600; }}
+QLabel[role="metric"] {{ font-size: 29px; font-weight: 600; }}
+QLabel[role="metric-label"] {{ color: {p['muted']}; font-size: 12px; }}
+QLabel[role="metric-unit"] {{ color: {p['muted']}; font-size: 12px; }}
 QLabel[tone="passed"], QLabel[tone="running"] {{ color: {p['success']}; }}
 QLabel[tone="running"][pulse="off"] {{ color: {p['muted']}; }}
 QLabel[tone="failed"], QLabel[tone="invalid_report"], QLabel[tone="build_failed"], QLabel[tone="timeout"] {{ color: {p['error']}; }}
 QLabel[tone="unsupported"], QLabel[tone="unavailable"] {{ color: {p['warning']}; }}
 QLabel[tone="queued"], QLabel[tone="not_run"], QLabel[tone="skipped"], QLabel[tone="interrupted"] {{ color: {p['muted']}; }}
-QFrame[role="card"] {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; }}
+QFrame[role="card"] {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 8px; }}
+QFrame[role="metric-card"] {{ background: {p['base']}; border: 1px solid {p['border']}; border-radius: 3px; }}
 QTabWidget::pane {{ border: none; border-top: 1px solid {p['border']}; }}
 QTabBar::tab {{ background: transparent; color: {p['muted']}; padding: 12px 13px; border-bottom: 2px solid transparent; }}
 QTabBar::tab:selected {{ color: {p['text']}; border-bottom: 2px solid {p['accent']}; }}
@@ -62,7 +65,7 @@ QSpinBox::up-arrow, QSpinBox::down-arrow {{ width: 0; height: 0; }}
 QPushButton[role="stress-tab"] {{ background: transparent; border: none; border-left: 1px solid {p['border']}; border-radius: 0; padding: 10px 14px; }}
 QPushButton[role="stress-tab"]:checked {{ color: {p['accent']}; border-bottom: 2px solid {p['accent']}; }}
 QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']}; selection-background-color: {p['selection']}; }}
-QHeaderView::section {{ background: {p['button']}; color: {p['text']}; border: none; padding: 8px; }}
+QHeaderView::section {{ background: {p['button']}; color: {p['muted']}; border: none; border-bottom: 1px solid {p['border']}; padding: 8px 10px; font-weight: 600; }}
 QTableView {{ gridline-color: {p['border']}; }}
 QCheckBox {{ spacing: 8px; min-height: 22px; }}
 QCheckBox::indicator, QTableView::indicator {{ width: 20px; height: 20px; }}
@@ -74,7 +77,10 @@ QScrollBar:horizontal {{ background: {p['background']}; height: 10px; }}
 QScrollBar::handle {{ background: {p['border']}; border-radius: 4px; min-height: 24px; min-width: 24px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QToolTip {{ background: {p['surface']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 5px; }}
-""")
+""" + "\n".join(
+        f'QFrame[role="metric-card"][category="{key}"] {{background: {p[key+"_fill"]}; border-color: {p[key]};}}\n'
+        f'QFrame[role="card"][category="{key}"] {{border-top: 2px solid {p[key]};}}'
+        for key in ("frontend", "cache", "register", "compute", "memory")))
     app.setProperty("memorytestDarkTheme", theme == "dark")
 
 
@@ -84,9 +90,10 @@ def label(text, role):
     return widget
 
 
-def card():
+def card(category=None):
     widget = QFrame()
     widget.setProperty("role", "card")
+    if category: widget.setProperty("category", category)
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(16, 14, 16, 14)
     layout.setSpacing(10)

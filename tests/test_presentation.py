@@ -103,8 +103,8 @@ class ResultsTests(unittest.TestCase):
         for language in ("zh", "en"):
             html = module_html(model, language)
             self.assertIn("GB/s", html)
-            self.assertIn("<td>10</td>", html)
-            self.assertNotIn("<td>10,000</td>", html)
+            self.assertIn('<td class="numeric">10</td>', html)
+            self.assertNotIn('<td class="numeric">10,000</td>', html)
 
     def test_three_cache_parts_have_separate_numbers_and_localized_labels(self):
         from result_model import cache_parts
@@ -174,6 +174,10 @@ elements.theme.value='light';elements.theme.change();assert.equal(document.docum
             for key in ["text", "muted", "disabled"]:
                 a, b = sorted([luminance(palette[key]), luminance(palette["surface"])])
                 self.assertGreaterEqual((b+.05)/(a+.05), 4.5, (theme, key))
+            for category in ("frontend", "cache", "register", "compute", "memory"):
+                for key in ("text", "muted"):
+                    a, b = sorted([luminance(palette[key]), luminance(palette[category + "_fill"])])
+                    self.assertGreaterEqual((b+.05)/(a+.05), 4.5, (theme, category, key))
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

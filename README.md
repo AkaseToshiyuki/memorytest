@@ -14,6 +14,8 @@ acceptance; see the platform scope and comparability audit below.
 Desktop installation/builds: see [V0.1.0 desktop distributions](#v010-desktop-distributions).
 The source archives retain the CLI; installing the GUI is optional.
 
+Project engineering principles: [AGENTS.md](AGENTS.md).
+
 ## Quick Start
 
 ```bash
@@ -118,7 +120,7 @@ without hardware workloads. Details: [TEST_LAYERS.md](TEST_LAYERS.md)
 | `test_cpu_float` | Floating-point wall time (add, mul, FMA, SIMD dot product) |
 | `test_cpu_branch` | Branch predictor latency (always-taken, never-taken) |
 | `test_cpu_multi` | Multi-core scaling efficiency across thread counts |
-| `test_cpu_architecture` | Instruction/memory probes, evidence cards and conceptual architecture diagram; no inferred ROB/port counts |
+| `test_cpu_architecture` | BTB/code-footprint sweeps, core structure and instruction/memory evidence; no inferred physical widths or ROB/port counts |
 
 ## Build
 
@@ -383,7 +385,7 @@ python3 run_benchmarks.py --module cpu_alu  # 等价的直接入口
 | `test_cpu_float` | 浮点墙钟时间（加减乘、FMA、SIMD 点积） |
 | `test_cpu_branch` | 分支预测延迟（always-taken、never-taken） |
 | `test_cpu_multi` | 不同线程数下的多核扩展效率 |
-| `test_cpu_architecture` | 指令／内存探针、关键数据卡片和概念架构图；不推算 ROB／端口数量 |
+| `test_cpu_architecture` | BTB／指令工作集扫描、内核结构与指令／内存明细；物理宽度和 ROB／端口数量尚未测定 |
 
 ## 构建
 
@@ -679,9 +681,19 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   原生 x86-64 SSE2／AArch64 FP64 后端实测 12 项：NOP 流、整数加／乘、FP64 加／乘的
   单依赖链和八条独立链，以及 32 KiB 读／有序写、64 KiB 双数组有序复制。
   每项 10 样本、目标 50 ms、预热至少 10 ms；保存完整 `cpu_architecture.json`，从原始时间重算卡片、图和表。
-- 架构图借鉴前端／整数／访存／浮点／重命名退休的分区布局，不复制截图中的型号或数值。
-  实测量为 ns/op、显式有效指令 G instr/s 及独立链增益，不是 PMU IPC、时钟周期或解码宽度。
-  八条链不代表八个执行单元；ROB、调度器、物理寄存器和端口容量标为尚未测定。
+- `architecture-probes-v2` 增加静态前端扫描：128–32768 个直接跳转目标，间距 8／16／32 B；
+  128 B–256 KiB 的 NOP 指令工作集，x86-64 指令长度 1／4／8 B，AArch64 为 4 B。
+  每点 10 样本、目标 10 ms、预热至少 2 ms；静态汇编无需 JIT 或可写可执行内存。
+  连续三个稳定测点后出现至少 30% 的持续时延上升，并在至少两种间距的相同目标数区间重现，
+  才标记 BTB 容量候选区间；这是经验转折，未区分 BTB 层级、组相联冲突及其他前端资源。
+  不能据此认证物理总条目数；未出现可重复转折时保留原始曲线。
+- Linux 以线程级 `perf_event_open` 分组读取用户态实际周期／退休指令；多路复用样本不换算。
+  macOS 通过公开 `proc_pid_rusage(RUSAGE_INFO_V4)` 读取单线程进程的周期／退休指令，范围包含内核执行；
+  API 不支持或计数无效时留空。Windows 暂无对应计数后端。三个平台均可保存墙钟扫描数据。
+  有效载荷指令数除以实际周期得到实测指令供给，保留调用、返回、循环及读取计数器的开销。
+  此比值同时受取指、解码、微操作缓存、重命名及退休约束，不能独立确定取指／解码设计宽度。
+- 架构图分别显示 L1I、BTB、取指、解码、重命名、寄存器、调度、访存和退休。
+  ADD／MUL／内存探针移至明细。尚未独立测定的取指／解码宽度和 ROB、调度器、物理寄存器、端口容量保持空值。
   系统缓存信息单独标注：Linux 读取绑定 CPU 的 sysfs，Mac 为全局 sysctl 摘要，Windows 为各级最大实例；
   共享缓存不冒充每核容量，缺失值不使用猜测兜底。Linux 固定一个可用逻辑 CPU，Mac 仅验证 QoS，Windows 由系统调度。
 - 内存延迟扩展为依赖读取、64 B 有序写、64 B 有序复制，各 20 个正式样本。
@@ -700,9 +712,15 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   独立证据为 `inter_core_observed.json`，Linux 原协议不变；Intel Mac 和 Windows 核间后端仍不支持。
 
 方法参考：[LLVM exegesis 的依赖延迟／并行吞吐探针](https://llvm.org/docs/CommandGuide/llvm-exegesis.html)、
+[Cloudflare 的分支目标数／间距实验](https://blog.cloudflare.com/branch-predictor/)、
+[Apple XNU 资源计数结构](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h)、
 [hydroo 的 macOS 核间测量](https://github.com/hydroo/macos-core-to-core-latency)、
 [XNU 编号布局与 ABI 限制](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/os/tsd.h)。
 本项目独立实现并验证其工作计数；不宣称等同这些项目的成绩或完成 Apple Silicon 微架构逆向工程。
+
+桌面结果与离线报告共用分区配色：缓存为红棕色、寄存器／互连为青色、计算为紫色、访存为橄榄色；
+颜色表示模块类别，完成／错误状态继续使用独立标签。界面采用细边框、低饱和填充、突出数值的指标卡片、
+右对齐数值列和随宽度重排的卡片网格。深浅主题使用同一结构，中英文共享数据与图形布局。
 
 ### 独立测试入口与重复采样修订（diagnostic-v3，默认值更新于 2026-10-16）
 

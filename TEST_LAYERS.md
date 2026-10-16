@@ -14,7 +14,7 @@ Smoke、sanity、regression 是可选开发检查，不是用户跑分层级。
 | `cpu_float` | CPU 浮点与 SIMD 运算 | cpu |
 | `cpu_branch` | 分支预测 | cpu |
 | `cpu_multi` | 多核吞吐与扩展性 | cpu |
-| `cpu_architecture` | 指令／内存实测、数据卡片与概念架构图 | cpu |
+| `cpu_architecture` | BTB／指令工作集扫描、内核结构与指令／内存明细 | cpu |
 
 `tests.json` 是统一注册表，供模块选择和报告文件名解析使用。
 
@@ -226,6 +226,22 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   rational references; compiled payload streams and bounded native end-to-end reports
   are checked. Cache metadata is compared to direct Linux sysfs entries. Missing or
   corrupt raw evidence is rejected before publication. `/dev/full` checks audit I/O failure.
+- The v2 front-end scan checks emitted branch spacing and NOP lengths with disassembly,
+  complete scan grids, raw cycle-counter pairs, and conservative transition logic against
+  hand-calculated target-count and code-footprint cases. These checks validate the
+  implementation, not physical BTB capacity or fetch/decode width on an unknown CPU.
+- Reference-inspired result styling shares semantic colors between Qt and HTML, retains
+  numeric alignment, and reflows metric cards. Checks cover rendering, contrast, geometry
+  and state; no prose/wording regression checks are added.
+  Local v2 architecture checks: **9/9, 11.746 s** (`build/frontend-acceptance.log`);
+  sampling compatibility: **4/4, 0.348 s** (`build/frontend-sampling-acceptance.log`).
+  Style checks: **6/6, 28.941 s** (`build/reference-style-checks.log`), with later targeted
+  layout/numeric and disassembly/contrast checks passing **3/3** and **2/2** respectively
+  (`build/reference-style-final.log`, `build/frontend-final-invariants.log`; overlapping coverage).
+  The saved default Linux scan has 81 points, four unstable points, unavailable hardware
+  counters, and a 4096–6144-target candidate supported by 16/32-byte spacings. It is local
+  evidence only (`build/frontend-native/reports/cpu_architecture.json`). Native/browser
+  previews verify both themes and native narrow-window reflow; no physical width claim.
 - Ordered memory write/copy uses a hand-authored five-node cycle and full payload
   comparison, including deliberate corruption. Latency-only allocates two arrays and
   creates no bandwidth workers. Shared cache tests assert one five-point scan, identical

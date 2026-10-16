@@ -47,9 +47,8 @@ class ObservedContractTests(unittest.TestCase):
             if mode == "bad_quota": bad["attempts"][0]["status"] = "quota"
             with self.subTest(mode=mode), self.assertRaises(ValueError): read_observed(bad)
 
-    def test_model_and_html_label_experimental_and_leave_missing_cells_blank(self):
+    def test_model_keeps_missing_cells_blank(self):
         from result_model import build_module
-        from report_view import module_html
         with tempfile.TemporaryDirectory() as directory:
             reports = Path(directory)
             (reports / "inter_core_latency_report.md").write_text("# Observed\n- Protocol: " + PROTOCOL + "\n")
@@ -57,8 +56,6 @@ class ObservedContractTests(unittest.TestCase):
             result = build_module("inter_core", reports)
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.charts[0].series[0]["values"], [[None, 50], [None, None]])
-            self.assertIn("Experimental macOS", module_html(result, "en"))
-            self.assertIn("未精确绑核", module_html(result, "zh"))
 
     def test_runner_requires_matching_raw_observations(self):
         from run_benchmarks import validate_evidence

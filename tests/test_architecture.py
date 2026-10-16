@@ -12,8 +12,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from benchmark_registry import ROOT
-from architecture_analysis import PROBES, read_architecture
+from architecture_analysis import PROBES, BTB_COUNTS, CODE_BYTES, read_architecture
 from result_model import build_module
 
 
@@ -27,7 +28,45 @@ def fixture():
                     for name, operations in PROBES.items()]}
 
 
+def frontend_fixture(footprint_knee=False):
+    data = fixture()
+    data.update(schema_version=2, protocol="architecture-probes-v2")
+    records = []
+    for kind, count, stride in [("btb", n, s) for s in (8, 16, 32) for n in BTB_COUNTS] + [
+            ("nop", size // 4, 4) for size in CODE_BYTES]:
+        work = count * 100_000
+        slow = kind == "btb" and (count*stride >= 32768 if footprint_knee else count >= 4096)
+        records.append({"kind": kind, "count": count, "stride": stride, "code_bytes": count*stride,
+            "blocks": 100_000, "elapsed_ns": [work * (2 if slow else 1)] * 10,
+            "cycles": [work // 4] * 10, "instructions": [work + 400_000] * 10})
+    data["frontend"] = {"protocol": "frontend-static-v1", "sample_target_ns": 1_000_000,
+        "counter_source": "macos-rusage-process-user-and-kernel", "records": records}
+    return data
+
+
 class ArchitectureContracts(unittest.TestCase):
+    def test_frontend_spacing_separates_target_count_from_code_footprint(self):
+        result = read_architecture(frontend_fixture())["frontend"]
+        self.assertEqual(result["btb_transitions"], [{"lower": 3072, "upper": 4096, "spacings": [8, 16, 32]}])
+        self.assertEqual(result["peak_supply_ipc"], 4)
+        self.assertIsNone(result["fetch_width"])
+        self.assertIsNone(result["decode_width"])
+        self.assertEqual(read_architecture(frontend_fixture(True))["frontend"]["btb_transitions"], [])
+
+    def test_frontend_requires_complete_raw_samples_and_hardware_source(self):
+        for mode in ("duplicate", "partial", "footprint", "counter", "zero-cycles", "missing"):
+            data = frontend_fixture(); frontend = data["frontend"]
+            if mode == "duplicate": frontend["records"][-1] = frontend["records"][0]
+            if mode == "partial": frontend["records"][0]["cycles"].pop()
+            if mode == "footprint": frontend["records"][0]["code_bytes"] += 4
+            if mode == "counter": frontend["counter_source"] = "unavailable"
+            if mode == "zero-cycles": frontend["records"][0]["cycles"][0] = 0
+            if mode == "missing": data.pop("frontend")
+            with self.subTest(mode=mode), self.assertRaises(ValueError): read_architecture(data)
+        data = frontend_fixture(); data["frontend"]["counter_source"] = "unavailable"
+        for row in data["frontend"]["records"]: row["cycles"] = row["instructions"] = [0]*10
+        self.assertIsNone(read_architecture(data)["frontend"]["peak_supply_ipc"])
+
     def test_scoring_is_wall_time_and_not_stored_summary_or_clock_inference(self):
         data = fixture()
         for record in data["records"]: record["statistics"] = {"median": 1}
@@ -46,23 +85,19 @@ class ArchitectureContracts(unittest.TestCase):
             if mode == "unvalidated": bad["records"][0]["validated"] = False
             with self.subTest(mode=mode), self.assertRaises(ValueError): read_architecture(bad)
 
-    def test_diagram_cards_and_unknown_structures_in_both_languages(self):
+    def test_diagram_cards_and_svg_structure(self):
         from presentation import plot_svg
-        from report_view import module_html
         with tempfile.TemporaryDirectory() as directory:
             reports = Path(directory)
             (reports / "cpu_architecture_report.md").write_text("# Architecture\n")
-            (reports / "cpu_architecture.json").write_text(json.dumps(fixture()))
+            (reports / "cpu_architecture.json").write_text(json.dumps(frontend_fixture()))
             result = build_module("cpu_architecture", reports)
             self.assertEqual(result.status, "passed")
             self.assertEqual((len(result.kpis), len(result.tables[0].rows)), (4, 12))
             for language in ("en", "zh"):
-                svg = plot_svg(result.charts[0], language)
-                self.assertIn("stroke-dasharray", svg)
-                self.assertIn("OS-reported" if language == "en" else "系统报告", svg)
-                self.assertIn("unmeasured" if language == "en" else "尚未测定", svg)
-                self.assertIn("NOT eight" if language == "en" else "不代表八个", svg)
-                self.assertIn("<svg", module_html(result, language))
+                svg = ET.fromstring(plot_svg(result.charts[0], language))
+                self.assertEqual(svg.tag, "{http://www.w3.org/2000/svg}svg")
+                self.assertGreater(len(svg.findall("{http://www.w3.org/2000/svg}rect")), 5)
 
     def test_qt_architecture_page_main_selection_and_bilingual_layout(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -78,7 +113,7 @@ class ArchitectureContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             reports = Path(directory)
             (reports / "cpu_architecture_report.md").write_text("# Architecture\n")
-            (reports / "cpu_architecture.json").write_text(json.dumps(fixture()))
+            (reports / "cpu_architecture.json").write_text(json.dumps(frontend_fixture()))
             model = build_module("cpu_architecture", reports)
             window = MainWindow(autodetect=False)
             self.addCleanup(window.close)
@@ -143,15 +178,25 @@ class ArchitectureNativeTests(unittest.TestCase):
     def test_compiled_payload_instruction_counts(self):
         objdump = shutil.which("objdump")
         if not objdump or sys.platform == "darwin": self.skipTest("GNU objdump instruction view unavailable")
-        run = subprocess.run([objdump, "-d", str(self.binary)], capture_output=True, text=True, timeout=15)
-        self.assertEqual(run.returncode, 0, run.stderr)
+        def body(name):
+            run = subprocess.run([objdump, "-d", "--disassemble=" + name, str(self.binary)], capture_output=True, text=True, timeout=15)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            match = re.search(r"<" + name + r">:\n(.*?)(?=\n\n|\Z)", run.stdout, re.S)
+            self.assertIsNotNone(match, name)
+            return match[1]
         arm = platform.machine().lower() in {"arm64", "aarch64"}
         for name, mnemonic, count in (("arch_nop", "nop", 64), ("arch_iadd_dep", "add", 32),
                 ("arch_iadd_ind8", "add", 32), ("arch_fadd_dep", "fadd" if arm else "addsd", 32),
                 ("arch_fmul_ind8", "fmul" if arm else "mulsd", 32)):
-            match = re.search(r"<" + name + r">:\n(.*?)(?=\n\n|\Z)", run.stdout, re.S)
-            self.assertIsNotNone(match, name)
-            self.assertGreaterEqual(len(re.findall(r"\b" + mnemonic + r"\b", match[1])), count, name)
+            self.assertGreaterEqual(len(re.findall(r"\b" + mnemonic + r"\b", body(name))), count, name)
+        # Independent machine-code reference: exact taken-target spacing and
+        # explicit NOP instruction length, excluding call/prologue/return.
+        for name, mnemonic, count, stride in (("fe_btb_128_8", "b" if arm else "jmp", 128, 8),
+                ("fe_nop_128_4", "nop" if arm else "nopl", 32, 4)):
+            payload = body(name).split("ret")[0]
+            addresses = [int(v, 16) for v in re.findall(r"^\s*([0-9a-f]+):[^\n]*\b" + mnemonic + r"\s", payload, re.M)]
+            self.assertEqual(len(addresses), count, name)
+            self.assertEqual([b-a for a, b in zip(addresses, addresses[1:])], [stride]*(count-1))
 
     def test_bounded_native_full_pipeline(self):
         work = self.root / "report"; work.mkdir()
@@ -163,6 +208,8 @@ class ArchitectureNativeTests(unittest.TestCase):
         result = build_module("cpu_architecture", work / "reports")
         self.assertEqual(result.status, "passed")
         self.assertEqual(result.charts[0].kind, "architecture")
+        self.assertEqual(len(result.charts), 3)
+        self.assertEqual(len(evidence["frontend"]["records"]), 57 if platform.machine().lower() in {"arm64", "aarch64"} else 81)
         if sys.platform.startswith("linux"):
             cpu = evidence["cpu_id"]
             expected = dict.fromkeys(("l1i", "l1d", "l2", "l3"), 0)

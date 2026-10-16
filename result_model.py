@@ -285,19 +285,38 @@ def build_module(name, reports, record=None):
                 result.status, result.reason = "invalid_report", "invalid_report"
                 return result
             metrics = evidence["metrics"]
-            result.notice = "architecture_limits" if evidence["stable"] else "architecture_unstable"
-            result.conditions = [(ref("protocol"), "architecture-probes-v1"), (ref("samples"), 10),
+            result.notice = "" if evidence["stable"] else "architecture_unstable"
+            frontend = evidence["frontend"]
+            transitions = frontend["btb_transitions"] if frontend else []
+            btb_value = ", ".join(f'{r["lower"]}–{r["upper"]}' for r in transitions) or "—"
+            result.conditions = [(ref("protocol"), evidence["protocol"]), (ref("samples"), 10),
                 (ref("sample_target"), f'{evidence["sample_target_ns"] / 1e6:g} ms'),
                 (ref("placement"), ref("pinned" if evidence["cpu_id"] >= 0 else "qos" if evidence["placement"].startswith("macos") else "arch_os_scope"))]
-            result.kpis = [{"label": ref("arch_iadd_dep"), "value": metrics["iadd_dep"]["ns"], "unit": "ns/op"},
-                {"label": ref("arch_iadd_ind8"), "value": metrics["iadd_ind8"]["gops"], "unit": "Ginstr/s"},
-                {"label": ref("arch_ilp_gain"), "value": metrics["iadd_dep"]["ns"] / metrics["iadd_ind8"]["ns"], "unit": "×"},
-                {"label": ref("arch_fadd_dep"), "value": metrics["fadd_dep"]["ns"], "unit": "ns/op"}]
+            result.kpis = [{"label": ref("arch_instruction_cache"), "value": evidence["reported_cache_bytes"]["l1i"] / 1024 or "—", "unit": "KiB", "category": "cache"},
+                {"label": ref("arch_btb_candidate"), "value": btb_value, "unit": "", "category": "frontend"},
+                {"label": ref("arch_fetch_width"), "value": "—", "unit": "B/cycle", "category": "frontend"},
+                {"label": ref("arch_decode_width"), "value": "—", "unit": "instr/cycle", "category": "frontend"}]
             result.charts = [Chart("architecture_diagram", "architecture", "", [], [{"evidence": evidence}])]
             result.tables = [Table("architecture_measurements", [column("measurement"), column("latency", "ns/op"),
                 column("samples"), column("rejected"), column("drift", "%"), column("status")],
                 [[ref("arch_" + name), value["ns"], 10, value["statistics"]["rejected"], value["statistics"]["drift_pct"],
                   ref("measured" if value["stable"] else "unstable")] for name, value in metrics.items()])]
+            if frontend:
+                result.conditions.append((ref("arch_frontend_target"), f'{frontend["sample_target_ns"] / 1e6:g} ms'))
+                result.conditions.append((ref("arch_counter_source"), ref("unavailable") if frontend["counter_source"] == "unavailable" else frontend["counter_source"]))
+                for kind, title, x_name in (("btb", "arch_btb_scan", "arch_target_count"), ("nop", "arch_code_scan", "arch_code_bytes")):
+                    records = [r for r in frontend["records"] if r["kind"] == kind]
+                    key = "count" if kind == "btb" else "code_bytes"
+                    xs = sorted({r[key] for r in records})
+                    series = [{"label": f"{stride} B", "values": [r["ns"] for r in sorted(
+                        (r for r in records if r["stride"] == stride), key=lambda r: r[key])]}
+                        for stride in sorted({r["stride"] for r in records})]
+                    result.charts.append(Chart(title, "line", "ns/branch" if kind == "btb" else "ns/instr", xs, series, xs, x_name, True))
+                    result.tables.append(Table(title, [column(x_name), column("arch_spacing", "B"), column("latency", "ns"),
+                        column("arch_effective_supply", "instr/cycle"), column("status")],
+                        [[r[key], r["stride"], r["ns"], r["instructions_per_cycle"], ref("measured" if r["stable"] and (
+                            r["instructions_per_cycle"] is None or r["counter_stable"]) else "unstable")]
+                         for r in records]))
             return result
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
                              (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),

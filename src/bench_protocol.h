@@ -47,22 +47,23 @@ static int bench_grow(uint64_t *repetitions, uint64_t elapsed, uint64_t target) 
     return 0;
 }
 
-static int bench_measure(BenchKernel kernel, void *context, BenchMeasurement *result) {
+static int bench_measure_target(BenchKernel kernel, void *context, BenchMeasurement *result,
+                                uint64_t target_ns, uint64_t warmup_ns) {
     uint64_t repetitions = 1, elapsed = 0, warmed = 0;
     /* Warmup has its own discarded interval; cold page faults/scheduling must
      * not determine the measured iteration count. Google Benchmark and
      * nanobench provide the methodological reference, not shared source. */
-    while (warmed < BENCH_WARMUP_NS) {
+    while (warmed < warmup_ns) {
         if (bench_once(kernel, context, repetitions, &elapsed)) return -1;
         if (UINT64_MAX - warmed < elapsed) return -1;
         warmed += elapsed;
-        if (warmed < BENCH_WARMUP_NS && bench_grow(&repetitions, elapsed, BENCH_WARMUP_NS)) return -1;
+        if (warmed < warmup_ns && bench_grow(&repetitions, elapsed, warmup_ns)) return -1;
     }
     repetitions = 1;
     for (;;) {
         if (bench_once(kernel, context, repetitions, &elapsed)) return -1;
-        if (elapsed < BENCH_TARGET_NS) {
-            if (bench_grow(&repetitions, elapsed, BENCH_TARGET_NS)) return -1;
+        if (elapsed < target_ns) {
+            if (bench_grow(&repetitions, elapsed, target_ns)) return -1;
             continue;
         }
         uint64_t samples[BENCH_SAMPLES];
@@ -75,8 +76,8 @@ static int bench_measure(BenchKernel kernel, void *context, BenchMeasurement *re
         /* A descheduled calibration pass can appear long while real work is
          * tiny. Discard this whole sample batch and recalibrate; never mix
          * differing work counts into one median or hide slow sample outliers. */
-        if (statistics.minimum < BENCH_TARGET_NS / 2) {
-            if (bench_grow(&repetitions, (uint64_t)statistics.minimum, BENCH_TARGET_NS)) return -1;
+        if (statistics.minimum < target_ns / 2) {
+            if (bench_grow(&repetitions, (uint64_t)statistics.minimum, target_ns)) return -1;
             continue;
         }
         *result = (BenchMeasurement){.repetitions = repetitions, .elapsed_ns = statistics.median,
@@ -84,6 +85,10 @@ static int bench_measure(BenchKernel kernel, void *context, BenchMeasurement *re
         memcpy(result->samples, samples, sizeof(samples));
         return 0;
     }
+}
+
+static int bench_measure(BenchKernel kernel, void *context, BenchMeasurement *result) {
+    return bench_measure_target(kernel, context, result, BENCH_TARGET_NS, BENCH_WARMUP_NS);
 }
 
 static double bench_spread(const BenchMeasurement *result) {

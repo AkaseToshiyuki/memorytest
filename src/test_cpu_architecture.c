@@ -30,6 +30,7 @@ int main(void) {
     return 77;
 }
 #else
+#include "architecture_frontend.h"
 enum { ARCH_MEASUREMENTS = 12 };
 static const char *arch_names_v1[] = {"nop_stream", "iadd_dep", "iadd_ind8", "imul_dep", "imul_ind8",
     "fadd_dep", "fadd_ind8", "fmul_dep", "fmul_ind8", "load_chain_32k", "write_ordered_32k", "copy_ordered_64k"};
@@ -169,17 +170,17 @@ int main(int argc, char **argv) {
     if (!json) { report_free(report); return 1; }
     report_write_system_info(report);
     report_section(report, "Architecture Probe Conditions");
-    report_write(report, "- Protocol: architecture-probes-v1\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
+    report_write(report, "- Protocol: architecture-probes-v2\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
     bench_report_conditions(report);
     report_write(report, "- Instruction count is explicit payload work, NOT retired instructions from a PMU.\n"
-        "- All results are wall time, including loop and result retention overhead. No inferred cycles, ports or decode width.\n"
+        "- The twelve instruction/memory probes use wall time, including loop and result retention overhead.\n"
         "- Ordered write/copy include address loads and full fences. Working sets are 32/32/64 KiB, not guaranteed L1 hits.\n"
         "- Register-file, queue, scheduler and ROB capacities remain unmeasured. Mac QoS does not select a P/E core.\n\n");
     report_write(report, "- Cache metadata: Linux uses the pinned CPU's sysfs entries; macOS uses global sysctl summaries; "
         "Windows uses the largest OS-reported instance per level. Shared caches are not per-core capacities.\n\n");
     report_section(report, "Architecture Measurements");
     report_write(report, "| Probe | ns/op | Operations | Samples | Status |\n|---|---|---|---|---|\n");
-    fprintf(json, "{\"schema_version\":1,\"protocol\":\"architecture-probes-v1\",\"isa\":\"" ARCH_KERNEL_ISA "\","
+    fprintf(json, "{\"schema_version\":2,\"protocol\":\"architecture-probes-v2\",\"isa\":\"" ARCH_KERNEL_ISA "\","
         "\"placement\":\"%s\",\"cpu_id\":%d,\"sample_count\":%u,\"sample_target_ns\":%llu,"
         "\"timer\":\"monotonic-wall-time\",\"cache_source\":\"OS-reported-not-probed\","
         "\"reported_cache_bytes\":{\"l1i\":%zu,\"l1d\":%zu,\"l2\":%zu,\"l3\":%zu},\"records\":[",
@@ -197,8 +198,9 @@ int main(int argc, char **argv) {
             fprintf(json, "%s%llu", i ? "," : "", (unsigned long long)sample->samples[i]);
         fputs("],\"statistics\":", json); sample_statistics_json(json, &sample->statistics); fputc('}', json);
     }
-    fputs("]}\n", json);
-    int failed = ferror(json);
+    fputs("]", json);
+    int failed = frontend_report(json, report) || ferror(json);
+    fputs("}\n", json);
     if (fclose(json)) failed = 1;
     if (report_finish(report)) failed = 1;
     return failed;

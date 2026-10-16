@@ -5,11 +5,26 @@ import math
 from i18n import display, tr
 
 THEMES = {
-    "dark": dict(background="#0c111b", surface="#131c29", base="#101824", text="#e5ecf5", muted="#a8b7ca",
-                 border="#34465c", accent="#a9c9ed", button="#203147", selection="#355579", disabled="#8291a5", success="#a0d4c6", error="#f0abb4", warning="#e7c56e"),
-    "light": dict(background="#f3f6fa", surface="#ffffff", base="#f8fafc", text="#223044", muted="#526378",
-                  border="#c0ccda", accent="#315d85", button="#e5ecf4", selection="#c5d9ee", disabled="#65758a", success="#236858", error="#a82c43", warning="#806000"),
+    "dark": dict(background="#0c0e12", surface="#1a1d23", base="#111419", text="#e9edf2", muted="#adb7c4",
+                 border="#3a424e", accent="#9dcde7", button="#29333f", selection="#374e63", disabled="#929dac", success="#a0d4c6", error="#f0abb4", warning="#e7c56e",
+                 frontend="#c0c6cf", frontend_fill="#30343c", cache="#e39793", cache_fill="#43292b",
+                 register="#7ac7de", register_fill="#173642", compute="#c6a0e5", compute_fill="#352341",
+                 memory="#c7d391", memory_fill="#353d23"),
+    "light": dict(background="#f0f2f5", surface="#ffffff", base="#f6f7f9", text="#223044", muted="#526378",
+                  border="#bdc6d2", accent="#315d85", button="#e5eaf1", selection="#c5d9ee", disabled="#65758a", success="#236858", error="#a82c43", warning="#806000",
+                  frontend="#53606c", frontend_fill="#e8ecf0", cache="#933c36", cache_fill="#f8e9e7",
+                  register="#24647b", register_fill="#e5f1f6", compute="#6c428d", compute_fill="#eee5f5",
+                  memory="#5b6c29", memory_fill="#edf1df"),
 }
+
+
+def module_category(name):
+    """Shared semantic accents for native results and standalone reports."""
+    if name.startswith("cache"): return "cache"
+    if name.startswith("memory"): return "memory"
+    if name in {"inter_core", "cpu_architecture"}: return "register"
+    if name.startswith("cpu_"): return "compute"
+    return "frontend"
 
 
 def curve_color(index, theme="dark"):
@@ -93,7 +108,9 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
                     x = left + (transform(xs[i]) - lo) / (hi - lo or 1) * (right - left)
                     text(x, bottom + 20, labels[i], "middle", 10)
         text(left, 18, unit)
-        text((left + right) / 2, height - 7, tr(get("x_title"), language) + (" (KiB)" if log_x else ""), "middle")
+        x_title = get("x_title")
+        x_unit = " (KiB)" if log_x and x_title == "workset" else " (B)" if x_title == "arch_code_bytes" else ""
+        text((left + right) / 2, height - 7, tr(x_title, language) + x_unit, "middle")
         for index, item in enumerate(series):
             text(right - index * 190, 18, item["label"], "end", 11, paint(index))
             segment = []

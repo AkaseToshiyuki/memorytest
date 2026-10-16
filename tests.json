@@ -75,8 +75,8 @@
     },
     "cpu_architecture": {
       "name": "CPU Architecture Analysis",
-      "description": "Explicit instruction dependency/parallelism probes and an evidence-labelled core diagram",
-      "description_zh": "实测指令依赖延迟、并行执行特征与内核架构分析图",
+      "description": "BTB and instruction-footprint sweeps, core structure and instruction measurements",
+      "description_zh": "BTB／指令工作集扫描、内核结构与指令实测",
       "category": "cpu",
       "section": "CPU Architecture Analysis",
       "source": "src/test_cpu_architecture.c",

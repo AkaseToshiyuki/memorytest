@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QLabel, QHBoxLayout, QVBoxLayout, QGridLayout, QP
     QPushButton, QScrollArea, QTableView, QHeaderView, QWidget, QTabWidget, QSizePolicy)
 from desktop_theme import card, label, set_tone
 from i18n import tr, display
-from presentation import plot_svg
+from presentation import plot_svg, module_category
 from result_model import ModuleResult, build_module, perflevel_table, cache_parts
 
 TITLES = {name: tr(name, "zh") for name in
@@ -36,7 +36,8 @@ class ResultsTableModel(QAbstractTableModel):
         if index.isValid() and role in (Qt.DisplayRole, Qt.ToolTipRole):
             return display(self.table.rows[index.row()][index.column()], self.language)
         if role == Qt.TextAlignmentRole:
-            return int(Qt.AlignLeft | Qt.AlignVCenter)
+            numeric = index.isValid() and isinstance(self.table.rows[index.row()][index.column()], (int, float))
+            return int((Qt.AlignRight if numeric else Qt.AlignLeft) | Qt.AlignVCenter)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
@@ -52,8 +53,9 @@ class SvgPlot(QSvgWidget):
         super().__init__(parent)
         self.load(plot_svg(chart, language, theme).encode("utf-8"))
         self.renderer().setAspectRatioMode(Qt.KeepAspectRatio)
+        self.height_limit = 1500 if chart.kind == "architecture" else 760
         self.setMinimumHeight(300 if chart.kind == "heatmap" else max(220, len(chart.labels) * 28 if chart.kind == "bar" else 220))
-        self.setMaximumHeight(760)
+        self.setMaximumHeight(self.height_limit)
         self.setAccessibleName(tr(chart.title, language))
 
     def sizeHint(self):
@@ -62,7 +64,7 @@ class SvgPlot(QSvgWidget):
     def resizeEvent(self, event):
         size = self.renderer().defaultSize()
         if size.width():
-            self.setMinimumHeight(min(760, max(220, round(self.width() * size.height() / size.width()))))
+            self.setMinimumHeight(min(self.height_limit, max(220, round(self.width() * size.height() / size.width()))))
         super().resizeEvent(event)
 
 
@@ -72,17 +74,20 @@ class ResultView(QScrollArea):
         self.setWidgetResizable(True)
         self.model = None
         self.language, self.theme = "en", "dark"
+        self.metric_grid, self.metric_widgets, self.metric_columns = None, [], 0
 
     def render(self, model, language, theme):
         position = self.verticalScrollBar().value()
         self.model, self.language, self.theme = model, language, theme
+        self.metric_grid, self.metric_widgets, self.metric_columns = None, [], 0
+        category = module_category(model.name)
         previous = self.takeWidget()
         if previous:
             previous.deleteLater()
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
         if model.status != "passed":
             empty = label(tr(model.reason or "no_data", language), "muted")
             empty.setObjectName("empty-result")
@@ -96,14 +101,21 @@ class ResultView(QScrollArea):
                 layout.addWidget(notice)
             if model.kpis:
                 grid = QGridLayout()
+                grid.setSpacing(8)
+                self.metric_grid = grid
                 for i, item in enumerate(model.kpis):
-                    widget, content = card()
-                    heading = label(display(item["label"], language), "muted")
+                    widget, content = card(item.get("category", category))
+                    widget.setProperty("role", "metric-card")
+                    content.setSpacing(5)
+                    heading = label(display(item["label"], language), "metric-label")
                     heading.setWordWrap(True)
                     content.addWidget(heading)
-                    content.addWidget(label(display(item["value"], language), "metric"))
+                    value = label(display(item["value"], language), "metric")
+                    value.setWordWrap(True)
+                    content.addWidget(value)
                     unit = tr("points", language) if item["unit"] == "points" else item["unit"]
-                    content.addWidget(label(unit + " " + item.get("detail", ""), "muted"))
+                    content.addWidget(label(unit + " " + item.get("detail", ""), "metric-unit"))
+                    self.metric_widgets.append(widget)
                     grid.addWidget(widget, i // 4, i % 4)
                 layout.addLayout(grid)
             if model.conditions:
@@ -112,17 +124,22 @@ class ResultView(QScrollArea):
                 conditions.setTextFormat(Qt.PlainText)
                 layout.addWidget(conditions)
             for chart in model.charts:
-                widget, content = card()
+                if chart.kind == "architecture":
+                    layout.addWidget(SvgPlot(chart, language, theme))
+                    continue
+                widget, content = card(category)
                 content.addWidget(label(tr(chart.title, language), "section"))
                 content.addWidget(SvgPlot(chart, language, theme))
                 layout.addWidget(widget)
             for table in model.tables:
-                widget, content = card()
+                widget, content = card(category)
                 content.addWidget(label(tr(table.title, language), "section"))
                 view = QTableView()
                 view.setModel(ResultsTableModel(table, language, view))
                 view.setAccessibleName(tr(table.title, language))
                 view.setAlternatingRowColors(True)
+                view.setShowGrid(False)
+                view.setSelectionBehavior(QTableView.SelectRows)
                 view.verticalHeader().hide()
                 view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
                 view.horizontalHeader().setStretchLastSection(True)
@@ -131,7 +148,22 @@ class ResultView(QScrollArea):
                 layout.addWidget(widget)
             layout.addStretch()
         self.setWidget(root)
+        self.arrange_metrics()
         self.verticalScrollBar().setValue(position)
+
+    def arrange_metrics(self):
+        if self.metric_grid is None: return
+        columns = max(1, min(4, len(self.metric_widgets), self.viewport().width() // 210))
+        if columns > 2 and len(self.metric_widgets) % columns == 1: columns -= 1
+        if columns == self.metric_columns: return
+        self.metric_columns = columns
+        for widget in self.metric_widgets: self.metric_grid.removeWidget(widget)
+        for i, widget in enumerate(self.metric_widgets): self.metric_grid.addWidget(widget, i // columns, i % columns)
+        for i in range(4): self.metric_grid.setColumnStretch(i, 1 if i < columns else 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange_metrics()
 
     def toPlainText(self):
         # Useful to accessibility/acceptance checks; includes only localized display data.
