@@ -78,7 +78,9 @@ def read_width_scan(data, isa, placement):
     use_cycles = source != "unavailable"
     fit = fetch_candidate(points, use_cycles)
     # The x86 DSB/LSD can produce a staircase without accessing the fetch path.
-    qualified = isa == "aarch64-fp64" or all(p["decoder_qualified"] for p in points)
+    # The published Arm page-boundary reference is Apple silicon. Other Arm
+    # implementations can have MOP caches too; ISA alone proves no fetch path.
+    qualified = (isa == "aarch64-fp64" and placement.startswith("macos")) or all(p["decoder_qualified"] for p in points)
     if not qualified: fit = None
     return {"records": points, "fetch_width": fit, "counter_source": source,
         "decode_counter_source": decode, "page_bytes": page, "sample_target_ns": target,

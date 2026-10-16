@@ -257,7 +257,11 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   Native CI caught Mach-O function-atom relocation invalidating internal-only
   alignment; the implementation now aligns both function and loop to the native
   Mac page size. The local layout/pipeline follow-up passed **2/2, 4.434 s**
-  (`build/width-layout-fix.log`); native Mac confirmation is tracked by CI.
+  (`build/width-layout-fix.log`). Early zero-duration calibration intervals are
+  allowed to grow; formal zero samples fail explicitly. Follow-up cycle-qualification
+  checks reject a two-cycle packet being labelled as one-cycle width (**3/3, 0.088 s**,
+  `build/width-cycle-qualification.log`). At commit `90ad949`, native portability CI
+  **4/4 succeeded**, including Apple Silicon and Intel Mac; installer CI is separate.
 - Ordered memory write/copy uses a hand-authored five-node cycle and full payload
   comparison, including deliberate corruption. Latency-only allocates two arrays and
   creates no bandwidth workers. Shared cache tests assert one five-point scan, identical

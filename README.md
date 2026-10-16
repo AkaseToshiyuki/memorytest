@@ -736,6 +736,8 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   `IDQ.MITE_UOPS`（event 79H / umask 04H）；与实际周期、退休指令同组读取，拒绝多路复用。
   事件依据 Intel 的 SKL/KBL 定义，其他 CPU 不猜测事件编码。x86 取指候选要求解码器覆盖率 ≥90%，
   以阻止 DSB／循环缓冲命中曲线直接成为取指宽度；计数器不支持、权限不足或旁路占优时保留曲线并留空。
+  Arm 页边界模型当前限于所参考实验覆盖的 macOS Apple Silicon；其他 Arm 平台保留扫描数据，
+  待对应取指／MOP 缓存路径核验后再启用宽度判定。
 - **持续解码**：至少三个相邻倍增 NOP 工作集（起点 ≥4 KiB，最大 ≤系统报告 L1I 的一半）形成
   吞吐差 ≤12% 的平台，各点同时通过时间／周期稳定性检查。经过 MITE 核验的平台给出实测
   **µop/cycle 下界**；这与每周期解码多少条多微操作指令不同。macOS AArch64 的 NOP 平台给出

@@ -78,6 +78,7 @@ class ArchitectureContracts(unittest.TestCase):
                     "elapsed_ns": [n*100_000]*10, "cycles": [0]*10, "instructions": [0]*10, "mite_uops": [0]*10})
         parsed = read_width_scan(raw, "aarch64-fp64", "macos-qos-user-initiated")
         self.assertIsNone(parsed["fetch_width"])
+        self.assertEqual(read_width_scan(raw, "aarch64-fp64", "linux-pinned-one-logical-cpu")["status"], "path_unverified")
         for field, value in (("code_bytes", 21), ("page_offset", 1), ("blocks", 500)):
             bad = copy.deepcopy(raw); bad["records"][0][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
