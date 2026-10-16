@@ -136,6 +136,13 @@ class BackendResourceContracts(unittest.TestCase):
         parsed = read_architecture(raw)
         self.assertEqual([c["l1i"] for c in parsed["cache_instances"]], [196608, 131072])
         self.assertEqual(parsed["reported_cache_bytes"]["l1i"], 131072)
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory)
+            (reports / "cpu_architecture_report.md").write_text("# Architecture\n")
+            (reports / "cpu_architecture.json").write_text(json.dumps(raw))
+            model = build_module("cpu_architecture", reports)
+            self.assertEqual(model.status, "passed", model.reason)
+            self.assertEqual([row[1:] for row in model.tables[-1].rows], [[10, 192, 128, 24576], [4, 128, 64, 4096]])
         raw["sampled_cache_level_id"] = 0
         with self.assertRaises(ValueError): read_architecture(raw)
 

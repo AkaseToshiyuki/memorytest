@@ -352,7 +352,7 @@ def build_module(name, reports, record=None):
                       r["cycles_per_iteration"], ref("measured" if r["stable"] else "unstable")] for r in points]))
             if evidence.get("cache_instances"):
                 result.tables.append(Table("arch_cache_levels", [column("arch_perflevel"), column("logical"),
-                    column("L1I", "KiB"), column("L1D", "KiB"), column("L2", "KiB")],
+                    column("arch_instruction_cache", "KiB"), column("l1d", "KiB"), column("l2", "KiB")],
                     [[r["name"], r["logical_cpus"], r["l1i"]/1024 or None, r["l1d"]/1024 or None,
                       r["l2"]/1024 or None] for r in evidence["cache_instances"]]))
             if layout:
