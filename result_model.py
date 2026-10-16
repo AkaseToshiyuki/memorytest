@@ -308,6 +308,9 @@ def build_module(name, reports, record=None):
             if frontend:
                 result.conditions.append((ref("arch_frontend_target"), f'{frontend["sample_target_ns"] / 1e6:g} ms'))
                 result.conditions.append((ref("arch_counter_source"), ref("unavailable") if frontend["counter_source"] == "unavailable" else frontend["counter_source"]))
+                if frontend["decode_width"]:
+                    result.conditions.append((ref("arch_decode_basis"), "Intel IDQ.MITE_UOPS" if
+                        frontend["decode_width"]["basis"] == "intel-mite-counter" else ref("arch_nop_candidate")))
                 for kind, title, x_name in (("btb", "arch_btb_scan", "arch_target_count"), ("nop", "arch_code_scan", "arch_code_bytes")):
                     records = [r for r in frontend["records"] if r["kind"] == kind]
                     key = "count" if kind == "btb" else "code_bytes"

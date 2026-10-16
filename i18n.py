@@ -50,6 +50,8 @@ MESSAGES = {
     "arch_decode_scan": ("持续解码扫描", "Sustained decoder sweep"),
     "arch_retire_rate": ("退休吞吐", "Retirement throughput"),
     "arch_width_status": ("宽度判定", "Width inference"),
+    "arch_decode_basis": ("解码依据", "Decoder evidence"),
+    "arch_nop_candidate": ("NOP 平台 · 路径假设", "NOP plateau · path assumption"),
     "arch_btb": ("BTB · 分支目标缓冲", "BTB · Branch targets"),
     "arch_btb_candidate": ("BTB 容量候选区间", "BTB capacity candidate"),
     "arch_unmeasured": ("未测定", "Unmeasured"),

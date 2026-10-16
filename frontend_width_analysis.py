@@ -73,7 +73,9 @@ def read_width_scan(data, isa, placement):
             "ns_per_iteration": median(ns), "cycles_per_iteration": median(cpi) if cpi else None,
             "stable": stable(ns), "counter_stable": stable(cpi),
             "decoder_qualified": bool(all(mite) and min(mite) >= blocks*(count-1)*.9)})
-    use_cycles = all(p["counter_stable"] for p in points)
+    # An available but noisy/invalid PMU must not silently fall back to a
+    # wall-time model that could contradict the measured cycle cost.
+    use_cycles = source != "unavailable"
     fit = fetch_candidate(points, use_cycles)
     # The x86 DSB/LSD can produce a staircase without accessing the fetch path.
     qualified = isa == "aarch64-fp64" or all(p["decoder_qualified"] for p in points)
@@ -114,6 +116,7 @@ def fetch_candidate(points, use_cycles=False):
             scale = sum((x-center)*(y-average) for x, y in zip(model, values))/variance
             offset = average-scale*center
             if scale <= 0 or offset < -.10*scale or offset > scale: continue
+            if use_cycles and not .8 <= scale <= 1.2: continue
             error = sqrt(sum((y-(offset+scale*x))**2 for x, y in zip(model, values))/len(values))/average
             if best is None or error < best[0]: best = error, scale, offset
         if best: candidates.append((best[0], width))

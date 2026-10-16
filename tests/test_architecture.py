@@ -60,6 +60,9 @@ class ArchitectureContracts(unittest.TestCase):
             result = fetch_candidate(points)
             self.assertIsNotNone(result)
             self.assertEqual(result["value"], width)
+            for point in points:
+                point["cycles_per_iteration"] = (point["ns_per_iteration"]-.05)/.3*2
+            self.assertIsNone(fetch_candidate(points, use_cycles=True))
             # A common linear bottleneck or a cache-only staircase must not
             # identify a physical width without a distinct page penalty.
             for point in points: point["ns_per_iteration"] = point["count"]*.1

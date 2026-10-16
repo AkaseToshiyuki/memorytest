@@ -730,6 +730,7 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   `1+ceil((bytes-4)/W)`；共享时间尺度及有限固定成本。扫描 `W=16/32/64/128 B`、`D=2..20`，
   要求至少 110/122 个稳定测点、可观察页边界惩罚、实际阶梯、归一化拟合误差 ≤6%，且优于其他宽度。
   墙钟只能通过曲线形状提出 **≈ 候选**，不将 ns 或标称 GHz 换算为核心周期。
+  有实际周期计数时，还要求拟合的取指包成本处于 0.8–1.2 cycle；计数异常不回退到墙钟判定。
   该模型假定每周期一个取指包，可能受分支处理、预取、指令缓存和跨测点频率变化影响；无清晰阶梯则留空。
 - **解码路径核验**：Linux Intel family 6 的 4E/5E/8E/9E 型号，且 CPUID 未声明虚拟化时，尝试
   `IDQ.MITE_UOPS`（event 79H / umask 04H）；与实际周期、退休指令同组读取，拒绝多路复用。

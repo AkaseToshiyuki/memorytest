@@ -70,7 +70,10 @@ static int width_work(void *context, uint64_t repetitions) {
         uint64_t start = get_time_ns();
         work->definition->run[crossed](repetitions, &work->begin[crossed], &work->end[crossed]);
         uint64_t stop = get_time_ns();
-        if (stop <= start) return -1;
+        /* Early calibration calls can be shorter than macOS timer resolution.
+         * Keep zero here so calibration can grow the work; formal samples
+         * remain strictly positive and are checked by the evidence reader. */
+        if (stop < start) return -1;
         if (!valid || arch_counter_read(work->counter, &after) || arch_counter_delta(&before, &after, &delta))
             memset(&delta, 0, sizeof(delta));
         work->elapsed[crossed][slot] = stop-start;
@@ -102,6 +105,10 @@ static int width_report(FILE *json, ReportContext *report) {
         printf("Fetch width pair: %u instructions\n", work.definition->count); fflush(stdout);
         if (bench_measure_target(width_work, &work, &result, target, warmup)) { arch_counter_close(&counter); return -1; }
         for (unsigned crossed = 0; crossed < 2; ++crossed) {
+            for (unsigned i = 0; i < BENCH_SAMPLES; ++i) if (!work.elapsed[crossed][i]) {
+                fputs("Fetch timing sample is below timer resolution.\n", stderr);
+                arch_counter_close(&counter); return -1;
+            }
             size_t bytes = 4 * work.definition->count + WIDTH_EXTRA_BYTES;
             if (work.begin[crossed] % page != (crossed ? page-4 : 0) || work.end[crossed]-work.begin[crossed] != bytes) {
                 fprintf(stderr, "Fetch layout mismatch: count=%u crossed=%u page=%zu offset=%zu bytes=%zu expected=%zu\n",
