@@ -245,7 +245,7 @@ class ArchitectureNativeTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(run.stdout.splitlines()), 6)
         arm = platform.machine().lower() in {"arm64", "aarch64"}
-        alignment = 4096 if os.name == "nt" else 65536
+        alignment = (16384 if arm else 4096) if sys.platform == "darwin" else 4096 if os.name == "nt" else 65536
         for line in run.stdout.splitlines():
             n, crossed, offset, code = line.split()
             n, crossed, offset, code = int(n), int(crossed), int(offset), bytes.fromhex(code)

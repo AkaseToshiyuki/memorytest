@@ -254,6 +254,10 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   inference was rejected as path-unverified; evidence: `build/width-native/reports/cpu_architecture.json`.
   macOS Arm NOP plateaus remain conditional candidates, not verified physical decode
   widths. Register/queue/ROB capacity measurement is not implemented in v3.
+  Native CI caught Mach-O function-atom relocation invalidating internal-only
+  alignment; the implementation now aligns both function and loop to the native
+  Mac page size. The local layout/pipeline follow-up passed **2/2, 4.434 s**
+  (`build/width-layout-fix.log`); native Mac confirmation is tracked by CI.
 - Ordered memory write/copy uses a hand-authored five-node cycle and full payload
   comparison, including deliberate corruption. Latency-only allocates two arrays and
   creates no bandwidth workers. Shared cache tests assert one five-point scan, identical

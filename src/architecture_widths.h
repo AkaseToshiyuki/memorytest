@@ -10,10 +10,21 @@
     M(29) M(30) M(31) M(32) M(33) M(34) M(35) M(36) M(37) M(38) M(39) M(40) \
     M(41) M(42) M(43) M(44) M(45) M(46) M(47) M(48) M(49) M(50) M(51) M(52) \
     M(53) M(54) M(55) M(56) M(57) M(58) M(59) M(60) M(61) M(62) M(63) M(64)
-#ifdef _WIN32
+#if defined(__APPLE__)
+/* Mach-O relocates function atoms independently and caps text alignment at
+ * the segment's page alignment. Align the function atom as well as its loop. */
+#if defined(__aarch64__) || defined(__arm64__)
+#define WIDTH_ALIGNMENT 16384
+#else
 #define WIDTH_ALIGNMENT 4096
+#endif
+#define WIDTH_FUNCTION_ALIGNMENT WIDTH_ALIGNMENT
+#elif defined(_WIN32)
+#define WIDTH_ALIGNMENT 4096
+#define WIDTH_FUNCTION_ALIGNMENT 64
 #else
 #define WIDTH_ALIGNMENT 65536
+#define WIDTH_FUNCTION_ALIGNMENT 64
 #endif
 #if defined(__x86_64__)
 #define WIDTH_SETUP "leaq 1f(%%rip),%[start]\nleaq 2f(%%rip),%[end]\njmp 1f\n"
@@ -26,7 +37,7 @@
 #define WIDTH_EXTRA_BYTES 0
 #endif
 #define WIDTH_FN(n,c) \
-static __attribute__((noinline)) void width_##n##_##c(uint64_t reps, uintptr_t *begin, uintptr_t *end) { \
+static __attribute__((noinline, aligned(WIDTH_FUNCTION_ALIGNMENT))) void width_##n##_##c(uint64_t reps, uintptr_t *begin, uintptr_t *end) { \
     uintptr_t first, last; \
     __asm__ volatile(WIDTH_SETUP ".balign " FE_STR(WIDTH_ALIGNMENT) "\n.if " FE_STR(c) "\n.space " \
         FE_STR(WIDTH_ALIGNMENT) "-4\n.endif\n1:\n" \
@@ -93,6 +104,9 @@ static int width_report(FILE *json, ReportContext *report) {
         for (unsigned crossed = 0; crossed < 2; ++crossed) {
             size_t bytes = 4 * work.definition->count + WIDTH_EXTRA_BYTES;
             if (work.begin[crossed] % page != (crossed ? page-4 : 0) || work.end[crossed]-work.begin[crossed] != bytes) {
+                fprintf(stderr, "Fetch layout mismatch: count=%u crossed=%u page=%zu offset=%zu bytes=%zu expected=%zu\n",
+                    work.definition->count, crossed, page, (size_t)(work.begin[crossed]%page),
+                    (size_t)(work.end[crossed]-work.begin[crossed]), bytes);
                 arch_counter_close(&counter); return -1;
             }
             fprintf(json, "%s{\"count\":%u,\"crossed\":%u,\"code_bytes\":%zu,\"page_offset\":%zu,"
