@@ -72,6 +72,30 @@ class ResultsTests(unittest.TestCase):
         # 1.25 / maximum 6 on a 185px axis => y=186.4583; x=72 at 4 KiB.
         self.assertIn('cx="72.00" cy="186.46"', svg)
 
+    def test_heatmap_cell_values_round_half_up_and_keep_raw_precision(self):
+        import copy
+        import xml.etree.ElementTree as ET
+        from result_model import Chart
+        values = [[None, 28.49, 28.5], [100.5, None, 191.1], [0.5, 99.99, None]]
+        original = copy.deepcopy(values)
+        chart = Chart("observed_cas_latency", "heatmap", "ns", [0, 4, 9], [{"values": values}])
+        ns = {"s": "http://www.w3.org/2000/svg"}
+        for theme in ("dark", "light"):
+            for css in (False, True):
+                svg = ET.fromstring(plot_svg(chart, theme=theme, css=css))
+                labels = svg.findall('s:text[@class="heatmap-value"]', ns)
+                self.assertEqual([item.text for item in labels], ["28", "29", "101", "191", "1", "100"])
+                cells = [item for item in svg.findall('s:rect', ns) if item.find('s:title', ns) is not None]
+                present = [item for item, value in zip(cells, sum(values, [])) if value is not None]
+                for label, cell in zip(labels, present):
+                    self.assertAlmostEqual(float(label.attrib['x']), float(cell.attrib['x']) + float(cell.attrib['width']) / 2, delta=.01)
+                    self.assertLess(float(label.attrib['y']), float(cell.attrib['y']) + float(cell.attrib['height']))
+                    rgb = [int(cell.attrib['fill'][i:i+2], 16) / 255 for i in (1, 3, 5)]
+                    lum = sum((c/12.92 if c <= .04045 else ((c+.055)/1.055)**2.4)*w for c, w in zip(rgb, (.2126, .7152, .0722)))
+                    contrast = (lum + .05) / .05 if label.attrib['fill'] == '#000000' else 1.05 / (lum + .05)
+                    self.assertGreaterEqual(contrast, 4.5)
+        self.assertEqual(values, original)
+
     def test_bandwidth_decimal_scaling_all_views_and_cap(self):
         from result_model import bandwidth_scale, split_legacy_result
         for value, expected, unit in ((10000, 10, "GB/s"), (1000, 1, "GB/s"),

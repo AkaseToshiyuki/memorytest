@@ -29,7 +29,8 @@ for _name, (_parent, _mode) in SUBTESTS.items():
                         args=["--mode", _mode], name=_TASK_LABELS[_name][0],
                         description=_TASK_LABELS[_name][0], description_zh=_TASK_LABELS[_name][1])
 SELECTION_GROUPS = {"cache_group": list(SUBTESTS)[:3], "memory_group": list(SUBTESTS)[3:],
-                    "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core", "cpu_architecture"]}
+                    "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core"],
+                    "architecture_group": ["cpu_architecture"]}
 
 # Audit status, not a certification of every OS/ISA or hardware environment.
 COMPARABILITY = {

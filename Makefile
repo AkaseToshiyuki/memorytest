@@ -213,7 +213,7 @@ $(BUILD_DIR)/test_cpu_float: $(SRC_DIR)/test_cpu_float.c $(COMMON_SRCS) | $(BUIL
 $(BUILD_DIR)/test_cpu_branch: $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_branch.c $(COMMON_SRCS) $(LDFLAGS)
 
-$(BUILD_DIR)/test_cpu_architecture: $(SRC_DIR)/test_cpu_architecture.c $(SRC_DIR)/architecture_kernels.h $(SRC_DIR)/architecture_frontend.h $(SRC_DIR)/architecture_widths.h $(SRC_DIR)/architecture_counters.h $(SRC_DIR)/memory_latency.h $(SRC_DIR)/memory_kernels.h $(COMMON_SRCS) | $(BUILD_DIR)
+$(BUILD_DIR)/test_cpu_architecture: $(SRC_DIR)/test_cpu_architecture.c $(SRC_DIR)/architecture_kernels.h $(SRC_DIR)/architecture_frontend.h $(SRC_DIR)/architecture_widths.h $(SRC_DIR)/architecture_btb_layout.h $(SRC_DIR)/architecture_resources.h $(SRC_DIR)/architecture_competition.h $(SRC_DIR)/architecture_counters.h $(SRC_DIR)/memory_latency.h $(SRC_DIR)/memory_kernels.h $(COMMON_SRCS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/test_cpu_architecture.c $(COMMON_SRCS) -lm $(LDFLAGS)
 
 .PHONY: force-compute-build

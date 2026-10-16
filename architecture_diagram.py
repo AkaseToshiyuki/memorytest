@@ -8,6 +8,7 @@ def architecture_svg(chart, language, color):
     get = (lambda key: getattr(chart, key)) if not isinstance(chart, dict) else chart.__getitem__
     data = get("series")[0]["evidence"]
     caches, frontend = data["reported_cache_bytes"], data.get("frontend")
+    resources, competition = data.get("resource_scan"), data.get("competition_scan")
     height = 850
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 {height}" role="img" aria-label="{tr("architecture_diagram", language)}">',
              f'<rect x="2" y="2" width="996" height="{height-4}" rx="22" fill="{color("surface")}" stroke="{color("border")}" stroke-width="2"/>',
@@ -27,6 +28,10 @@ def architecture_svg(chart, language, color):
         right = (x2-7*math.cos(angle+.5), y2-7*math.sin(angle+.5))
         parts.append(f'<path d="M{x1},{y1} L{x2},{y2} M{left[0]},{left[1]} L{x2},{y2} L{right[0]},{right[1]}" fill="none" stroke="{color("muted")}"/>')
     def cache(key):
+        values = sorted({r[key] for r in data.get("cache_instances", []) if r.get(key)})
+        if values:
+            value = f'{values[0]/1024:g}' if len(values) == 1 else f'{values[0]/1024:g}–{values[-1]/1024:g}'
+            return value + " KiB"
         return f'{caches[key]/1024:g} KiB' if caches[key] else tr("hardware_not_reported", language)
     text(30, 42, tr("architecture_diagram", language), 25, anchor="start")
     text(970, 42, data["isa"], 16, color("muted"), "end")
@@ -34,6 +39,11 @@ def architecture_svg(chart, language, color):
         f'{tr("core", language)} {data["cpu_id"]}' if data["cpu_id"] >= 0 else tr("arch_os_scope", language))
     text(30, 69, scope, 14, color("muted"), "start")
     unknown = "— · " + tr("arch_unmeasured", language)
+    def resource(family):
+        if not resources: return unknown
+        value = resources["candidates"].get(family, {"status": resources["status"]})
+        if value["status"] == "candidate": return f'{value["lower"]}–{value["upper"]} instr · {tr("arch_candidate", language)}'
+        return "— · " + tr("arch_" + value["status"], language)
     def width(key):
         value = frontend.get(key) if frontend else None
         if not value: return unknown
@@ -43,6 +53,9 @@ def architecture_svg(chart, language, color):
     transitions = frontend["btb_transitions"] if frontend else []
     btb_lines = [tr("arch_btb_candidate", language)] + [f'{r["lower"]}–{r["upper"]}' for r in transitions[:2]] if transitions else [
         tr("arch_no_transition", language) if frontend else unknown]
+    if data.get("btb_layout_scan"):
+        transitions = data["btb_layout_scan"]["transitions"]
+        btb_lines = [tr("arch_layout_transition", language)] + [f'{r["lower"]}–{r["upper"]} @ {r["stride"]} B' for r in transitions[:2]] if transitions else [tr("arch_no_transition", language)]
     box(25, 180, 285, 120, tr("arch_btb", language), btb_lines, "frontend")
     arrow(310, 215, 347, 215)
     arrow(500, 162, 500, 180)
@@ -50,22 +63,30 @@ def architecture_svg(chart, language, color):
     arrow(500, 255, 500, 280)
     box(350, 283, 300, 72, tr("arch_decode", language), [width("decode_width")], "frontend", dashed=not (frontend and frontend["decode_width"]))
     arrow(500, 355, 500, 380)
-    box(350, 383, 300, 72, tr("arch_rename", language), [tr("arch_width", language) + " · " + unknown], "frontend", dashed=True)
-    for x, title in ((25, "arch_int_registers"), (690, "arch_fp_registers")):
-        box(x, 383, 285, 72, tr(title, language), [unknown], "register", dashed=True)
+    rename = competition.get("rename_width") if competition else None
+    rename_value = f'≥{rename["value"]:.2f} writes/cycle' if rename else unknown
+    if competition and not rename:
+        rename_value = "— · " + tr("arch_counter_unavailable" if competition["counter_source"] == "unavailable" else "arch_unstable", language)
+    box(350, 383, 300, 72, tr("arch_rename", language), [rename_value], "frontend", dashed=not rename)
+    for x, title, family in ((25, "arch_int_window", "prf_i64"), (690, "arch_vec_window", "prf_vec128")):
+        box(x, 383, 285, 72, tr(title if resources else "arch_int_registers" if x == 25 else "arch_fp_registers", language),
+            [resource(family)], "register", dashed=not resources)
     arrow(310, 419, 347, 419)
     arrow(690, 419, 653, 419)
     for x in (175, 500, 825):
         arrow(500, 455, x, 490)
     for x, title in ((25, "integer"), (350, "arch_memory_path"), (675, "fp64")):
         lines = [tr("arch_scheduler", language) + " · —", tr("arch_ports", language) + " · —"]
+        if resources:
+            lines[0] = tr("arch_scheduler", language) + " · " + resource("sched_int" if title == "integer" else "sched_vector")
+        if competition: lines[1] = tr("arch_ports", language) + " · " + tr("arch_underconstrained", language)
         if title == "arch_memory_path":
-            lines = [tr("arch_load_queue", language) + " · —", tr("arch_store_queue", language) + " · —"]
-        box(x, 493, 300, 105, tr(title, language), lines, "memory" if title == "arch_memory_path" else "compute", dashed=True)
+            lines = [tr("arch_load_window", language) + " · " + resource("load_ready"), tr("arch_store_window", language) + " · " + resource("store_ready")]
+        box(x, 493, 300, 105, tr("arch_vector" if title == "fp64" and resources else title, language), lines, "memory" if title == "arch_memory_path" else "compute", dashed=True)
     box(350, 625, 300, 66, "L1D", [cache("l1d") + " · " + tr("arch_reported", language)], "cache")
     arrow(500, 598, 500, 622)
     for x in (175, 825): arrow(x, 598, x, 720)
-    retire = tr("arch_capacity", language) + " · " + unknown
+    retire = tr("arch_window", language) + " · " + resource("rob_nop")
     if frontend and frontend.get("retirement_width"):
         retire += "     |     " + tr("arch_retire_rate", language) + " " + width("retirement_width")
     box(25, 723, 950, 72, tr("arch_retire", language), [retire], "register", dashed=True)

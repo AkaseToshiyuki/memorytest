@@ -254,6 +254,25 @@ new missing-dependency case (17/17, 6.135 s) passed locally. Logs:
   inference was rejected as path-unverified; evidence: `build/width-native/reports/cpu_architecture.json`.
   macOS Arm NOP plateaus remain conditional candidates, not verified physical decode
   widths. Register/queue/ROB capacity measurement is not implemented in v3.
+  v4 now adds static paired resource-window, BTB-layout and execution-competition
+  kernels, with conservative status rather than physical-capacity defaults.
+  Local v4 acceptance: **19/19, 22.992 s** (`build/architecture-v4-acceptance.log`).
+  The x86 native reference visits **832 resource variants**, checks independent
+  ring traversal and every scratch/guard byte, verifies **160 BTB layouts** from
+  machine bytes, and checks **24 competition streams** against modular-integer
+  and rational-FP references. AArch64 additionally exercises scalar FP32/FP64
+  PRF and scheduler windows. Synthetic knees validate rejection and reader
+  contracts only; they do not establish a processor's physical capacities.
+  Default-target local evidence: `build/architecture-v4-native/reports/` and
+  `build/architecture-v4-native-summary.log`; **416 paired resource points**,
+  **393 stable**, **10.585 s** of formal resource samples. Counters unavailable;
+  rename throughput remained unset. Ready/pending-load window candidates were
+  observed; these do not identify isolated physical LQ capacity. All **16**
+  charts rendered in native dark/Chinese and light/English previews, with SVG
+  text geometry and 650/1100 px native reflow checked (`build/architecture-v4-style.log`).
+  HTML was generated from the same model; the local WebEngine module was absent,
+  so this v4 check does not claim browser rendering. Six-platform native build
+  and installer results must be recorded against the new commit separately.
   Native CI caught Mach-O function-atom relocation invalidating internal-only
   alignment; the implementation now aligns both function and loop to the native
   Mac page size. The local layout/pipeline follow-up passed **2/2, 4.434 s**

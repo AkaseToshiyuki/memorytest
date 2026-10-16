@@ -207,19 +207,24 @@ class MainWindow(QMainWindow):
         progress_layout.addWidget(self.log)
         layout.addWidget(progress_card)
         layout.addStretch()
-        self.pages, self.group_tabs = {}, {}
+        self.pages, self.group_pages, self.group_tabs = {}, {}, {}
         for group, names in GROUPS.items():
-            page = QWidget()
-            body = QVBoxLayout(page)
-            children = QTabWidget()
-            children.setDocumentMode(True)
-            children.setTabBarAutoHide(True)
-            body.addWidget(children)
-            self.group_tabs[group] = children
-            self.tabs.addTab(page, "")
             for name in names:
                 self.pages[name] = ModulePage(name, self)
-                children.addTab(self.pages[name], "")
+            if len(names) == 1:
+                page = self.pages[names[0]]
+            else:
+                page = QWidget()
+                body = QVBoxLayout(page)
+                children = QTabWidget()
+                children.setDocumentMode(True)
+                children.setTabBarAutoHide(True)
+                body.addWidget(children)
+                self.group_tabs[group] = children
+                for name in names:
+                    children.addTab(self.pages[name], "")
+            self.group_pages[group] = page
+            self.tabs.addTab(page, "")
         from desktop_stress import StressPage
         self.stress_page = StressPage(self)
         self.tools_page = QWidget()
@@ -233,12 +238,12 @@ class MainWindow(QMainWindow):
             self.tools_tabs.addTab(page, "")
         tools_layout.addWidget(self.tools_tabs)
         self.tabs.addTab(self.tools_page, "")
-        self.tabs.tabBar().setTabVisible(4, False)
+        self.tabs.tabBar().setTabVisible(self.tabs.indexOf(self.tools_page), False)
         self.tools_button = self.button("tools", lambda: self.tabs.setCurrentWidget(self.tools_page))
         self.tools_button.setCheckable(True)
         self.tools_button.setProperty("role", "stress-tab")
         self.tabs.setCornerWidget(self.tools_button, Qt.TopRightCorner)
-        self.tabs.currentChanged.connect(lambda index: self.tools_button.setChecked(index == 4))
+        self.tabs.currentChanged.connect(lambda _: self.tools_button.setChecked(self.tabs.currentWidget() is self.tools_page))
         self.stress_button = self.tools_button  # Existing integrations use this widget handle.
         from monitor_access import MonitorAccess
         self.monitor_access = MonitorAccess()
@@ -371,11 +376,12 @@ class MainWindow(QMainWindow):
         if self.output_fallback:
             self.storage_note.setText(tr("output_fallback", self.language) + " · " + tr("auto_output", self.language))
         self.tabs.setTabText(0, tr("home", self.language))
-        for index, (group, names) in enumerate(GROUPS.items(), 1):
-            self.tabs.setTabText(index, tr(group, self.language))
-            for child, name in enumerate(names):
-                self.group_tabs[group].setTabText(child, tr(name, self.language))
-        self.tabs.setTabText(4, tr("tools", self.language))
+        for group, names in GROUPS.items():
+            self.tabs.setTabText(self.tabs.indexOf(self.group_pages[group]), tr(group, self.language))
+            if group in self.group_tabs:
+                for child, name in enumerate(names):
+                    self.group_tabs[group].setTabText(child, tr(name, self.language))
+        self.tabs.setTabText(self.tabs.indexOf(self.tools_page), tr("tools", self.language))
         self.tools_tabs.setTabText(0, tr("stress", self.language))
         for index, (kind, page) in enumerate(self.hardware_tools.items(), 1):
             self.tools_tabs.setTabText(index, tr("tool_" + kind, self.language))

@@ -11,7 +11,7 @@
 #define FE_NOP_4 ".byte 0x0f,0x1f,0x40,0x00\n"
 #define FE_NOP_8 ".byte 0x0f,0x1f,0x84,0x00,0,0,0,0\n"
 #else
-#define FE_BRANCH(stride) "b 1f\n.space " FE_STR(stride) "-4\n1:\n"
+#define FE_BRANCH(stride) "b 1f\n.if " FE_STR(stride) ">4\n.space " FE_STR(stride) "-4\n.endif\n1:\n"
 #define FE_NOP_4 "nop\n"
 #endif
 #define FE_COUNTS(M,s) M(128,s) M(256,s) M(512,s) M(768,s) M(1024,s) M(1536,s) M(2048,s) M(3072,s) M(4096,s) M(6144,s) M(8192,s) M(12288,s) M(16384,s) M(24576,s) M(32768,s)

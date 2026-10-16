@@ -44,12 +44,13 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
     if kind == "bar":
         height = max(height, 38 * len(labels) + 50)
     if kind == "heatmap":
-        height = min(760, max(320, len(labels) * 16 + 80))
+        height = min(760, max(320, len(labels) * 24 + 80))
     elements = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{esc(tr(get("title"), language))}">',
                 f'<rect width="{width}" height="{height}" fill="{color("surface")}"/>']
 
-    def text(x, y, value, anchor="start", size=12, fill=None):
-        elements.append(f'<text x="{x:.2f}" y="{y:.2f}" text-anchor="{anchor}" font-size="{size}" font-family="sans-serif" fill="{fill or color("text")}">{esc(value)}</text>')
+    def text(x, y, value, anchor="start", size=12, fill=None, css_class=None):
+        tag = f' class="{css_class}"' if css_class else ""
+        elements.append(f'<text{tag} x="{x:.2f}" y="{y:.2f}" text-anchor="{anchor}" font-size="{size}" font-family="sans-serif" fill="{fill or color("text")}">{esc(value)}</text>')
 
     def line(x1, y1, x2, y2):
         elements.append(f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="{color("border")}"/>')
@@ -63,6 +64,9 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
         finite = [v for row in matrix for v in row if isinstance(v, (int, float)) and math.isfinite(v)]
         low, high = (min(finite), max(finite)) if finite else (0, 1)
         cell = min((width - 110) / max(1, len(labels)), (height - 80) / max(1, len(labels)))
+        rounded = lambda value: str(math.floor(value + .5) if value >= 0 else math.ceil(value - .5))
+        digits = max((len(rounded(value)) for value in finite), default=1)
+        value_size = min(12, cell * .52, cell / (.65 * digits + .8))
         skip = max(1, math.ceil(len(labels) / 20))
         for i, row in enumerate(matrix):
             for j, value in enumerate(row):
@@ -71,6 +75,16 @@ def plot_svg(chart, language="en", theme="dark", css=False, width=720, height=28
                 rgb = colorsys.hls_to_rgb(0.59 - 0.1 * t, 0.76 - 0.45 * t, 0.38)
                 fill = "#" + "".join(f"{round(v * 255):02x}" for v in rgb) if present else color("base")
                 elements.append(f'<rect x="{65 + j * cell:.2f}" y="{35 + i * cell:.2f}" width="{cell:.2f}" height="{cell:.2f}" fill="{fill}"><title>{esc(labels[i])} → {esc(labels[j])}: {esc(value)} {esc(unit)}</title></rect>')
+                if present:
+                    # Display-only half-up rounding; tooltips and raw tables
+                    # retain the original measurement. Fit every cell label.
+                    number, size = rounded(value), value_size
+                    channels = [int(fill[k:k+2], 16) / 255 for k in (1, 3, 5)]
+                    linear = [c / 12.92 if c <= .04045 else ((c + .055) / 1.055)**2.4 for c in channels]
+                    luminance = sum(c * weight for c, weight in zip(linear, (.2126, .7152, .0722)))
+                    ink = "#000000" if luminance > .179 else "#ffffff"
+                    text(65 + (j + .5) * cell, 35 + (i + .5) * cell + .34 * size,
+                         number, "middle", size, ink, "heatmap-value")
             if i % skip == 0:
                 text(56, 35 + (i + 0.65) * cell, labels[i], "end", 10)
                 text(65 + (i + 0.5) * cell, 26, labels[i], "middle", 10)

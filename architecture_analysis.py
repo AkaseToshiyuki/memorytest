@@ -2,6 +2,7 @@
 from sample_statistics import summarize
 from statistics import median
 from frontend_width_analysis import counter_sources, samples, read_width_scan, sustained_widths, stable as stable_samples
+from backend_resource_analysis import read_resources, read_btb_layout, read_competition
 
 PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "imul_ind8": 32,
           "fadd_dep": 32, "fadd_ind8": 32, "fmul_dep": 32, "fmul_ind8": 32,
@@ -10,7 +11,7 @@ PROBES = {"nop_stream": 64, "iadd_dep": 32, "iadd_ind8": 32, "imul_dep": 32, "im
 
 def read_architecture(data):
     if not isinstance(data, dict) or (data.get("schema_version"), data.get("protocol")) not in {
-            (1, "architecture-probes-v1"), (2, "architecture-probes-v2"), (3, "architecture-probes-v3")}:
+            (1, "architecture-probes-v1"), (2, "architecture-probes-v2"), (3, "architecture-probes-v3"), (4, "architecture-probes-v4")}:
         raise ValueError("unsupported architecture probe protocol")
     if data.get("isa") not in {"x86_64-sse2", "aarch64-fp64"}:
         raise ValueError("unsupported instruction probe ISA")
@@ -30,6 +31,14 @@ def read_architecture(data):
     if not isinstance(caches, dict) or set(caches) != {"l1i", "l1d", "l2", "l3"} or any(
             type(value) is not int or not 0 <= value <= 2**50 for value in caches.values()):
         raise ValueError("invalid OS cache metadata")
+    cache_instances = data.get("cache_instances", [])
+    if not isinstance(cache_instances, list) or len(cache_instances) > 16 or (cache_instances and not policy.startswith("macos")):
+        raise ValueError("invalid per-level cache metadata")
+    if data.get("sampled_cache_level_id") is not None: raise ValueError("unverified cache-to-core association")
+    for index, level in enumerate(cache_instances):
+        if not isinstance(level, dict) or type(level.get("level_id")) is not int or level["level_id"] != index or not isinstance(level.get("name"), str) or not 1 <= len(level["name"]) <= 64 or any(
+                type(level.get(k)) is not int or not 0 <= level[k] <= 2**50 for k in ("l1i", "l1d", "l2", "logical_cpus", "cpus_per_l2")):
+            raise ValueError("invalid per-level cache instance")
     records = data.get("records")
     if not isinstance(records, list) or len(records) != len(PROBES):
         raise ValueError("missing architecture measurements")
@@ -53,16 +62,23 @@ def read_architecture(data):
                          "spread_pct": spread, "stable": not stats["unstable"] and spread <= 15}
     frontend = read_frontend(data.get("frontend"), data["isa"], policy) if data["schema_version"] >= 2 else None
     width_scan = None
-    if data["schema_version"] == 3:
+    if data["schema_version"] >= 3:
         if data.get("frontend", {}).get("protocol") != "frontend-static-v2": raise ValueError("missing decoder-path evidence")
         width_scan = read_width_scan(data.get("width_scan"), data["isa"], policy)
         frontend["fetch_width"] = width_scan["fetch_width"]
         frontend["decode_width"], frontend["retirement_width"] = sustained_widths(frontend, data["isa"], policy, caches["l1i"])
+    resources = read_resources(data.get("resource_scan"), data["isa"]) if data["schema_version"] >= 4 else None
+    btb_layout = read_btb_layout(data.get("btb_layout_scan")) if data["schema_version"] >= 4 else None
+    competition = read_competition(data.get("competition_scan"), policy) if data["schema_version"] >= 4 else None
     return {"metrics": metrics, "reported_cache_bytes": caches, "placement": policy, "cpu_id": cpu,
+            "cache_instances": cache_instances,
             "protocol": data["protocol"], "frontend": frontend, "width_scan": width_scan,
+            "resource_scan": resources, "btb_layout_scan": btb_layout,
+            "competition_scan": competition,
             "isa": data["isa"], "sample_target_ns": target,
             "stable": all(m["stable"] for m in metrics.values()) and (frontend is None or frontend["stable"]) and
-                      (width_scan is None or width_scan["stable"])}
+                      (width_scan is None or width_scan["stable"]) and (resources is None or resources["stable"]) and
+                      (btb_layout is None or btb_layout["stable"]) and (competition is None or competition["stable"])}
 
 
 BTB_COUNTS = (128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768)

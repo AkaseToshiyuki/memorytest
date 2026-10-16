@@ -91,7 +91,7 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(predicate())
 
     def test_idle_has_no_worker_and_bounded_log(self):
-        self.assertEqual(self.window.tabs.count(), 5)
+        self.assertEqual(self.window.tabs.count(), 6)
         self.assertEqual(self.window.process.state(), QProcess.NotRunning)
         self.assertFalse(self.window.cancel.isEnabled())
         for index in range(600):
@@ -137,6 +137,32 @@ class WindowTests(unittest.TestCase):
             self.window.pages["cpu_alu"].run.click()
         begin.assert_called_once_with(["cpu_alu"])
 
+    def test_architecture_is_independent_top_level_task(self):
+        from benchmark_registry import SELECTION_GROUPS
+        from result_model import GROUPS as REPORT_GROUPS
+        from desktop_results import supported
+        page = self.window.pages["cpu_architecture"]
+        core = self.window.group_pages["core_group"]
+        self.assertGreater(self.window.tabs.indexOf(core), 0)
+        self.assertEqual(self.window.tabs.indexOf(page), self.window.tabs.indexOf(core) + 1)
+        self.assertEqual(self.window.group_tabs["core_group"].indexOf(page), -1)
+        self.assertTrue(self.window.tabs.tabBar().isTabVisible(self.window.tabs.indexOf(page)))
+        self.assertFalse(self.window.tabs.tabBar().isTabVisible(self.window.tabs.indexOf(self.window.tools_page)))
+        self.window.tabs.setCurrentWidget(page)
+        self.window.retranslate()
+        self.assertIs(self.window.tabs.currentWidget(), page)
+        self.assertFalse(self.window.tools_button.isChecked())
+        self.assertNotIn("cpu_architecture", SELECTION_GROUPS["core_group"])
+        self.assertNotIn("cpu_architecture", REPORT_GROUPS["core_group"])
+        self.assertEqual(REPORT_GROUPS["architecture_group"], ["cpu_architecture"])
+        core_button = self.window.group_buttons[list(SELECTION_GROUPS).index("core_group")]
+        with patch.object(self.window, "begin") as begin:
+            core_button.click()
+        begin.assert_called_once_with([name for name in SELECTION_GROUPS["core_group"] if supported(name)])
+        with patch.object(self.window, "begin") as begin:
+            page.run.click()
+        begin.assert_called_once_with(["cpu_architecture"])
+
     def test_all_module_actions_are_equal_width_and_fill_the_row(self):
         self.window.show()
         for language in ("zh", "en"):
@@ -144,12 +170,14 @@ class WindowTests(unittest.TestCase):
             self.window.retranslate()
             for width in (880, 1400):
                 self.window.resize(width, 850)
-                for index, (group, tabs) in enumerate(self.window.group_tabs.items(), 1):
-                    self.window.tabs.setCurrentIndex(index)
-                    for child in range(tabs.count()):
-                        tabs.setCurrentIndex(child)
+                for group, container in self.window.group_pages.items():
+                    self.window.tabs.setCurrentWidget(container)
+                    tabs = self.window.group_tabs.get(group)
+                    pages = [tabs.widget(child) for child in range(tabs.count())] if tabs else [container]
+                    for page in pages:
+                        if tabs:
+                            tabs.setCurrentWidget(page)
                         self.app.processEvents()
-                        page = tabs.widget(child)
                         buttons = (page.run, page.cancel, page.open, page.log_button)
                         widths = [button.width() for button in buttons]
                         self.assertLessEqual(max(widths) - min(widths), 1, page.name)

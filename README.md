@@ -120,7 +120,7 @@ without hardware workloads. Details: [TEST_LAYERS.md](TEST_LAYERS.md)
 | `test_cpu_float` | Floating-point wall time (add, mul, FMA, SIMD dot product) |
 | `test_cpu_branch` | Branch predictor latency (always-taken, never-taken) |
 | `test_cpu_multi` | Multi-core scaling efficiency across thread counts |
-| `test_cpu_architecture` | Paired page-boundary fetch scan, qualified decoder/retirement throughput, BTB and code-footprint sweeps; raw evidence and explicit inference status |
+| `test_cpu_architecture` | Fetch/decoder scans, BTB layout controls, speculative resource windows and mixed execution throughput; raw evidence and qualified inference |
 
 ## Build
 
@@ -385,7 +385,7 @@ python3 run_benchmarks.py --module cpu_alu  # 等价的直接入口
 | `test_cpu_float` | 浮点墙钟时间（加减乘、FMA、SIMD 点积） |
 | `test_cpu_branch` | 分支预测延迟（always-taken、never-taken） |
 | `test_cpu_multi` | 不同线程数下的多核扩展效率 |
-| `test_cpu_architecture` | 页边界取指对照、解码／退休吞吐、BTB／指令工作集扫描；保留原始数据及候选／下界状态 |
+| `test_cpu_architecture` | 取指／解码扫描、BTB 布局对照、推测资源窗口及混合执行吞吐；保留原始数据及判定状态 |
 
 ## 构建
 
@@ -677,7 +677,7 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 
 ### 架构分析、共享扫描和平台诊断（2026-10-16）
 
-- 主测试链路新增 `cpu_architecture`，桌面位于核心性能组，可独立运行，也包含在全选和 CPU 分类中。
+- 主测试链路新增 `cpu_architecture`，桌面使用独立的架构分析一级标签，可独立运行，也包含在全选和 CPU 分类中。
   原生 x86-64 SSE2／AArch64 FP64 后端实测 12 项：NOP 流、整数加／乘、FP64 加／乘的
   单依赖链和八条独立链，以及 32 KiB 读／有序写、64 KiB 双数组有序复制。
   每项 10 样本、目标 50 ms、预热至少 10 ms；保存完整 `cpu_architecture.json`，从原始时间重算卡片、图和表。
@@ -693,7 +693,7 @@ above are methodological comparisons, not bundled third-party benchmark engines.
   有效载荷指令数除以实际周期得到实测指令供给，保留调用、返回、循环及读取计数器的开销。
   此比值同时受取指、解码、微操作缓存、重命名及退休约束，不能独立确定取指／解码设计宽度。
 - 架构图分别显示 L1I、BTB、取指、解码、重命名、寄存器、调度、访存和退休。
-  ADD／MUL／内存探针移至明细。v3 宽度候选／吞吐下界见下节；ROB、调度器、物理寄存器、端口容量仍未测定。
+  ADD／MUL／内存探针移至明细。v3 宽度候选／吞吐下界见下节；后续 v4 资源窗口和执行竞争见新增方法节。
   系统缓存信息单独标注：Linux 读取绑定 CPU 的 sysfs，Mac 为全局 sysctl 摘要，Windows 为各级最大实例；
   共享缓存不冒充每核容量，缺失值不使用猜测兜底。Linux 固定一个可用逻辑 CPU，Mac 仅验证 QoS，Windows 由系统调度。
 - 内存延迟扩展为依赖读取、64 B 有序写、64 B 有序复制，各 20 个正式样本。
@@ -760,6 +760,51 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 颜色表示模块类别，完成／错误状态继续使用独立标签。界面采用细边框、低饱和填充、突出数值的指标卡片、
 右对齐数值列和随宽度重排的卡片网格。深浅主题使用同一结构，中英文共享数据与图形布局。
 
+#### 后端窗口与布局对照（architecture-probes-v4）
+
+v4 保留 v1–v3 数据兼容性，新增三组静态内核及 macOS 性能层级缓存。桌面与离线报告共享
+架构图、状态、曲线及明细。状态区分未测定、分配失败、重叠未建立、波动、未见转折、共同瓶颈和候选。
+
+| 探针 | 网格与对照 | 输出含义 |
+|---|---|---|
+| BTB 布局 | 16–4096 个目标，4/8/16/32/64 B 间距；模 128 的 0/32 B 地址偏移；第二偏移逆序扫描 | 每种间距的布局转折；两偏移复现；相同字节工作集处的转折标记工作集／索引相关 |
+| ROB／整数／向量结果窗口 | 0–4096 NOP；0–2048 条 32/64 位整数或 128 位向量结果写入；两种锚点深度 | 可用推测填充窗口，单位为填充指令；NOP 合并及固定锚点开销保留 |
+| 调度／待完成访存 | 0–512 条整数／向量源操作数依赖、加载地址依赖、存储数据依赖；就绪输入对照 | 调度／派发及待完成访存窗口；未分离 IQ、DQ、ROB、LQ、SQ 时不报告物理队列总条目 |
+| AArch64 标量 FP | 独立 FP32／FP64 结果写入及源操作数依赖；同样的串行和就绪对照 | 各精度可用窗口；x86 基线 SSE2 的标量 PRF 窗口不支持，避免高位保留导致的假依赖 |
+| 执行资源竞争 | ADD、MUL、FP64 ADD/MUL、加载、存储及六组 1:1 混合；每类四条链；32/64 条展开 | 实测 ns/instr、可用时的硬件 instr/cycle、混合重叠增益；物理端口拓扑未定 |
+| 重命名路径 | 非消除型结果写入吞吐，要求两个展开长度一致、时间与硬件周期稳定 | writes/cycle 下界；执行延迟和退休瓶颈可能降低观测吞吐 |
+
+后端资源内核采用两条各 **64 MiB** 的随机单环，节点间隔 64 B，下一指针经 XOR 编码。
+两条链分别作为 A/B 锚点，每锚点一或两次依赖加载；填充指令位于 A 和 B 之间。
+串行对照以 `A & 63` 的真实数据依赖约束 B 地址，并行对照使用对齐 scratch 的零偏移。
+两模式的指令数、访存数相同；每轮末尾合并两个锚点，限制跨轮流水化。指针连续推进，避免
+每对测量重复同一段而系统性预热后测变体。每次计时交替 AB/BA，第二锚点深度逆序扫描。
+访存填充使用独立的 32 KiB scratch 区域、64 B 地址间隔；分配失败保留其他扫描结果。
+
+窗口判定使用同工作量的并行／串行时间比。零填充基线须低于 0.78；转折前三个稳定测点
+比值跨度不超过 0.12，后两个稳定点均至少达到 0.85 且比前平台增加 0.15；两个锚点深度须
+给出同一相邻区间。结果写入或依赖探针还要求对应就绪控制在该区间及下一个点保持低于 0.8。
+平滑吞吐饱和、锚点敏感或控制同处受限时不产生独立资源容量结论。阈值是保守的实验判据，
+未对某一处理器容量校准；即使通过，也需要真机重复和其他内核／公开资料交叉核验。
+
+BTB 布局每点和资源每对默认目标 **2 ms**、预热 **0.25 ms**，各 10 个正式样本；执行竞争
+默认目标 **5 ms**、预热 **0.5 ms**，各 10 样本。原有基础探针仍为 50/10 ms，v2/v3 前端为
+10/2 ms。工作量均先校准；取消沿用子进程生命周期，不新增后台常驻服务。混合重叠增益为
+`(单独 A 的 ns/op + 单独 B 的 ns/op) / (2 × 混合 ns/op)`，同时包含共享前端和退休资源的影响。
+
+所有新增内核使用编译期文本及基线 ISA，无 JIT、可写可执行页、私有 PMU、额外提权或改动系统
+安全配置。Linux 仍绑定可用逻辑 CPU；macOS 仍仅设置 QoS，按 `hw.perflevelN` 公开原始缓存，
+不关联采样核心；Windows 保留墙钟曲线和竞争比，没有硬件周期时不产生每周期结果。
+虚拟机 CI 验证构建、实际指令、计算、边界和数据契约，不能验证实体芯片的物理容量。
+
+独立方法参考：[Henry Wong 的 ROB／推测寄存器窗口实验](https://blog.stuffedcow.net/2013/05/measuring-rob-capacity/)、
+[Dougall Johnson 的加载／存储队列分离实验](https://dougallj.wordpress.com/2021/04/08/apple-m1-load-and-store-queue-measurements/)、
+[jiegec 的 M4 布局与窗口实验](https://jia.je/hardware/2025/05/21/apple-m4/)、
+[PMEvo 的执行资源模型推断](https://arxiv.org/abs/2004.10044)。项目未复制这些处理器的容量作为默认值。
+
+核间延迟热图现在在每个有效单元格中显示四舍五入的整数延迟。标签按颜色选择黑／白前景，
+原始 JSON、悬浮提示及明细保留原精度，未测单元格留空。
+
 ### 独立测试入口与重复采样修订（diagnostic-v3，默认值更新于 2026-10-16）
 
 此节是最新方法；上文 v2／v2.1 记录描述此前版本，不代表当前采样默认值。
@@ -772,7 +817,7 @@ above are methodological comparisons, not bundled third-party benchmark engines.
 | Linux 核间延迟／CAS 吞吐量 | 20 | 每个有向核对、每种指标 |
 | Apple Silicon 实验性核对延迟 | 10 | 每个实际覆盖的有向核对；不是严格绑核矩阵 |
 | ComputeMark v2 | 10 | 原为 20；每种负载、每个线程数；内核、公式、100 ms 校准下限不变 |
-| 架构分析 | 10 | 每个探针，50 ms 目标、10 ms 预热 |
+| 架构分析 | 10 | 基础 50/10 ms；前端 10/2 ms；资源窗口及 BTB 布局 2/0.25 ms；执行竞争 5/0.5 ms（目标／预热） |
 
 - 正式样本不包含预热和校准。诊断测试仍默认每个样本目标 150 ms、最低预热 50 ms；
   有界自动测试会缩短这个时长，不把测试夹具的运行时间当成用户测试时长。
@@ -848,7 +893,8 @@ STREAM 偏重最佳带宽、core-to-core-latency 的统计方法也不同，本�
 FPU 功耗及长时间稳定性仍需新安装包真机测试；不能从编译通过或其他 GPU 的短时运行推断。
 
 本轮仅交付工作分支、验证记录和测试构件；没有创建 0.1.1 标签或 Release，
-也不会自动替换 V0.1.0 资产。三大界面分组是缓存、内存、核心性能测试，
+也不会自动替换 V0.1.0 资产。界面和报告分组是缓存、内存、核心性能测试、架构分析；
+架构分析使用独立的一级标签，与核心性能测试平行，运行核心性能组不包含架构分析。
 原 CLI 模块 ID 和 `memory` / `cpu` 分类语义不变。
 
 桌面原生图表与离线 HTML 使用同一结构化结果模型，支持中文／英文和浅色／深色。

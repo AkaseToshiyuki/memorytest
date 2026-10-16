@@ -32,6 +32,9 @@ int main(void) {
 #else
 #include "architecture_frontend.h"
 #include "architecture_widths.h"
+#include "architecture_btb_layout.h"
+#include "architecture_resources.h"
+#include "architecture_competition.h"
 enum { ARCH_MEASUREMENTS = 12 };
 static const char *arch_names_v1[] = {"nop_stream", "iadd_dep", "iadd_ind8", "imul_dep", "imul_ind8",
     "fadd_dep", "fadd_ind8", "fmul_dep", "fmul_ind8", "load_chain_32k", "write_ordered_32k", "copy_ordered_64k"};
@@ -139,6 +142,25 @@ static void architecture_cache_metadata(int cpu) {
     detect_cache_sizes(); /* macOS sysctl / Windows RelationCache; no guesses. */
 #endif
 }
+static void architecture_cache_instances(FILE *json) {
+    fputs(",\"cache_instances\":[", json);
+#ifdef __APPLE__
+    DarwinPerfLevel levels[DARWIN_MAX_PERF_LEVELS];
+    size_t count = darwin_perflevels(levels, DARWIN_MAX_PERF_LEVELS);
+    for (size_t i = 0; i < count; ++i) {
+        fprintf(json, "%s{\"level_id\":%zu,\"name\":\"", i ? "," : "", i);
+        for (const unsigned char *p = (const unsigned char *)levels[i].name; *p; ++p) {
+            if (*p == '"' || *p == '\\') fprintf(json, "\\%c", *p);
+            else if (*p < 32) fprintf(json, "\\u%04x", *p);
+            else fputc(*p, json);
+        }
+        fprintf(json, "\",\"logical_cpus\":%llu,\"l1i\":%llu,\"l1d\":%llu,\"l2\":%llu,\"cpus_per_l2\":%llu}",
+            (unsigned long long)levels[i].logical, (unsigned long long)levels[i].l1i,
+            (unsigned long long)levels[i].l1d, (unsigned long long)levels[i].l2, (unsigned long long)levels[i].cpus_per_l2);
+    }
+#endif
+    fputs("],\"sampled_cache_level_id\":null", json);
+}
 int main(int argc, char **argv) {
     (void)argv;
     if (argc != 1) return 2;
@@ -171,17 +193,17 @@ int main(int argc, char **argv) {
     if (!json) { report_free(report); return 1; }
     report_write_system_info(report);
     report_section(report, "Architecture Probe Conditions");
-    report_write(report, "- Protocol: architecture-probes-v3\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
+    report_write(report, "- Protocol: architecture-probes-v4\n- Placement: %s\n- CPU ID: %d\n- ISA: " ARCH_KERNEL_ISA "\n", placement, cpu);
     bench_report_conditions(report);
     report_write(report, "- Instruction count is explicit payload work, NOT retired instructions from a PMU.\n"
         "- The twelve instruction/memory probes use wall time, including loop and result retention overhead.\n"
         "- Ordered write/copy include address loads and full fences. Working sets are 32/32/64 KiB, not guaranteed L1 hits.\n"
-        "- Register-file, queue, scheduler and ROB capacities remain unmeasured. Mac QoS does not select a P/E core.\n\n");
-    report_write(report, "- Cache metadata: Linux uses the pinned CPU's sysfs entries; macOS uses global sysctl summaries; "
+        "- Backend resource scans measure available speculative windows. Mac QoS does not select a P/E core.\n\n");
+    report_write(report, "- Cache metadata: Linux uses the pinned CPU's sysfs entries; macOS uses global sysctl summaries plus unassociated performance levels; "
         "Windows uses the largest OS-reported instance per level. Shared caches are not per-core capacities.\n\n");
     report_section(report, "Architecture Measurements");
     report_write(report, "| Probe | ns/op | Operations | Samples | Status |\n|---|---|---|---|---|\n");
-    fprintf(json, "{\"schema_version\":3,\"protocol\":\"architecture-probes-v3\",\"isa\":\"" ARCH_KERNEL_ISA "\","
+    fprintf(json, "{\"schema_version\":4,\"protocol\":\"architecture-probes-v4\",\"isa\":\"" ARCH_KERNEL_ISA "\","
         "\"placement\":\"%s\",\"cpu_id\":%d,\"sample_count\":%u,\"sample_target_ns\":%llu,"
         "\"timer\":\"monotonic-wall-time\",\"cache_source\":\"OS-reported-not-probed\","
         "\"reported_cache_bytes\":{\"l1i\":%zu,\"l1d\":%zu,\"l2\":%zu,\"l3\":%zu},\"records\":[",
@@ -200,7 +222,9 @@ int main(int argc, char **argv) {
         fputs("],\"statistics\":", json); sample_statistics_json(json, &sample->statistics); fputc('}', json);
     }
     fputs("]", json);
-    int failed = frontend_report(json, report) || width_report(json, report) || ferror(json);
+    architecture_cache_instances(json);
+    int failed = frontend_report(json, report) || width_report(json, report) || ferror(json) ||
+        btb_layout_report(json, report) || resource_report(json, report) || competition_report(json, report);
     fputs("}\n", json);
     if (fclose(json)) failed = 1;
     if (report_finish(report)) failed = 1;

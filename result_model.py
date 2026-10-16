@@ -10,10 +10,9 @@ from benchmark_registry import TASKS as TESTS, SELECTION_GROUPS, select_modules
 from compute_score import compute_mark_score
 from i18n import ref
 
-GROUPS = {"cache_group": ["cache_hierarchy"], "memory_group": ["memory_bandwidth"],
-          "core_group": ["cpu_alu", "cpu_float", "cpu_branch", "cpu_multi", "inter_core", "cpu_architecture"]}
-for _group in ("cache_group", "memory_group"):
-    GROUPS[_group] += SELECTION_GROUPS[_group]
+GROUPS = {group: list(names) for group, names in SELECTION_GROUPS.items()}
+for _group, _legacy in (("cache_group", "cache_hierarchy"), ("memory_group", "memory_bandwidth")):
+    GROUPS[_group].insert(0, _legacy)
 
 
 @dataclass
@@ -289,6 +288,11 @@ def build_module(name, reports, record=None):
             frontend = evidence["frontend"]
             transitions = frontend["btb_transitions"] if frontend else []
             btb_value = ", ".join(f'{r["lower"]}–{r["upper"]}' for r in transitions) or "—"
+            layout = evidence.get("btb_layout_scan")
+            if layout:
+                btb_value = ", ".join(f'{r["lower"]}–{r["upper"]}@{r["stride"]}B' for r in layout["transitions"][:2]) or "—"
+            cache_values = sorted({r["l1i"]/1024 for r in evidence.get("cache_instances", []) if r["l1i"]})
+            cache_value = (f'{cache_values[0]:g}–{cache_values[-1]:g}' if len(cache_values) > 1 else cache_values[0]) if cache_values else evidence["reported_cache_bytes"]["l1i"] / 1024 or "—"
             def width_kpi(key, label, unit):
                 value = frontend.get(key) if frontend else None
                 return {"label": ref(label), "value": (("≥" if value["status"] == "lower_bound" else "≈") +
@@ -296,8 +300,8 @@ def build_module(name, reports, record=None):
             result.conditions = [(ref("protocol"), evidence["protocol"]), (ref("samples"), 10),
                 (ref("sample_target"), f'{evidence["sample_target_ns"] / 1e6:g} ms'),
                 (ref("placement"), ref("pinned" if evidence["cpu_id"] >= 0 else "qos" if evidence["placement"].startswith("macos") else "arch_os_scope"))]
-            result.kpis = [{"label": ref("arch_instruction_cache"), "value": evidence["reported_cache_bytes"]["l1i"] / 1024 or "—", "unit": "KiB", "category": "cache"},
-                {"label": ref("arch_btb_candidate"), "value": btb_value, "unit": "", "category": "frontend"},
+            result.kpis = [{"label": ref("arch_instruction_cache"), "value": cache_value, "unit": "KiB", "category": "cache"},
+                {"label": ref("arch_layout_transition" if layout else "arch_btb_candidate"), "value": btb_value, "unit": "", "category": "frontend"},
                 width_kpi("fetch_width", "arch_fetch_width", "B/cycle"),
                 width_kpi("decode_width", "arch_decode_width", "instr/cycle")]
             result.charts = [Chart("architecture_diagram", "architecture", "", [], [{"evidence": evidence}])]
@@ -346,6 +350,48 @@ def build_module(name, reports, record=None):
                     column("latency", "ns/loop"), column("arch_width", "cycles/loop"), column("status")],
                     [[r["count"], ref("arch_crossed" if r["crossed"] else "arch_aligned"), r["ns_per_iteration"],
                       r["cycles_per_iteration"], ref("measured" if r["stable"] else "unstable")] for r in points]))
+            if evidence.get("cache_instances"):
+                result.tables.append(Table("arch_cache_levels", [column("arch_perflevel"), column("logical"),
+                    column("L1I", "KiB"), column("L1D", "KiB"), column("L2", "KiB")],
+                    [[r["name"], r["logical_cpus"], r["l1i"]/1024 or None, r["l1d"]/1024 or None,
+                      r["l2"]/1024 or None] for r in evidence["cache_instances"]]))
+            if layout:
+                points = layout["records"]
+                xs = sorted({r["count"] for r in points})
+                for offset in (0, 32):
+                    series = [{"label": f'{stride} B / +{offset} B', "values": [next(r["ns"] for r in points
+                        if r["count"] == count and r["stride"] == stride and r["offset"] == offset) for count in xs]}
+                        for stride in (4, 8, 16, 32, 64)]
+                    result.charts.append(Chart("arch_btb_layout", "line", "ns/branch", xs, series, xs, "arch_target_count", True))
+                result.tables.append(Table("arch_btb_layout", [column("arch_spacing", "B"), column("arch_window"), column("status")],
+                    [[r["stride"], f'{r["lower"]}–{r["upper"]}', ref("arch_"+r["status"])] for r in layout["transitions"]]))
+            resources = evidence.get("resource_scan")
+            if resources:
+                result.conditions.append((ref("arch_ring_size"), f'{resources["ring_bytes"]/1024**2:g} MiB'))
+                points = resources["records"]
+                result.tables.append(Table("arch_resource_scan", [column("measurement"), column("arch_window", "instr"), column("status")],
+                    [[ref("arch_res_"+family), f'{value["lower"]}–{value["upper"]}' if value["status"] == "candidate" else "—",
+                      ref("arch_window_candidate" if value["status"] == "candidate" else "arch_"+value["status"])]
+                     for family, value in resources["candidates"].items()]))
+                for family in resources["candidates"]:
+                    xs = sorted({p["count"] for p in points if p["family"] == family})
+                    series = [{"label": f'{depth} load/anchor', "values": [next(p["ratio"] for p in points
+                        if p["family"] == family and p["depth"] == depth and p["count"] == count) for count in xs]}
+                        for depth in (1, 2)]
+                    result.charts.append(Chart("arch_res_"+family, "line", "parallel/serial", xs, series, xs, "arch_filler_count"))
+                result.tables.append(Table("arch_resource_raw", [column("measurement"), column("arch_filler_count"),
+                    column("arch_anchor_depth"), column("arch_parallel", "ns/loop"), column("arch_serial", "ns/loop"),
+                    column("arch_overlap_ratio"), column("status")],
+                    [[ref("arch_res_"+p["family"]), p["count"], p["depth"], p["parallel_ns"], p["serial_ns"], p["ratio"],
+                      ref("measured" if p["stable"] else "unstable")] for p in points]))
+            competition = evidence.get("competition_scan")
+            if competition:
+                result.tables.append(Table("arch_competition", [column("measurement"), column("arch_overlap_gain", "×"), column("status")],
+                    [[p["family"], p["gain"], ref("measured" if p["status"] == "measured" else "arch_"+p["status"])] for p in competition["mixtures"]]))
+                result.tables.append(Table("arch_competition_raw", [column("measurement"), column("arch_loop_instructions"),
+                    column("latency", "ns/instr"), column("arch_effective_supply", "instr/cycle"), column("status")],
+                    [[p["family"], p["unroll"], p["ns"], p["instructions_per_cycle"], ref("measured" if p["stable"] else "unstable")]
+                     for p in competition["records"]]))
             return result
         for pattern, key in [(r"^- Memory Size: ([\d.]+\s*(?:Mi?B|Gi?B|Ki?B))\s*$", "buffer_size"),
                              (r"^- Protocol: ([\w.-]+)\s*$", "protocol"),
