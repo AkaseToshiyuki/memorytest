@@ -9,6 +9,7 @@
 #include "compute_kernel.h"
 #include "sample_statistics.h"
 #include "thread_schedule.h"
+#include "performance_units.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
@@ -363,9 +364,12 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
                 levels[i].l1d / 1024, levels[i].l2 / 1024, levels[i].cpus_per_l2);
     fprintf(md, "\n");
 #endif
+    double min_gops = results[0].rate;
+    for (int i = 1; i < count; ++i) if (results[i].rate < min_gops) min_gops = results[i].rate;
+    double rate_scale = min_gops >= 100.0 ? 0.001 : 1.0;
     fprintf(md, "## ComputeMark v2 measured workloads\n\n"
-                "| Operation | Category | Threads | Time(ms) | Speedup | Efficiency | Status | Rate (Gop/s) |\n"
-                "|---|---|---|---|---|---|---|---|\n");
+                "| Operation | Category | Threads | Time(ms) | Speedup | Efficiency | Status | Rate (%s) |\n"
+                "|---|---|---|---|---|---|---|---|\n", performance_rate_unit(min_gops));
     double single[2] = {0, 0};
     for (int i = 0; i < count; ++i) {
         Result *r = &results[i];
@@ -374,7 +378,7 @@ static int write_reports(Result *results, int count, const int *cpus, int availa
         fprintf(md, "| %s | %s | %d | %.3f | %.3fx | %.2f%% | measured | %.9f |\n",
                 r->kind ? "FP64 logistic" : "U64 xorshift", r->kind ? "FP64" : "Integer",
                 r->threads, r->statistics.median / 1e6,
-                speedup, speedup / r->threads * 100.0, r->rate);
+                speedup, speedup / r->threads * 100.0, r->rate * rate_scale);
     }
     fprintf(md, "\n## Protocol\n\n"
                 "- Workload: %s; scalar only, binary64 FP, uint64 modulo arithmetic.\n"
@@ -516,8 +520,8 @@ int main(int argc, char **argv) {
             Result *r = &results[count++];
             r->kind = kind; r->threads = levels[pass];
             if (benchmark(r, cpus, slots)) { free(cpus); return 1; }
-            printf("%s / %d threads: %.6f %s\n", kind ? "FP64" : "Integer", r->threads,
-                   r->rate, kind ? "GFLOP/s" : "Gop/s");
+            printf("%s / %d threads: %.6g %s\n", kind ? "FP64" : "Integer", r->threads,
+                   performance_rate_value(r->rate), performance_rate_unit(r->rate));
             fflush(stdout);
         }
     }

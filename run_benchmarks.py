@@ -99,11 +99,11 @@ def validate_evidence(name, reports):
         elif name == "inter_core":
             report = (reports / TASKS[name]["report"]).read_text(encoding="utf-8")
             observed = reports / "inter_core_observed.json"
-            if "macos-observed-cpu-pairs-v1" in report or observed.exists():
+            if "macos-observed-cpu-pairs-" in report or observed.exists():
                 from intercore_observed import read_observed
-                if "macos-observed-cpu-pairs-v1" not in report:
+                evidence = read_observed(json.loads(observed.read_text(encoding="utf-8")))
+                if "- Protocol: " + evidence["protocol"] + "\n" not in report + "\n":
                     raise ValueError("observed evidence does not match the report protocol")
-                read_observed(json.loads(observed.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError, OverflowError) as exc:
         return f"invalid raw evidence: {exc}"
     return None

@@ -9,18 +9,19 @@ import sys
 import tempfile
 import unittest
 from benchmark_registry import ROOT
-from intercore_observed import read_observed, PROTOCOL
+from intercore_observed import read_observed, PROTOCOL, PROTOCOLS
 from test_sample_statistics import reference
 
 
-def fixture():
-    return {"schema_version": 1, "protocol": PROTOCOL, "os": "Darwin", "affinity_verified": False,
+def fixture(protocol=PROTOCOL):
+    samples = PROTOCOLS[protocol][0]
+    return {"schema_version": 1, "protocol": protocol, "os": "Darwin", "affinity_verified": False,
             "migration_verification": "endpoints-only", "cpu_id_source": "TPIDR_EL0-low12-private-ABI",
             "timer": "CLOCK_MONOTONIC", "qos": "user-initiated", "qos_verified": True,
             "background_load": "other-workers-runnable", "logical_cpus": 3, "workers": 2,
-            "budget_ms": 1000, "sample_count": 10, "round_trips": 2000, "warmup_round_trips": 128,
+            "budget_ms": 1000, "sample_count": samples, "round_trips": 2000, "warmup_round_trips": 128,
             "covered_pairs": 1, "attempts": [{"from": [101, 101], "to": [104, 104],
-                "elapsed_ns": value * 4000, "status": "kept"} for value in [48, 49, 50, 51, 52] * 2]}
+                "elapsed_ns": (48 + index % 5) * 4000, "status": "kept"} for index in range(samples)]}
 
 
 class ObservedContractTests(unittest.TestCase):
@@ -28,9 +29,38 @@ class ObservedContractTests(unittest.TestCase):
         result = read_observed(fixture())
         self.assertEqual(result["ids"], [101, 104])
         self.assertEqual(set(result["pairs"]), {(101, 104)})
-        for key, value in reference([48, 49, 50, 51, 52] * 2).items():
+        for key, value in reference([48 + index % 5 for index in range(32)]).items():
             self.assertEqual(result["pairs"][101, 104][key], value)
         self.assertEqual((result["covered_pairs"], result["possible_pairs"]), (1, 6))
+
+    def test_legacy_and_current_sample_counts_are_not_interchangeable(self):
+        for protocol, count in (("macos-observed-cpu-pairs-v1", 10), (PROTOCOL, 32)):
+            data = fixture(protocol)
+            result = read_observed(data)
+            self.assertEqual(result["sample_count"], count)
+            self.assertEqual(result["pairs"][101, 104]["count"], count)
+            self.assertEqual(result["pairs"][101, 104]["median"], 50)
+            for wrong in (10, 32):
+                if wrong != count:
+                    data["sample_count"] = wrong
+                    with self.assertRaises(ValueError): read_observed(data)
+
+    def test_expanded_attempt_limit_and_large_report_preserve_evidence(self):
+        from result_model import build_module
+        data = fixture()
+        quota = dict(data["attempts"][0], status="quota")
+        data["attempts"] += [quota] * (64000 - 32)
+        encoded = json.dumps(data)
+        self.assertGreater(len(encoded), 5_000_000)
+        with tempfile.TemporaryDirectory() as directory:
+            reports = Path(directory)
+            (reports / "inter_core_latency_report.md").write_text("# Observed\n- Protocol: " + PROTOCOL + "\n")
+            (reports / "inter_core_observed.json").write_text(encoded)
+            result = build_module("inter_core", reports)
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.tables[0].rows[0][2:4], [32, 50])
+        data["attempts"].append(quota)
+        with self.assertRaises(ValueError): read_observed(data)
 
     def test_reject_invalid_placement_counts_and_migrated_samples(self):
         for key, value in (("affinity_verified", True), ("sample_count", 20), ("covered_pairs", 2),
@@ -66,6 +96,8 @@ class ObservedContractTests(unittest.TestCase):
             self.assertIsNotNone(validate_evidence("inter_core", reports))
             (reports / "inter_core_observed.json").write_text(json.dumps(fixture()))
             self.assertIsNone(validate_evidence("inter_core", reports))
+            report.write_text("# Observed\n- Protocol: macos-observed-cpu-pairs-v1\n")
+            self.assertIsNotNone(validate_evidence("inter_core", reports))
             report.write_text("# Strict legacy matrix\n")
             self.assertIsNotNone(validate_evidence("inter_core", reports))
 
@@ -97,7 +129,7 @@ class ObservedNativeFixtureTests(unittest.TestCase):
                     raw = json.loads((Path(directory) / "reports/inter_core_observed.json").read_text())
                     result = read_observed(raw)
                     self.assertEqual(result["covered_pairs"], 2)
-                    self.assertEqual(result["attempt_counts"], {"kept": 20})
+                    self.assertEqual(result["attempt_counts"], {"kept": 64})
                     for key, stats in result["pairs"].items():
                         values = [a["elapsed_ns"] / 4000 for a in raw["attempts"] if (a["from"][0], a["to"][0]) == key]
                         for field, value in reference(values).items():

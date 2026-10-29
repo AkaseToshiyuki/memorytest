@@ -9,8 +9,9 @@
 #include <time.h>
 #include "sample_statistics.h"
 #define OBS_MAX_CPUS 64
-#define OBS_SAMPLES 10
-#define OBS_MAX_ATTEMPTS 20000
+#define OBS_PROTOCOL "macos-observed-cpu-pairs-v2"
+#define OBS_SAMPLES 32
+#define OBS_MAX_ATTEMPTS 64000
 #define OBS_ROUND_TRIPS 2000
 #define OBS_WARMUP 128
 
@@ -138,7 +139,7 @@ static int obs_write(ObsAttempt *attempts, unsigned attempts_count, ObsPair *pai
     unsigned ready_pairs = 0;
     report_write_system_info(report);
     report_section(report, "Observed CPU-Pair Latency (experimental)");
-    report_write(report, "- Protocol: macos-observed-cpu-pairs-v1\n- Samples: %d\n"
+    report_write(report, "- Protocol: " OBS_PROTOCOL "\n- Samples: %d\n"
         "- No exact CPU affinity. Endpoint observations cannot exclude intermediate migration.\n"
         "- CPU IDs use an implementation-specific register layout, not a stable public ABI.\n"
         "- Other workers remain runnable. QoS is user-initiated, not P/E core selection.\n"
@@ -157,7 +158,7 @@ static int obs_write(ObsAttempt *attempts, unsigned attempts_count, ObsPair *pai
     }
     report_write(report, "\n- Covered ordered pairs: %u / %u; observed CPU IDs: %u; workers: %u; budget: %u ms.\n",
                  ready_pairs, logical * (logical - 1), id_count, workers, budget_ms);
-    fprintf(audit, "{\"schema_version\":1,\"protocol\":\"macos-observed-cpu-pairs-v1\","
+    fprintf(audit, "{\"schema_version\":1,\"protocol\":\"" OBS_PROTOCOL "\","
         "\"os\":\"Darwin\",\"affinity_verified\":false,\"migration_verification\":\"endpoints-only\","
         "\"qos\":\"user-initiated\",\"qos_verified\":true,\"background_load\":\"other-workers-runnable\","
         "\"cpu_id_source\":\"TPIDR_EL0-low12-private-ABI\",\"timer\":\"CLOCK_MONOTONIC\","
@@ -177,14 +178,14 @@ static int obs_write(ObsAttempt *attempts, unsigned attempts_count, ObsPair *pai
     if (report_finish(report)) io_error = 1;
     if (io_error) return 1;
     if (!ready_pairs) {
-        fputs("UNSUPPORTED: no observed CPU pair reached ten usable samples within the budget.\n", stderr);
+        fprintf(stderr, "UNSUPPORTED: no observed CPU pair reached %u usable samples within the budget.\n", OBS_SAMPLES);
         return 77;
     }
     return 0;
 }
 
 static int observed_main(int argc, char **argv) {
-    unsigned logical = obs_logical_cpus(), workers = logical, budget_ms = 10000;
+    unsigned logical = obs_logical_cpus(), workers = logical, budget_ms = 20000;
     for (int i = 1; i < argc; ++i) {
         if ((!strcmp(argv[i], "--budget-ms") || !strcmp(argv[i], "--workers")) && i + 1 < argc) {
             int budget = !strcmp(argv[i], "--budget-ms");

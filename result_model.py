@@ -9,6 +9,7 @@ import statistics
 from benchmark_registry import TASKS as TESTS, SELECTION_GROUPS, select_modules
 from compute_score import compute_mark_score
 from i18n import ref
+from performance_units import row_gops, throughput_scale, throughput_value
 
 GROUPS = {group: list(names) for group, names in SELECTION_GROUPS.items()}
 for _group, _legacy in (("cache_group", "cache_hierarchy"), ("memory_group", "memory_bandwidth")):
@@ -51,10 +52,10 @@ class ModuleResult:
         return asdict(self)
 
 
-def read_text(path):
+def read_text(path, limit=5_000_000):
     with Path(path).open(encoding="utf-8", errors="replace") as stream:
-        value = stream.read(5_000_001)
-    if len(value) > 5_000_000:
+        value = stream.read(limit + 1)
+    if len(value) > limit:
         raise ValueError("report exceeds display limit")
     return value
 
@@ -144,6 +145,7 @@ HEADERS = {"operation": ("operation", ""), "pattern": ("pattern", ""), "size": (
            "mispred rate": ("mispred", "%"), "data source": ("source", ""), "type": ("type", "")}
 HEADERS.update({"spread(%)": ("spread", "%"), "operations": ("operations", ""),
                 "branches": ("branches", ""), "bytes": ("payload", "B")})
+HEADERS.update({"rate (gops)": ("rate", "GOPS"), "rate (tops)": ("rate", "TOPS")})
 
 
 def column(key, unit=""):
@@ -253,18 +255,20 @@ def build_module(name, reports, record=None):
         result.status = "passed"
         if "- Sampling source: shared-cache-latency-scan-v1" in text:
             result.conditions.append((ref("source"), ref("shared_cache_scan")))
-        if name == "inter_core" and "- Protocol: macos-observed-cpu-pairs-v1" in text:
+        if name == "inter_core" and "- Protocol: macos-observed-cpu-pairs-" in text:
             from intercore_observed import read_observed
             try:
-                observed = read_observed(json.loads(read_text(reports / "inter_core_observed.json")))
+                observed = read_observed(json.loads(read_text(reports / "inter_core_observed.json", 10_000_000)))
+                if "- Protocol: " + observed["protocol"] + "\n" not in text + "\n":
+                    raise ValueError("observed report protocol mismatch")
             except (OSError, ValueError, TypeError, KeyError):
                 result.status, result.reason = "invalid_report", "invalid_report"
                 return result
             ids, pairs = observed["ids"], observed["pairs"]
             matrix = [[pairs[i, j]["median"] if (i, j) in pairs else None for j in ids] for i in ids]
             result.notice = "observed_intercore_notice"
-            result.conditions = [(ref("protocol"), "macos-observed-cpu-pairs-v1"),
-                                 (ref("placement"), ref("qos")), (ref("samples"), 10)]
+            result.conditions = [(ref("protocol"), observed["protocol"]),
+                                 (ref("placement"), ref("qos")), (ref("samples"), observed["sample_count"])]
             result.kpis = [{"label": ref("observed_pair_coverage"),
                             "value": f'{observed["covered_pairs"]} / {observed["possible_pairs"]}', "unit": ""},
                            {"label": ref("observed_cpu_count"), "value": len(ids), "unit": ""},
@@ -428,8 +432,9 @@ def build_module(name, reports, record=None):
                 score = compute_mark_score(data)
                 result.kpis = [{"label": ref("single_points"), "value": score.single_points, "unit": "points"},
                                {"label": ref("multi_points"), "value": score.points, "unit": "points"},
-                               {"label": ref("integer"), "value": score.integer_gops, "unit": "Gop/s"},
-                               {"label": ref("fp64"), "value": score.fp64_gflops, "unit": "GFLOP/s"}]
+                               *[{"label": ref(kind), "value": throughput_value(rate)[0],
+                                  "unit": throughput_value(rate)[1]}
+                                 for kind, rate in (("integer", score.integer_gops), ("fp64", score.fp64_gflops))]]
                 policy = {"macos-qos-user-initiated": "qos", "linux-pinned": "pinned",
                           "windows-pinned-process-group": "process_group"}[score.placement_policy]
                 result.conditions = [(ref("protocol"), "ComputeMark v2 / " + score.sampling_protocol + " / " + score.scaling_protocol),
@@ -439,13 +444,13 @@ def build_module(name, reports, record=None):
                 if not score.stable:
                     result.notice = "unstable_score"
                 ns = score.thread_counts
-                for kind, rates, unit in [("integer", score.integer_scaling, "Gop/s"),
-                                          ("fp64", score.fp64_scaling, "GFLOP/s")]:
+                for kind, rates in [("integer", score.integer_scaling), ("fp64", score.fp64_scaling)]:
                     single = rates[0]
+                    factor, unit = throughput_scale(rates)
                     result.charts.append(Chart("scaling", "line", unit, ns,
-                        [{"label": ref(kind), "values": rates}], ns, "threads"))
+                        [{"label": ref(kind), "values": [rate * factor for rate in rates]}], ns, "threads"))
                     result.tables.append(Table("scaling", [column("threads"), column(kind, unit), column("speedup", "×")],
-                                               [[n, rate, rate / single] for n, rate in zip(ns, rates)]))
+                                               [[n, rate * factor, rate / single] for n, rate in zip(ns, rates)]))
                 for title, headers, rows in parsed:
                     if title == "Sampling Statistics":
                         result.tables.extend(sampling_tables(headers, rows))
@@ -488,6 +493,29 @@ def build_module(name, reports, record=None):
                     result.kpis.append({"label": ref(label), "value": statistics.median(finite), "unit": unit})
                 continue
             lower = [header.lower() for header in headers]
+            if name in {"cpu_alu", "cpu_float"} and any(row_gops(headers, row) is not None for row in rows):
+                rates = [row_gops(headers, row) for row in rows]
+                factor, unit = throughput_scale(rates)
+                # Keep metadata columns, replacing both legacy timing/rate columns
+                # with one throughput column. The archived report is not modified.
+                rate_headers = {"ops/sec", "op/s", "ns/op", "ns_per_op", "nsec/op",
+                                "rate (gops)", "rate (tops)", "gops", "tops"}
+                kept = [i for i, header in enumerate(lower) if header not in rate_headers]
+                previous_tables = len(result.tables)
+                add_generic(result, [headers[i] for i in kept], [[row[i] for i in kept] for row in rows])
+                if len(result.tables) == previous_tables:
+                    continue
+                table = result.tables[-1]
+                table.columns.insert(1, column("rate", unit))
+                for row, rate in zip(table.rows, rates):
+                    row.insert(1, rate * factor if rate is not None else None)
+                labels = [operation(row[0], i + 1) for i, row in enumerate(rows)]
+                result.charts.append(Chart(name, "bar", unit, labels,
+                    [{"label": ref("rate"), "values": [rate * factor if rate is not None else None for rate in rates]}]))
+                for label, rate in zip(labels[:4], rates[:4]):
+                    value, kpi_unit = throughput_value(rate)
+                    result.kpis.append({"label": label, "value": value, "unit": kpi_unit})
+                continue
             if name.startswith("cache_") and title == "Cache Bandwidth Test":
                 add_generic(result, headers, rows, "cache_bandwidth_test")
                 sizes = sorted({size_kib(row[0]) for row in rows if size_kib(row[0]) is not None})

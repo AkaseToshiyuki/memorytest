@@ -7,7 +7,7 @@
 [构建状态](https://github.com/AkaseToshiyuki/memorytest/actions) ·
 [测量方法](MEASUREMENT.md) · [开发与测试](TEST_LAYERS.md)
 
-当前版本：**0.1.1**。安装包见 Releases 页面。
+当前版本：**0.1.2**。安装包见 Releases 页面。
 
 ## 功能
 
@@ -21,6 +21,8 @@
 
 测试可单独运行或组合运行。缓存延迟与层级检测同时选中时共用一次扫描。
 核间热图显示整数标签，原始结果保留完整精度。
+整数、浮点及 ComputeMark 运算吞吐使用 GOPS／TOPS；低于 0.1 TOPS 时使用 GOPS。
+延迟、带宽及架构周期指标保留各自单位。
 
 ## 安装
 

@@ -245,8 +245,7 @@ def parse_cpu_alu(text: str) -> dict:
     headers, rows = tbl
     ipc_col = _col_index(headers, "ipc")
     if ipc_col is None:
-        # Fall back to last numeric column
-        ipc_col = len(headers) - 2  # skip "Data Source"
+        return out
 
     targets = {"add": "alu_add_ipc", "mul": "alu_mul_ipc", "div": "alu_div_ipc",
                "and": "alu_and_ipc", "or": "alu_or_ipc", "xor": "alu_xor_ipc"}
@@ -263,14 +262,12 @@ def parse_cpu_alu(text: str) -> dict:
 
 def parse_cpu_float(text: str) -> dict:
     """Pick ns/op for SIMD FAdd/FMul/FMA (4th column)."""
+    from performance_units import row_gops
     out = {}
     tbl = _find_data_table(text)
     if not tbl:
         return out
     headers, rows = tbl
-    ns_col = _col_index(headers, "ns/op", "ns_per_op", "nsec/op")
-    if ns_col is None:
-        ns_col = 3
 
     targets = {"simd fadd": "simd_fadd_ns", "simd fmul": "simd_fmul_ns",
                "simd fma":  "simd_fma_ns",  "simd dot":  "simd_dot_ns"}
@@ -278,7 +275,8 @@ def parse_cpu_float(text: str) -> dict:
         lbl = _row_label(row).lower()
         for tgt_lbl, key in targets.items():
             if lbl == tgt_lbl and key not in out:
-                v = _safe_float(row[ns_col])
+                rate = row_gops(headers, row)
+                v = 1 / rate if rate is not None and rate > 0 else None
                 if v is not None and 0.01 < v < 1000:
                     out[key] = v
                 break

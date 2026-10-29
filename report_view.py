@@ -4,6 +4,7 @@ import json
 from i18n import tr, display, default_language
 from presentation import THEMES, curve_color, plot_svg, module_category
 from result_model import GROUPS, load_results, system_data, split_legacy_result
+from app_version import VERSION
 
 
 def table_html(table, language):
@@ -79,7 +80,7 @@ html[data-language="en"] .language-block[lang="zh"],html[data-language="zh"] .la
 @media(max-width:640px){{main,.toolbar{{padding:14px}}.card{{padding:16px}}.kpi strong{{font-size:23px}}}}
 @media print{{.toolbar select,.toolbar label{{display:none}}.card{{break-inside:avoid}}}}
 </style></head><body><div class="toolbar"><strong>MemoryTest</strong><label><span id="language-label">{tr('language', language)}</span><select id="language"><option value="zh">{tr('zh', language)}</option><option value="en">{tr('en', language)}</option></select></label><label><span id="theme-label">{tr('theme', language)}</span><select id="theme"><option value="dark">{tr('dark', language)}</option><option value="light">{tr('light', language)}</option></select></label></div>
-{panels}<footer class="muted">MemoryTest · 0.1.1</footer>
+{panels}<footer class="muted">MemoryTest · {VERSION}</footer>
 <script>
 (()=>{{"use strict";const words={json.dumps(vocabulary, ensure_ascii=True)};const root=document.documentElement;const key={json.dumps(preferences_key)};
 const lang=document.getElementById('language'), theme=document.getElementById('theme');

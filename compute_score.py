@@ -242,7 +242,8 @@ def main():
         print(f"Source: {path}\nComputeMark v2 ({score.scope})")
         print(f"Single-thread: {score.single_points:,} points")
         print(f"Multi-thread: {score.points:,} points at {score.threads} threads")
-        print(f"Measured: {score.integer_gops:.3f} Gop/s integer; {score.fp64_gflops:.3f} GFLOP/s scalar FP64")
+        from performance_units import format_throughput
+        print(f"Measured: {format_throughput(score.integer_gops)} integer; {format_throughput(score.fp64_gflops)} scalar FP64")
         print(f"Profile: {score.profile}; compiler: {score.compiler}; max repeat spread: {score.max_spread_pct:.2f}%")
         print(f"Placement: {score.placement_policy}; exact CPU affinity: {score.affinity_verified}")
         print(f"Sampling: {score.sampling_protocol}, {score.sample_count} samples; do not mix sampling protocols in rankings")

@@ -11,6 +11,7 @@
 #include "util.h"
 #define BENCH_DEFAULT_SAMPLES 10
 #include "bench_protocol.h"
+#include "performance_units.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -229,14 +230,21 @@ int run_cpu_alu_test(void) {
     report_write_system_info(report);
     report_section(report, "CPU ALU Performance Test Results");
     bench_report_conditions(report);
-    report_write(report, "| Operation | Time(ms) | Ops/sec | ns/op | Operations | Spread(%%) | Data Source |\n");
-    report_write(report, "|-----------|----------|---------|-------|------------|-----------|-------------|\n");
+    double min_gops = (double)results[0].repetitions * 256 / results[0].elapsed_ns;
+    for (unsigned i = 1; i < count; ++i) {
+        double gops = (double)results[i].repetitions * 256 / results[i].elapsed_ns;
+        if (gops < min_gops) min_gops = gops;
+    }
+    double scale = min_gops >= 100.0 ? 0.001 : 1.0;
+    report_write(report, "| Operation | Time(ms) | Rate (%s) | Operations | Spread(%%) | Data Source |\n", performance_rate_unit(min_gops));
+    report_write(report, "|-----------|----------|------------|------------|-----------|-------------|\n");
     for (unsigned i = 0; i < count; ++i) {
         double operations = (double)results[i].repetitions * 256;
-        double ns = (double)results[i].elapsed_ns / operations;
-        printf("%s: %.6f ns/op (%d samples)\n", tests[i].name, ns, BENCH_SAMPLES);
-        report_write(report, "| %s | %.9f | %.0f | %.6f | %.0f | %.3f | Measured |\n",
-                     tests[i].name, (double)results[i].elapsed_ns / 1e6, 1e9 / ns, ns,
+        double gops = operations / results[i].elapsed_ns;
+        printf("%s: %.6g %s (%d samples)\n", tests[i].name,
+               performance_rate_value(gops), performance_rate_unit(gops), BENCH_SAMPLES);
+        report_write(report, "| %s | %.9f | %.9g | %.0f | %.3f | Measured |\n",
+                     tests[i].name, (double)results[i].elapsed_ns / 1e6, gops * scale,
                      operations, bench_spread(&results[i]));
     }
     report_section(report, "Notes");

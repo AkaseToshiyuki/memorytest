@@ -6,6 +6,7 @@
 #include "util.h"
 #define BENCH_DEFAULT_SAMPLES 10
 #include "bench_protocol.h"
+#include "performance_units.h"
 #include <math.h>
 #if defined(HAVE_SSE2_INTRINSICS)
 #include <emmintrin.h>
@@ -174,15 +175,22 @@ int run_cpu_float_test(void) {
     report_write_system_info(report);
     report_section(report, "Floating Point Operations Test Results");
     bench_report_conditions(report);
-    report_write(report, "| Operation | Type | Time(ms) | Ops/sec | ns/op | Operations | Spread(%%) |\n");
-    report_write(report, "|-----------|------|----------|---------|-------|------------|-----------|\n");
+    double min_gops = (double)results[0].repetitions * float_tests[0].operations / results[0].elapsed_ns;
+    for (unsigned i = 1; i < count; ++i) {
+        double gops = (double)results[i].repetitions * float_tests[i].operations / results[i].elapsed_ns;
+        if (gops < min_gops) min_gops = gops;
+    }
+    double scale = min_gops >= 100.0 ? 0.001 : 1.0;
+    report_write(report, "| Operation | Type | Time(ms) | Rate (%s) | Operations | Spread(%%) |\n", performance_rate_unit(min_gops));
+    report_write(report, "|-----------|------|----------|------------|------------|-----------|\n");
     for (unsigned i = 0; i < count; ++i) {
         double operations = (double)results[i].repetitions * float_tests[i].operations;
-        double ns = (double)results[i].elapsed_ns / operations;
-        printf("%s: %.6f ns/op (%d samples)\n", float_tests[i].name, ns, BENCH_SAMPLES);
-        report_write(report, "| %s | %s | %.9f | %.0f | %.6f | %.0f | %.3f |\n",
+        double gops = operations / results[i].elapsed_ns;
+        printf("%s: %.6g %s (%d samples)\n", float_tests[i].name,
+               performance_rate_value(gops), performance_rate_unit(gops), BENCH_SAMPLES);
+        report_write(report, "| %s | %s | %.9f | %.9g | %.0f | %.3f |\n",
                      float_tests[i].name, float_tests[i].type, (double)results[i].elapsed_ns / 1e6,
-                     1e9 / ns, ns, operations, bench_spread(&results[i]));
+                     gops * scale, operations, bench_spread(&results[i]));
     }
     report_section(report, "Notes");
     report_write(report, "Named add/mul/div/sqrt/libm calls count once per scalar lane; multiply-add counts twice.\n"

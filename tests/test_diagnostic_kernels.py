@@ -126,6 +126,11 @@ class DiagnosticKernelTests(unittest.TestCase):
                 self.assertAlmostEqual(value, reference, delta=max(1e-11, abs(reference) * (2e-7 if is_float else 2e-13)), msg=name)
             self.assertAlmostEqual(float(total), 3 * sum(expected), delta=max(1e-9, abs(float(total)) * 3e-7), msg=name)
 
+    def test_native_rate_conversion_boundary(self):
+        values = [line.split() for line in self.invoke("alu", "units").splitlines()]
+        self.assertEqual([(float(value), unit) for value, unit in values],
+                         [(99.9, "GOPS"), (0.1, "TOPS"), (1.25, "TOPS")])
+
     def test_report_nonzero_median_and_exact_work_divisors(self):
         for kind in ("branch", "float", "alu"):
             with tempfile.TemporaryDirectory(dir=self.root) as folder:
@@ -145,17 +150,26 @@ class DiagnosticKernelTests(unittest.TestCase):
                     self.assertEqual(record["statistics"]["count"], count)
                 self.assertNotIn("Estimated", text)
                 self.assertNotIn("Mispred Rate", text)
+                measured_rows = 0
                 for _, headers, rows in tables(text):
-                    latency = "ns/branch" if kind == "branch" else "ns/op"
-                    if latency not in headers:
+                    measure = "ns/branch" if kind == "branch" else next(
+                        (header for header in ("Rate (GOPS)", "Rate (TOPS)") if header in headers), None)
+                    if measure not in headers:
                         continue
                     for row in rows:
-                        ns, milliseconds = float(row[headers.index(latency)]), float(row[headers.index("Time(ms)")])
+                        measured_rows += 1
+                        value, milliseconds = float(row[headers.index(measure)]), float(row[headers.index("Time(ms)")])
                         work = float(row[headers.index("Branches" if kind == "branch" else "Operations")])
-                        self.assertGreater(ns, 0)
+                        self.assertGreater(value, 0)
                         self.assertGreater(milliseconds, 0)
-                        self.assertAlmostEqual(ns, milliseconds * 1e6 / work, delta=1e-6)
+                        if kind == "branch":
+                            self.assertAlmostEqual(value, milliseconds * 1e6 / work, delta=1e-6)
+                        else:
+                            expected_gops = work / (milliseconds * 1e6)
+                            self.assertAlmostEqual(value * (1000 if measure == "Rate (TOPS)" else 1),
+                                                   expected_gops, delta=expected_gops * 1e-7)
                         self.assertGreaterEqual(float(row[headers.index("Spread(%)")]), 0)
+                self.assertGreater(measured_rows, 0)
                 self.assertEqual(build_module(f"cpu_{kind}", reports).status, "passed")
 
     def test_alu_iteration_counts_and_uint64_reference(self):

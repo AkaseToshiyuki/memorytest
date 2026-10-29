@@ -644,36 +644,27 @@ def create_cpu_chart(report_path, output_path, chart_type='alu'):
         with open(report_path, 'r') as f:
             content = f.read()
 
-        ops, ns_ops = [], []
-        in_table = False
-
-        for line in content.split('\n'):
-            if 'ns/op' in line and '|' in line:
-                in_table = True
-                continue
-            if in_table and '|' in line:
-                parts = [p.strip() for p in line.split('|')]
-                if len(parts) >= 5 and parts[1] not in ['Operation', '---', '-', '']:
-                    try:
-                        op = parts[1]
-                        ns_op = float(parts[4])
-                        ops.append(op)
-                        ns_ops.append(ns_op)
-                    except:
-                        pass
-            elif in_table and line.strip() == '':
-                break
+        from result_model import tables
+        from performance_units import row_gops, throughput_scale
+        ops, rates = [], []
+        for _, headers, rows in tables(content):
+            for row in rows:
+                rate = row_gops(headers, row)
+                if rate is not None:
+                    ops.append(row[0])
+                    rates.append(rate)
 
         if not ops:
             return None
 
         fig, ax = plt.subplots(figsize=(10, 6))
         y_pos = range(len(ops))
-        ax.barh(y_pos, ns_ops, color='steelblue')
+        factor, unit = throughput_scale(rates)
+        ax.barh(y_pos, [rate * factor for rate in rates], color='steelblue')
         ax.set_yticks(y_pos)
         ax.set_yticklabels(ops)
-        ax.set_xlabel('ns/op')
-        ax.set_title(f'CPU {chart_type.upper()} Operations - Latency')
+        ax.set_xlabel(unit)
+        ax.set_title(f'CPU {chart_type.upper()} Operations - Throughput')
         ax.grid(True, alpha=0.3, axis='x')
         ax.invert_yaxis()
 
@@ -1015,7 +1006,7 @@ def extract_cpu_alu_data(report_path):
     try:
         text = open(report_path).read()
         for line in text.splitlines():
-            if not in_table and 'ns/op' in line and '|' in line:
+            if not in_table and ('ns/op' in line or 'Rate (GOPS)' in line or 'Rate (TOPS)' in line) and '|' in line:
                 in_table = True
                 continue
             if in_table:
@@ -1051,7 +1042,7 @@ def extract_cpu_float_data(report_path):
     try:
         text = open(report_path).read()
         for line in text.splitlines():
-            if not in_table and 'ns/op' in line and '|' in line:
+            if not in_table and ('ns/op' in line or 'Rate (GOPS)' in line or 'Rate (TOPS)' in line) and '|' in line:
                 in_table = True
                 continue
             if in_table:

@@ -45,7 +45,7 @@ COMPARABILITY = {
 }
 COMPARABILITY["cpu_multi"] += " Sampling repeat10-outer-iqr3-v1 is distinct from repeat20-outer-iqr3-v1 and legacy5-median; kernel/operations/formula are unchanged."
 COMPARABILITY["cpu_multi"] += " New runs measure powers-of-two-plus-max-v1 thread stages; legacy endpoint-only archives retain their measured endpoints."
-COMPARABILITY["inter_core"] += " Linux intercore-v3 retains 20 samples per direction/metric; macOS retains ten endpoint-consistent samples per reported observed pair."
+COMPARABILITY["inter_core"] += " Linux intercore-v3 retains 20 samples per direction/metric; macOS observed-pairs-v2 retains 32 endpoint-consistent samples per reported observed pair with a default 20-second budget."
 COMPARABILITY["memory_bandwidth"] += " Latency v1 adds ordered 64-B write and copy transactions, not isolated store/DRAM latency; copy footprint includes both arrays."
 for _child, (_parent, _mode) in SUBTESTS.items():
     COMPARABILITY[_child] = COMPARABILITY[_parent]

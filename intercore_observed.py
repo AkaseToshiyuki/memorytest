@@ -6,12 +6,14 @@ of uninterrupted placement; this data must never enter pinned topology ranks.
 from collections import defaultdict
 from sample_statistics import summarize
 
-PROTOCOL = "macos-observed-cpu-pairs-v1"
+PROTOCOL = "macos-observed-cpu-pairs-v2"
+PROTOCOLS = {"macos-observed-cpu-pairs-v1": (10, 20000), PROTOCOL: (32, 64000)}
 
 
 def read_observed(data):
-    if not isinstance(data, dict) or data.get("schema_version") != 1 or data.get("protocol") != PROTOCOL:
+    if not isinstance(data, dict) or data.get("schema_version") != 1 or type(data.get("protocol")) is not str or data["protocol"] not in PROTOCOLS:
         raise ValueError("unsupported observed-pair protocol")
+    samples, max_attempts = PROTOCOLS[data["protocol"]]
     expected = {"os": "Darwin", "affinity_verified": False, "migration_verification": "endpoints-only",
                 "cpu_id_source": "TPIDR_EL0-low12-private-ABI", "timer": "CLOCK_MONOTONIC",
                 "qos": "user-initiated", "qos_verified": True, "background_load": "other-workers-runnable"}
@@ -19,13 +21,13 @@ def read_observed(data):
         if type(data.get(key)) is not type(value) or data[key] != value:
             raise ValueError(f"invalid observation condition: {key}")
     for key, low, high in (("logical_cpus", 2, 64), ("workers", 2, 64), ("budget_ms", 1, 30000),
-                           ("sample_count", 10, 10), ("round_trips", 2000, 2000), ("warmup_round_trips", 128, 128)):
+                           ("sample_count", samples, samples), ("round_trips", 2000, 2000), ("warmup_round_trips", 128, 128)):
         if type(data.get(key)) is not int or not low <= data[key] <= high:
             raise ValueError(f"invalid {key}")
     if data["workers"] > data["logical_cpus"]:
         raise ValueError("worker count exceeds logical CPUs")
     attempts = data.get("attempts")
-    if not isinstance(attempts, list) or not 1 <= len(attempts) <= 20000:
+    if not isinstance(attempts, list) or not 1 <= len(attempts) <= max_attempts:
         raise ValueError("missing or excessive attempts")
     groups, counts, observed = defaultdict(list), defaultdict(int), set()
     for attempt in attempts:
@@ -62,19 +64,20 @@ def read_observed(data):
         observed.update((start[0], end[0]))
         values = groups[start[0], end[0]]
         if reason == "quota":
-            if len(values) != 10:
-                raise ValueError("quota skipped before ten samples")
+            if len(values) != samples:
+                raise ValueError("quota skipped before the required samples")
         else:
-            if len(values) == 10:
-                raise ValueError("more than ten retained samples")
+            if len(values) == samples:
+                raise ValueError("too many retained samples")
             values.append(elapsed / (2 * data["round_trips"]))
     if len(observed) > data["logical_cpus"]:
         raise ValueError("CPU observation count exceeds reported CPU count")
-    pairs = {key: summarize(values) for key, values in groups.items() if len(values) == 10}
+    pairs = {key: summarize(values) for key, values in groups.items() if len(values) == samples}
     if type(data.get("covered_pairs")) is not int or data["covered_pairs"] != len(pairs):
         raise ValueError("incorrect coverage")
     if not pairs:
-        raise ValueError("no pair has ten usable samples")
+        raise ValueError("no pair has the required usable samples")
     return {"ids": sorted(observed), "pairs": pairs, "attempt_counts": dict(counts),
             "covered_pairs": len(pairs), "possible_pairs": data["logical_cpus"] * (data["logical_cpus"] - 1),
-            "workers": data["workers"], "logical_cpus": data["logical_cpus"]}
+            "workers": data["workers"], "logical_cpus": data["logical_cpus"],
+            "protocol": data["protocol"], "sample_count": samples}

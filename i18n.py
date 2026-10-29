@@ -499,6 +499,8 @@ def display(value, language="en"):
     if value is None:
         return tr("unavailable", language)
     if isinstance(value, float):
+        if 0 < abs(value) < 1:
+            return f"{value:.4g}"
         return f"{value:,.3f}".rstrip("0").rstrip(".")
     if type(value) is int:
         return f"{value:,}"

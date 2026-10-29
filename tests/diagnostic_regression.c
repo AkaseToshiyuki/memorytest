@@ -8,8 +8,15 @@
 #include "../src/test_cpu_float.c"
 #endif
 #undef main
+#include "../src/performance_units.h"
 
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "units")) {
+        const double rates[] = {99.9, 100.0, 1250.0};
+        for (unsigned i = 0; i < 3; ++i)
+            printf("%.9g %s\n", performance_rate_value(rates[i]), performance_rate_unit(rates[i]));
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "report")) {
         global_system_config.detected = 1;
         global_system_config.cpu_cores = global_system_config.cpu_cores_physical = 1;
